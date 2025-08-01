@@ -66,10 +66,10 @@ temp/
 # User-specific settings and data
 user_settings/
 
-# Large data files (exclude from future commits)
-demonstration/
-media/*.webm
-media/*.xlsx
+# Large data files (now handled by Git LFS)
+# demonstration/ - REMOVED: Now tracked with Git LFS
+# media/*.webm - REMOVED: Now tracked with Git LFS
+# media/*.xlsx - REMOVED: Now tracked with Git LFS
 
 # Generated files
 *.txt
