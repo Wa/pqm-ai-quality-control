@@ -20,6 +20,7 @@ def render_help_documentation_tab(session_id):
         section_mappings = {
             "概述": "overview",
             "一致性检查": "consistency_check",
+            "设计制程检查": "parameters_check",
             "文件要素检查": "file_elements_check",
             "文件齐套性检查": "file_completeness_check",
             "历史问题规避": "history_issues_avoidance",
@@ -41,6 +42,8 @@ def render_help_documentation_tab(session_id):
             render_overview_section()
         elif selected_section == "一致性检查":
             render_consistency_check_section()
+        elif selected_section == "设计制程检查":
+            render_parameters_check_section()
         elif selected_section == "文件要素检查":
             render_file_elements_check_section()
         elif selected_section == "文件齐套性检查":
@@ -68,6 +71,11 @@ def render_overview_section():
     - 控制计划与目标文件的一致性验证
     - 特殊特性符号的自动识别和匹配
     - 智能提示和差异分析
+    
+    **⚙️ 设计制程检查**
+    - 设计参数合理性验证
+    - 制程参数匹配度分析
+    - 设计到制造转换验证
     
     **📋 文件要素检查**
     - APQP文档完整性检查
@@ -132,6 +140,69 @@ def render_consistency_check_section():
     - Word文档 (.docx, .doc)
     - PDF文件 (.pdf)
     - 文本文件 (.txt)
+    """)
+
+def render_parameters_check_section():
+    """Render the parameters check section."""
+    st.header("⚙️ 设计制程检查")
+    
+    st.markdown("""
+    设计制程检查功能用于验证产品设计参数和制造工艺参数的合理性，确保设计到制造的转换过程符合质量要求。
+    
+    ### 📋 功能特点
+    
+    **🔍 设计参数验证**
+    - 产品规格参数合理性检查
+    - 设计公差范围验证
+    - 材料选择适用性分析
+    - 设计标准符合性检查
+    
+    **⚙️ 制程参数分析**
+    - 工艺参数合理性验证
+    - 设备能力匹配度分析
+    - 制程稳定性评估
+    - 工艺路线优化建议
+    
+    **📊 参数关联性分析**
+    - 设计-制程参数映射关系
+    - 关键参数识别和监控
+    - 风险点预警和提示
+    - 参数影响度分析
+    
+    ### 🎯 检查内容
+    
+    **📐 几何参数**
+    - 尺寸公差合理性
+    - 形位公差验证
+    - 表面粗糙度要求
+    - 装配间隙分析
+    
+    **🔧 工艺参数**
+    - 加工精度要求
+    - 设备能力匹配
+    - 工艺路线合理性
+    - 质量控制点设置
+    
+    **📈 性能参数**
+    - 功能性能验证
+    - 可靠性指标
+    - 耐久性要求
+    - 安全性标准
+    
+    ### 🎯 使用流程
+    
+    1. **上传文件**: 上传设计文件和制程文件
+    2. **参数识别**: 系统自动识别关键参数
+    3. **合理性检查**: 验证参数设置的合理性
+    4. **关联分析**: 分析设计-制程参数关系
+    5. **结果输出**: 生成检查报告和建议
+    
+    ### 📁 支持的文件类型
+    
+    - 设计图纸 (.dwg, .dxf)
+    - 3D模型文件 (.stp, .igs)
+    - 工艺文件 (.xlsx, .docx)
+    - 技术规范文档 (.pdf)
     """)
 
 def render_file_elements_check_section():
