@@ -32,10 +32,12 @@ demonstration/
 
 ### Option 1: Download from Release Assets (Recommended)
 
-1. Go to the [GitHub Releases](https://github.com/Wa/pqm-ai-quality-control/releases)
-2. Download the latest `demo-files.zip`
+1. Go to the [GitHub Release v1.0.0](https://github.com/Wa/pqm-ai-quality-control/releases/tag/v1.0.0)
+2. Download `demo-files.zip`
 3. Extract to your project root directory
 4. Verify the `demonstration/` folder is created
+
+**Direct Download Link**: [demo-files.zip](https://github.com/Wa/pqm-ai-quality-control/releases/download/v1.0.0/demo-files.zip)
 
 ### Option 2: Manual Setup
 
