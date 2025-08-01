@@ -305,25 +305,21 @@ def render_settings_tab(session_id):
                     # No st.rerun() needed - settings are saved and will apply to future runs
                     # This prevents interrupting any currently running analysis
             
-            # Model Information - with error handling
-            try:
-                model_info = get_ollama_model_info(selected_model)
-                if model_info:
-                    with st.expander("模型详细信息", expanded=False):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**模型名称:** {model_info.get('name', 'N/A')}")
-                            st.write(f"**模型大小:** {model_info.get('size', 'N/A')} bytes")
-                            st.write(f"**修改时间:** {model_info.get('modified_at', 'N/A')}")
-                        with col2:
-                            st.write(f"**参数数量:** {model_info.get('parameter_size', 'N/A')}")
-                            st.write(f"**量化级别:** {model_info.get('quantization_level', 'N/A')}")
-            except Exception as e:
-                st.warning(f"无法获取模型详细信息: {e}")
-            else:
-                st.warning("无法获取可用模型列表，请检查Ollama服务器连接")
-                # Don't override the user's selection when model list can't be fetched
-                # Keep the current selected_model value
+                # Model Information - with error handling
+                try:
+                    model_info = get_ollama_model_info(selected_model)
+                    if model_info:
+                        with st.expander("模型详细信息", expanded=False):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**模型名称:** {model_info.get('name', 'N/A')}")
+                                st.write(f"**模型大小:** {model_info.get('size', 'N/A')} bytes")
+                                st.write(f"**修改时间:** {model_info.get('modified_at', 'N/A')}")
+                            with col2:
+                                st.write(f"**参数数量:** {model_info.get('parameter_size', 'N/A')}")
+                                st.write(f"**量化级别:** {model_info.get('quantization_level', 'N/A')}")
+                except Exception as e:
+                    st.warning(f"无法获取模型详细信息: {e}")
             
             # Ollama Parameters
             st.subheader("Ollama参数设置")
