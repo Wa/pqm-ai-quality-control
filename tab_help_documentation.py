@@ -10,9 +10,11 @@ def render_help_documentation_tab(session_id):
     
     st.title("📚 帮助文档")
     
-    # Create a sidebar for navigation
-    with st.sidebar:
-        st.header("📖 文档导航")
+    # Create two columns: sidebar navigation and main content
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.markdown("### 📋 目录")
         
         # Define section mappings
         section_mappings = {
@@ -27,12 +29,13 @@ def render_help_documentation_tab(session_id):
         }
         
         # Get the selected section
-        selected_section = st.sidebar.selectbox(
+        selected_section = st.selectbox(
             "选择章节",
             list(section_mappings.keys()),
             key=f"help_section_{session_id}"
         )
-        
+    
+    with col2:
         # Display content based on selection
         if selected_section == "概述":
             render_overview_section()
