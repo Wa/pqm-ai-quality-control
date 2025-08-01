@@ -66,6 +66,11 @@ temp/
 # User-specific settings and data
 user_settings/
 
+# Large data files (exclude from future commits)
+demonstration/
+media/*.webm
+media/*.xlsx
+
 # Generated files
 *.txt
 !requirements.txt
