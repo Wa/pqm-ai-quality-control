@@ -41,7 +41,7 @@ def render_file_completeness_check_tab(session_id):
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("文件齐套性审查")
+    st.title("文件齐套性检查")
     
     # Define APQP stage directories (with session subfolders) - using centralized config
     base_dir = str(CONFIG["directories"]["apqp_files"])

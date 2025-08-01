@@ -91,7 +91,7 @@ git commit -m "Add demonstration files with LFS"
 After setup, verify the demonstration works:
 
 1. Run the application: `streamlit run main.py`
-2. Go to the "一致性审查" tab
+2. Go to the "一致性检查" tab
 3. Click "演示" button
 4. Verify demo files are loaded and analysis works
 

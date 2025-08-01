@@ -7,7 +7,7 @@ def render_file_elements_check_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
     
-    st.title("文件要素审查")
+    st.title("文件要素检查")
     # Simple two-column layout
     col_left, col_right = st.columns([1, 1])
     

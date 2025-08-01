@@ -18,13 +18,13 @@ if username:
     session_id = get_user_session_id(username)
     
     # Main application tabs
-    一致性审查_tab, 文件要素审查_tab, 文件齐套性审查_tab, 历史问题规避_tab, 设置_tab, 帮助文档_tab = st.tabs(["一致性审查", "文件要素审查", "文件齐套性审查", "历史问题规避", "设置", "帮助文档"])
+    一致性检查_tab, 文件要素检查_tab, 文件齐套性检查_tab, 历史问题规避_tab, 设置_tab, 帮助文档_tab = st.tabs(["一致性检查", "文件要素检查", "文件齐套性检查", "历史问题规避", "设置", "帮助文档"])
 
-    with 一致性审查_tab:
+    with 一致性检查_tab:
         render_consistency_check_tab(session_id)
-    with 文件要素审查_tab:
+    with 文件要素检查_tab:
         render_file_elements_check_tab(session_id)
-    with 文件齐套性审查_tab:
+    with 文件齐套性检查_tab:
         render_file_completeness_check_tab(session_id)
     with 历史问题规避_tab:
         render_history_issues_avoidance_tab(session_id)
