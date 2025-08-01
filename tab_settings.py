@@ -297,13 +297,13 @@ def render_settings_tab(session_id):
                 # Update the model session state when selection changes
                 if selected_model != current_model:
                     st.session_state[f'ollama_model_{session_id}'] = selected_model
-                    st.success(f"已切换到: {selected_model}")
+                    st.success(f"✅ 已切换到: {selected_model} (将在下次运行时生效)")
                     
                     # Save settings to file for persistence
                     save_current_settings(session_id)
                     
-                    # Force a rerun to ensure the configuration overview updates
-                    st.rerun()
+                    # No st.rerun() needed - settings are saved and will apply to future runs
+                    # This prevents interrupting any currently running analysis
             
             # Model Information - with error handling
             try:
@@ -552,8 +552,8 @@ def render_settings_tab(session_id):
             st.session_state['logged_in'] = False
             st.session_state['username'] = None
             st.session_state['user_session_id'] = None
-            st.success("已退出登录")
-            st.rerun()
+            st.success("✅ 已退出登录，正在返回登录页面...")
+            st.rerun()  # Necessary to return to login screen
         
         st.divider()
         
