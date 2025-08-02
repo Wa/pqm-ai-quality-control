@@ -1,0 +1,76 @@
+import requests
+import os
+from typing import Dict, List, Optional
+import streamlit as st
+
+class BackendClient:
+    """Client for communicating with the FastAPI backend"""
+    
+    def __init__(self, base_url: str = "http://localhost:8001"):
+        self.base_url = base_url
+    
+    def health_check(self) -> bool:
+        """Check if backend is running"""
+        try:
+            response = requests.get(f"{self.base_url}/health", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def upload_file(self, session_id: str, file_type: str, file_path: str) -> Dict:
+        """Upload a file to the backend"""
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'file': f}
+                data = {'session_id': session_id, 'file_type': file_type}
+                response = requests.post(f"{self.base_url}/upload-file", files=files, data=data)
+                return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def delete_file(self, session_id: str, file_path: str) -> Dict:
+        """Delete a file via the backend"""
+        try:
+            data = {"session_id": session_id, "file_path": file_path}
+            response = requests.delete(f"{self.base_url}/delete-file", json=data)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def list_files(self, session_id: str, file_type: Optional[str] = None) -> Dict:
+        """List files via the backend"""
+        try:
+            params = {"file_type": file_type} if file_type else {}
+            response = requests.get(f"{self.base_url}/list-files/{session_id}", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def clear_files(self, session_id: str) -> Dict:
+        """Clear all files via the backend"""
+        try:
+            data = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/clear-files", json=data)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def file_exists(self, session_id: str, file_path: str) -> Dict:
+        """Check if a file exists via the backend"""
+        try:
+            params = {"file_path": file_path}
+            response = requests.get(f"{self.base_url}/file-exists/{session_id}", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+# Global backend client instance
+@st.cache_resource
+def get_backend_client():
+    """Get cached backend client instance"""
+    return BackendClient()
+
+def is_backend_available() -> bool:
+    """Check if FastAPI backend is available"""
+    client = get_backend_client()
+    return client.health_check() 

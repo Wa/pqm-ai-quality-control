@@ -1,12 +1,15 @@
 import streamlit as st
 import os
+import json
+import time
 from datetime import datetime
-from util import PromptGenerator, handle_file_upload, ensure_session_dirs, get_user_session, start_analysis, reset_user_session, complete_analysis, mark_demo_files_copied
+from pathlib import Path
+from util import get_user_session, reset_user_session, start_analysis, complete_analysis, get_user_session_id, PromptGenerator
 from config import CONFIG
+from backend_client import get_backend_client, is_backend_available
 from ollama import Client as OllamaClient
 import openai
 import re
-import json
 
 def render_file_upload_section(session_dirs, session_id):
     """Render the file upload section with proper keys to prevent duplication."""
@@ -558,14 +561,34 @@ def render_special_symbols_check_tab(session_id):
         st.markdown("---")
         st.markdown("### 批量操作")
         
+        # Check if backend is available
+        backend_available = is_backend_available()
+        
         if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
-            try:
-                # Clear all session directories
-                for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                    for file in os.listdir(dir_path):
-                        file_path = os.path.join(dir_path, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                st.success("已清空所有文件")
-            except Exception as e:
-                st.error(f"清空失败: {e}") 
+            if backend_available:
+                # Use FastAPI backend
+                client = get_backend_client()
+                result = client.clear_files(session_id)
+                
+                if result.get("status") == "success":
+                    st.success(f"✅ {result.get('message', '已清空所有文件')}")
+                else:
+                    st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
+            else:
+                # Fallback to direct file operations
+                try:
+                    # Clear all session directories
+                    for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
+                        for file in os.listdir(dir_path):
+                            file_path = os.path.join(dir_path, file)
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                    st.success("已清空所有文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        
+        # Show backend status
+        if backend_available:
+            st.info("🔧 使用 FastAPI 后端处理文件操作")
+        else:
+            st.warning("⚠️ FastAPI 后端不可用，使用本地文件操作") 
