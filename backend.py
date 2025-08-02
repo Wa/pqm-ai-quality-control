@@ -11,7 +11,7 @@ app = FastAPI(title="PQM AI Backend", description="File operations backend for P
 # Enable CORS for Streamlit frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],  # Streamlit default ports
+    allow_origins=["http://localhost:8888", "http://127.0.0.1:8888", "http://localhost:8501", "http://127.0.0.1:8501"],  # Streamlit default ports
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

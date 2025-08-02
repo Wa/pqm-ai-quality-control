@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from util import get_user_session, reset_user_session, start_analysis, complete_analysis, get_user_session_id, PromptGenerator
+from util import get_user_session, reset_user_session, start_analysis, complete_analysis, get_user_session_id, PromptGenerator, ensure_session_dirs, handle_file_upload
 from config import CONFIG
 from backend_client import get_backend_client, is_backend_available
 from ollama import Client as OllamaClient

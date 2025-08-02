@@ -63,14 +63,14 @@ def start_frontend():
         # Start Streamlit in a subprocess
         frontend_process = subprocess.Popen([
             sys.executable, "-m", "streamlit", "run", "main.py",
-            "--server.port", "8501",
+            "--server.port", "8888",
             "--server.address", "localhost"
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         # Wait a moment for frontend to start
         time.sleep(5)
         
-        print("✅ Streamlit frontend is running on http://localhost:8501")
+        print("✅ Streamlit frontend is running on http://localhost:8888")
         return frontend_process
         
     except Exception as e:

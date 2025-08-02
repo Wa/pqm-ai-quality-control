@@ -39,9 +39,9 @@ python backend.py
 **Terminal 2 - Start Streamlit Frontend:**
 ```bash
 conda activate PQM_AI
-streamlit run main.py --server.port 8501
+streamlit run main.py --server.port 8888
 ```
-✅ Frontend will be available at: http://localhost:8501
+✅ Frontend will be available at: http://localhost:8888
 
 ### Option 2: Automated Start (All-in-One)
 
@@ -60,7 +60,7 @@ curl http://localhost:8001/health
 Expected response: `{"status":"healthy"}`
 
 ### Check Frontend:
-Open browser and go to: http://localhost:8501
+Open browser and go to: http://localhost:8888
 
 ## 📚 API Documentation
 
@@ -82,7 +82,7 @@ If you get "address already in use" errors:
 ```bash
 # Find processes using the ports
 lsof -i :8001
-lsof -i :8501
+lsof -i :8888
 
 # Kill the processes
 pkill -f "python backend.py"
@@ -127,7 +127,7 @@ PQM_AI/
 
 ✅ **Backend Running:** You see "FastAPI backend is running on http://localhost:8001"
 
-✅ **Frontend Running:** You can access http://localhost:8501 in your browser
+✅ **Frontend Running:** You can access http://localhost:8888 in your browser
 
 ✅ **FastAPI Integration:** You see "🔧 使用 FastAPI 后端处理文件操作" in the app
 
@@ -144,7 +144,7 @@ PQM_AI/
 
 1. **Activate environment:** `conda activate PQM_AI`
 2. **Start backend:** `python backend.py`
-3. **Start frontend:** `streamlit run main.py --server.port 8501`
+3. **Start frontend:** `streamlit run main.py --server.port 8888`
 4. **Make changes** to your code
 5. **Test changes** in the browser
 6. **Stop services:** `Ctrl+C` when done
