@@ -31,14 +31,14 @@ class FileInfo(BaseModel):
     modified_time: str
 
 # Base directories
-BASE_DIR = "user_sessions"
+BASE_DIR = ""  # Use root directory instead of "user_sessions"
 
 def get_session_dirs(session_id: str) -> Dict[str, str]:
     """Get session directories for a user"""
     return {
-        "cp": os.path.join(BASE_DIR, session_id, "CP_files"),
-        "target": os.path.join(BASE_DIR, session_id, "target_files"), 
-        "graph": os.path.join(BASE_DIR, session_id, "graph_files")
+        "cp": os.path.join(BASE_DIR, "CP_files", session_id),
+        "target": os.path.join(BASE_DIR, "target_files", session_id), 
+        "graph": os.path.join(BASE_DIR, "graph_files", session_id)
     }
 
 def ensure_session_dirs(session_id: str):
@@ -124,7 +124,7 @@ async def list_files(session_id: str, file_type: str = None):
                         files.append(FileInfo(
                             name=filename,
                             size=stat.st_size,
-                            modified_time=stat.st_mtime
+                            modified_time=str(stat.st_mtime)
                         ))
             
             result[dir_name] = files
