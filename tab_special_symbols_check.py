@@ -42,244 +42,229 @@ def remove_think_blocks(text):
 
 def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     """Run the complete analysis workflow."""
-    # Check if workflow is already running to prevent duplicates
-    workflow_key = f"workflow_running_{session_id}"
-    if workflow_key in st.session_state:
-        st.warning("⚠️ Analysis workflow is already running. Please wait...")
+    session = get_user_session(session_id)
+    cp_session_dir = session_dirs["cp"]
+    target_session_dir = session_dirs["target"]
+    generated_session_dir = session_dirs["generated"]
+    st.info("🔍 开始特殊特性符号检查分析，请稍候...")
+    
+    # Get target files
+    target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
+    if not target_files_list:
+        st.warning("请先上传待检查文件")
         return
     
-    # Mark workflow as running
-    st.session_state[workflow_key] = True
+    target_file_path = os.path.join(target_session_dir, target_files_list[0])
+    output_file = os.path.join(generated_session_dir, "prompt_output.txt")
     
-    try:
-        session = get_user_session(session_id)
-        cp_session_dir = session_dirs["cp"]
-        target_session_dir = session_dirs["target"]
-        generated_session_dir = session_dirs["generated"]
-        st.info("🔍 开始特殊特性符号检查分析，请稍候...")
+    # Check if prompt_output.txt already exists (from demo or previous run)
+    if not os.path.exists(output_file):
+        # Generate prompt only if it doesn't exist
+        prompt_generator.generate_prompt(cp_session_dir, target_file_path, output_file)
+    
+    prompts = parse_prompts(output_file)
+    result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
+    
+    # Get LLM backend from session state (default to ollama)
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
+    
+    # Initialize LLM clients based on selected backend
+    if llm_backend == "ollama":
+        ollama_client = OllamaClient(host=CONFIG["llm"]["ollama_host"])
         
-        # Get target files
-        target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
-        if not target_files_list:
-            st.warning("请先上传待检查文件")
-            return
-        
-        target_file_path = os.path.join(target_session_dir, target_files_list[0])
-        output_file = os.path.join(generated_session_dir, "prompt_output.txt")
-        
-        # Check if prompt_output.txt already exists (from demo or previous run)
-        if not os.path.exists(output_file):
-            # Generate prompt only if it doesn't exist
-            prompt_generator.generate_prompt(cp_session_dir, target_file_path, output_file)
-        
-        prompts = parse_prompts(output_file)
-        result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
-        
-        # Get LLM backend from session state (default to ollama)
-        llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
-        
-        # Initialize LLM clients based on selected backend
-        if llm_backend == "ollama":
-            ollama_client = OllamaClient(host=CONFIG["llm"]["ollama_host"])
+        # Streaming generator for Ollama
+        def llm_stream_chat(prompt):
+            session['ollama_history'].append({"role": "user", "content": prompt})
+            response_text = ""
             
-            # Streaming generator for Ollama
-            def llm_stream_chat(prompt):
-                session['ollama_history'].append({"role": "user", "content": prompt})
-                response_text = ""
-                
-                # Get Ollama parameters from session state
-                model = st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"])
-                temperature = st.session_state.get(f'ollama_temperature_{session_id}', 0.7)
-                top_p = st.session_state.get(f'ollama_top_p_{session_id}', 0.9)
-                top_k = st.session_state.get(f'ollama_top_k_{session_id}', 40)
-                repeat_penalty = st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1)
-                num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 4096)
-                num_thread = st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                
-                for chunk in ollama_client.chat(
-                    model=model,
-                    messages=session['ollama_history'],
-                    stream=True,
-                    options={
-                        "temperature": temperature,
-                        "top_p": top_p,
-                        "top_k": top_k,
-                        "repeat_penalty": repeat_penalty,
-                        "num_ctx": num_ctx,
-                        "num_thread": num_thread
-                    }
-                ):
-                    new_text = chunk['message']['content']
-                    response_text += new_text
-                    yield new_text
-                session['ollama_history'].append({"role": "assistant", "content": response_text})
+            # Get Ollama parameters from session state
+            model = st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"])
+            temperature = st.session_state.get(f'ollama_temperature_{session_id}', 0.7)
+            top_p = st.session_state.get(f'ollama_top_p_{session_id}', 0.9)
+            top_k = st.session_state.get(f'ollama_top_k_{session_id}', 40)
+            repeat_penalty = st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1)
+            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 4096)
+            num_thread = st.session_state.get(f'ollama_num_thread_{session_id}', 4)
+            
+            for chunk in ollama_client.chat(
+                model=model,
+                messages=session['ollama_history'],
+                stream=True,
+                options={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repeat_penalty": repeat_penalty,
+                    "num_ctx": num_ctx,
+                    "num_thread": num_thread
+                }
+            ):
+                new_text = chunk['message']['content']
+                response_text += new_text
+                yield new_text
+            session['ollama_history'].append({"role": "assistant", "content": response_text})
 
-        elif llm_backend == "openai":
-            openai.base_url = CONFIG["llm"]["openai_base_url"]
-            openai.api_key = CONFIG["llm"]["openai_api_key"]
+    elif llm_backend == "openai":
+        openai.base_url = CONFIG["llm"]["openai_base_url"]
+        openai.api_key = CONFIG["llm"]["openai_api_key"]
+        
+        # Streaming generator for OpenAI
+        def llm_stream_chat(prompt):
+            session['openai_history'].append({"role": "user", "content": prompt})
+            response_text = ""
             
-            # Streaming generator for OpenAI
-            def llm_stream_chat(prompt):
-                session['openai_history'].append({"role": "user", "content": prompt})
-                response_text = ""
-                
-                # Get OpenAI parameters from session state
-                model = st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"])
-                temperature = st.session_state.get(f'openai_temperature_{session_id}', 0.7)
-                top_p = st.session_state.get(f'openai_top_p_{session_id}', 1.0)
-                max_tokens = st.session_state.get(f'openai_max_tokens_{session_id}', 2048)
-                presence_penalty = st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0)
-                frequency_penalty = st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-                logit_bias_str = st.session_state.get(f'openai_logit_bias_{session_id}', '{}')
-                
-                # Parse logit_bias if provided
-                logit_bias = {}
-                try:
-                    if logit_bias_str and logit_bias_str != '{}':
-                        logit_bias = json.loads(logit_bias_str)
-                except json.JSONDecodeError:
-                    pass
-                
-                stream = openai.chat.completions.create(
-                    model=model,
-                    messages=session['openai_history'],
-                    stream=True,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    presence_penalty=presence_penalty,
-                    frequency_penalty=frequency_penalty,
-                    logit_bias=logit_bias if logit_bias else None
-                )
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content or ""
-                    response_text += delta
-                    yield delta
-                session['openai_history'].append({"role": "assistant", "content": response_text})
+            # Get OpenAI parameters from session state
+            model = st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"])
+            temperature = st.session_state.get(f'openai_temperature_{session_id}', 0.7)
+            top_p = st.session_state.get(f'openai_top_p_{session_id}', 1.0)
+            max_tokens = st.session_state.get(f'openai_max_tokens_{session_id}', 2048)
+            presence_penalty = st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0)
+            frequency_penalty = st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
+            logit_bias_str = st.session_state.get(f'openai_logit_bias_{session_id}', '{}')
+            
+            # Parse logit_bias if provided
+            logit_bias = {}
+            try:
+                if logit_bias_str and logit_bias_str != '{}':
+                    logit_bias = json.loads(logit_bias_str)
+            except json.JSONDecodeError:
+                pass
+            
+            stream = openai.chat.completions.create(
+                model=model,
+                messages=session['openai_history'],
+                stream=True,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty,
+                logit_bias=logit_bias if logit_bias else None
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                response_text += delta
+                yield delta
+            session['openai_history'].append({"role": "assistant", "content": response_text})
 
-        # Add timestamp to make keys even more unique
-        import time
-        timestamp = int(time.time())
-        
-        # Display analysis results
-        for prompt_idx, prompt in enumerate(prompts, 1):
-            col_prompt, col_response = st.columns([1, 1])
-            with col_prompt:
-                # Create bounded container for auto-scrolling prompt
-                prompt_container = st.container(height=400)
+    # Add timestamp to make keys even more unique
+    import time
+    timestamp = int(time.time())
+    
+    # Display analysis results
+    for prompt_idx, prompt in enumerate(prompts, 1):
+        col_prompt, col_response = st.columns([1, 1])
+        with col_prompt:
+            # Create bounded container for auto-scrolling prompt
+            prompt_container = st.container(height=400)
+            
+            with prompt_container:
+                # Use chat message structure for prompt display
+                with st.chat_message("user"):
+                    prompt_placeholder = st.empty()
+                    
+                    # Simulated streaming for prompt (10 words at a time)
+                    words = prompt.split()
+                    streamed_prompt = ""
+                    for chunk_idx in range(0, len(words), 10):
+                        chunk_words = words[chunk_idx:chunk_idx + 10]
+                        streamed_prompt += " ".join(chunk_words) + " "
+                        prompt_placeholder.text(streamed_prompt.strip())
                 
-                with prompt_container:
-                    # Use chat message structure for prompt display
-                    with st.chat_message("user"):
-                        prompt_placeholder = st.empty()
-                        
-                        # Simulated streaming for prompt (10 words at a time)
-                        words = prompt.split()
-                        streamed_prompt = ""
-                        for chunk_idx in range(0, len(words), 10):
-                            chunk_words = words[chunk_idx:chunk_idx + 10]
-                            streamed_prompt += " ".join(chunk_words) + " "
-                            prompt_placeholder.text(streamed_prompt.strip())
-                    
-                    # Add disabled chat input for auto-scroll with unique key including timestamp
-                    st.chat_input(placeholder="", disabled=True, key=f"workflow_prompt_{timestamp}_{prompt_idx}_{session_id}")
+                # Add disabled chat input for auto-scroll with unique key including timestamp
+                st.chat_input(placeholder="", disabled=True, key=f"workflow_prompt_{timestamp}_{prompt_idx}_{session_id}")
+        
+        with col_response:
+            # Create bounded container for auto-scrolling response
+            response_container = st.container(height=400)
             
-            with col_response:
-                # Create bounded container for auto-scrolling response
-                response_container = st.container(height=400)
+            with response_container:
+                # Use chat message structure for response display
+                with st.chat_message("assistant"):
+                    response_placeholder = st.empty()
+                    
+                    # Stream the response using selected LLM
+                    response_text = ""
+                    for chunk in llm_stream_chat(prompt):
+                        response_text += chunk
+                        response_placeholder.write(response_text)
+                    
+                    # Write response_text to file (overwrite for first, append for others), filtering <think>...</think>
+                    cleaned_response = remove_think_blocks(response_text)
+                    if prompt_idx == 1:
+                        with open(result_file, "w", encoding="utf-8") as f:
+                            f.write('提取以下文字中有关"特殊特性符号（/、 ★和☆）不一致"的地方，如果下文字未提及任何"特殊特性符号（/、 ★和☆）不一致"的地方，则输出"比对结果为全部一致，但是有些参数的特殊性作符号在控制计划中没有定义"\n')
+                            f.write(cleaned_response)
+                    else:
+                        with open(result_file, "a", encoding="utf-8") as f:
+                            f.write(cleaned_response)
                 
-                with response_container:
-                    # Use chat message structure for response display
-                    with st.chat_message("assistant"):
-                        response_placeholder = st.empty()
-                        
-                        # Stream the response using selected LLM
-                        response_text = ""
-                        for chunk in llm_stream_chat(prompt):
-                            response_text += chunk
-                            response_placeholder.write(response_text)
-                        
-                        # Write response_text to file (overwrite for first, append for others), filtering <think>...</think>
-                        cleaned_response = remove_think_blocks(response_text)
-                        if prompt_idx == 1:
-                            with open(result_file, "w", encoding="utf-8") as f:
-                                f.write('提取以下文字中有关"特殊特性符号（/、 ★和☆）不一致"的地方，如果下文字未提及任何"特殊特性符号（/、 ★和☆）不一致"的地方，则输出"比对结果为全部一致，但是有些参数的特殊性作符号在控制计划中没有定义"\n')
-                                f.write(cleaned_response)
-                        else:
-                            with open(result_file, "a", encoding="utf-8") as f:
-                                f.write(cleaned_response)
-                    
-                    # Add disabled chat input for auto-scroll with unique key including timestamp
-                    st.chat_input(placeholder="", disabled=True, key=f"workflow_response_{timestamp}_{prompt_idx}_{session_id}")
+                # Add disabled chat input for auto-scroll with unique key including timestamp
+                st.chat_input(placeholder="", disabled=True, key=f"workflow_response_{timestamp}_{prompt_idx}_{session_id}")
+    
+    # --- 特殊特性符号不一致结论 (symbol_check_final) ---
+    # Read the content of 2_symbol_check_result.txt as the new prompt
+    symbol_check_final_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
+    if os.path.exists(symbol_check_final_file):
+        with open(symbol_check_final_file, "r", encoding="utf-8") as f:
+            symbol_check_final_prompt = f.read()
         
-        # --- 特殊特性符号不一致结论 (symbol_check_final) ---
-        # Read the content of 2_symbol_check_result.txt as the new prompt
-        symbol_check_final_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
-        if os.path.exists(symbol_check_final_file):
-            with open(symbol_check_final_file, "r", encoding="utf-8") as f:
-                symbol_check_final_prompt = f.read()
-            
-            # Display the prompt and response side by side
-            col_final_prompt, col_final_response = st.columns([1, 1])
-            with col_final_prompt:
-                st.subheader("特殊特性符号不一致结论 - 提示词:")
-                prompt_container = st.container(height=400)
-                with prompt_container:
-                    with st.chat_message("user"):
-                        prompt_placeholder = st.empty()
-                        prompt_placeholder.text(symbol_check_final_prompt)
-                    
-                    st.chat_input(placeholder="", disabled=True, key=f"workflow_final_prompt_{timestamp}_{session_id}")
-            
-            with col_final_response:
-                st.subheader("特殊特性符号不一致结论 - AI回复:")
-                response_container = st.container(height=400)
-                with response_container:
-                    with st.chat_message("assistant"):
-                        response_placeholder = st.empty()
-                        
-                        # Stream the final response using selected LLM
-                        symbol_check_final_response = ""
-                        if llm_backend == "ollama":
-                            for chunk in ollama_client.chat(
-                                model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                                messages=[{"role": "user", "content": symbol_check_final_prompt}],
-                                stream=True,
-                                options={
-                                    "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                                    "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                                    "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                                    "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                    "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
-                                    "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                                }
-                            ):
-                                new_text = chunk['message']['content']
-                                symbol_check_final_response += new_text
-                                response_placeholder.write(symbol_check_final_response)
-                        elif llm_backend == "openai":
-                            stream = openai.chat.completions.create(
-                                model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                                messages=[{"role": "user", "content": symbol_check_final_prompt}],
-                                stream=True,
-                                temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                                top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                                max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                                presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-                            )
-                            for chunk in stream:
-                                delta = chunk.choices[0].delta.content or ""
-                                symbol_check_final_response += delta
-                                response_placeholder.write(symbol_check_final_response)
-                    
-                    st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
-        st.info("✅ 分析完成")
+        # Display the prompt and response side by side
+        col_final_prompt, col_final_response = st.columns([1, 1])
+        with col_final_prompt:
+            st.subheader("特殊特性符号不一致结论 - 提示词:")
+            prompt_container = st.container(height=400)
+            with prompt_container:
+                with st.chat_message("user"):
+                    prompt_placeholder = st.empty()
+                    prompt_placeholder.text(symbol_check_final_prompt)
+                
+                st.chat_input(placeholder="", disabled=True, key=f"workflow_final_prompt_{timestamp}_{session_id}")
         
-    finally:
-        # Clear the workflow running flag
-        if workflow_key in st.session_state:
-            del st.session_state[workflow_key]
+        with col_final_response:
+            st.subheader("特殊特性符号不一致结论 - AI回复:")
+            response_container = st.container(height=400)
+            with response_container:
+                with st.chat_message("assistant"):
+                    response_placeholder = st.empty()
+                    
+                    # Stream the final response using selected LLM
+                    symbol_check_final_response = ""
+                    if llm_backend == "ollama":
+                        for chunk in ollama_client.chat(
+                            model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
+                            messages=[{"role": "user", "content": symbol_check_final_prompt}],
+                            stream=True,
+                            options={
+                                "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
+                                "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
+                                "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
+                                "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
+                                "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
+                            }
+                        ):
+                            new_text = chunk['message']['content']
+                            symbol_check_final_response += new_text
+                            response_placeholder.write(symbol_check_final_response)
+                    elif llm_backend == "openai":
+                        stream = openai.chat.completions.create(
+                            model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
+                            messages=[{"role": "user", "content": symbol_check_final_prompt}],
+                            stream=True,
+                            temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
+                            top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
+                            max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                            presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
+                            frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
+                        )
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta.content or ""
+                            symbol_check_final_response += delta
+                            response_placeholder.write(symbol_check_final_response)
+                
+                st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
+    st.info("✅ 分析完成")
 
 def render_special_symbols_check_tab(session_id):
     # Handle None session_id (user not logged in)
@@ -572,23 +557,15 @@ def render_special_symbols_check_tab(session_id):
         # Bulk operations
         st.markdown("---")
         st.markdown("### 批量操作")
-        col_bulk1, col_bulk2 = st.columns(2)
         
-        with col_bulk1:
-            if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
-                try:
-                    # Clear all session directories
-                    for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                        for file in os.listdir(dir_path):
-                            file_path = os.path.join(dir_path, file)
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                    st.success("已清空所有文件")
-                except Exception as e:
-                    st.error(f"清空失败: {e}")
-        
-        with col_bulk2:
-            if st.button("🔄 刷新文件列表", key=f"refresh_file_list_{session_id}"):
-                # No st.rerun() needed - Streamlit will automatically refresh the display
-                # when the button is clicked, without interrupting the running analysis
-                pass 
+        if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
+            try:
+                # Clear all session directories
+                for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
+                    for file in os.listdir(dir_path):
+                        file_path = os.path.join(dir_path, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                st.success("已清空所有文件")
+            except Exception as e:
+                st.error(f"清空失败: {e}") 
