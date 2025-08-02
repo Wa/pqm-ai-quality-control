@@ -652,10 +652,4 @@ def render_special_symbols_check_tab(session_id):
                     st.success("已清空所有文件")
                     st.rerun()  # Force UI refresh
                 except Exception as e:
-                    st.error(f"清空失败: {e}")
-        
-        # Show backend status
-        if backend_available:
-            st.info("🔧 使用 FastAPI 后端处理文件操作")
-        else:
-            st.warning("⚠️ FastAPI 后端不可用，使用本地文件操作") 
+                    st.error(f"清空失败: {e}") 
