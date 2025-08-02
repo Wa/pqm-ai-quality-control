@@ -411,6 +411,44 @@ def render_special_symbols_check_tab(session_id):
     with col_info:
         # --- File Manager Module ---
         def get_file_list(folder):
+            # Try to use FastAPI backend first
+            if is_backend_available():
+                try:
+                    client = get_backend_client()
+                    # Determine file type from folder path
+                    if "CP_files" in folder:
+                        file_type = "cp"
+                    elif "target_files" in folder:
+                        file_type = "target"
+                    elif "graph_files" in folder:
+                        file_type = "graph"
+                    else:
+                        # Fallback to direct file system access
+                        return get_file_list_direct(folder)
+                    
+                    # Get files from backend
+                    result = client.list_files(session_id, file_type)
+                    if file_type in result:
+                        files = []
+                        for file_info in result[file_type]:
+                            files.append({
+                                'name': file_info['name'],
+                                'size': file_info['size'],
+                                'modified': float(file_info['modified_time']),
+                                'path': os.path.join(folder, file_info['name'])
+                            })
+                        # Use stable sorting by name first, then by modification time
+                        return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
+                    else:
+                        return []
+                except Exception as e:
+                    st.warning(f"后端连接失败，使用本地文件系统: {e}")
+                    return get_file_list_direct(folder)
+            else:
+                return get_file_list_direct(folder)
+        
+        def get_file_list_direct(folder):
+            """Direct file system access as fallback"""
             if not os.path.exists(folder):
                 return []
             files = []
@@ -481,8 +519,18 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
+                                    if is_backend_available():
+                                        # Use FastAPI backend
+                                        client = get_backend_client()
+                                        result = client.delete_file(session_id, file_info['path'])
+                                        if result.get("status") == "success":
+                                            st.success(f"已删除: {file_info['name']}")
+                                        else:
+                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
+                                    else:
+                                        # Fallback to direct file system access
+                                        os.remove(file_info['path'])
+                                        st.success(f"已删除: {file_info['name']}")
                                 except Exception as e:
                                     st.error(f"删除失败: {e}")
             else:
@@ -512,8 +560,18 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
+                                    if is_backend_available():
+                                        # Use FastAPI backend
+                                        client = get_backend_client()
+                                        result = client.delete_file(session_id, file_info['path'])
+                                        if result.get("status") == "success":
+                                            st.success(f"已删除: {file_info['name']}")
+                                        else:
+                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
+                                    else:
+                                        # Fallback to direct file system access
+                                        os.remove(file_info['path'])
+                                        st.success(f"已删除: {file_info['name']}")
                                 except Exception as e:
                                     st.error(f"删除失败: {e}")
             else:
@@ -543,8 +601,18 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
+                                    if is_backend_available():
+                                        # Use FastAPI backend
+                                        client = get_backend_client()
+                                        result = client.delete_file(session_id, file_info['path'])
+                                        if result.get("status") == "success":
+                                            st.success(f"已删除: {file_info['name']}")
+                                        else:
+                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
+                                    else:
+                                        # Fallback to direct file system access
+                                        os.remove(file_info['path'])
+                                        st.success(f"已删除: {file_info['name']}")
                                 except Exception as e:
                                     st.error(f"删除失败: {e}")
             else:
