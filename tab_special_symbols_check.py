@@ -56,6 +56,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
         cp_session_dir = session_dirs["cp"]
         target_session_dir = session_dirs["target"]
         generated_session_dir = session_dirs["generated"]
+        st.info("🔍 开始特殊特性符号检查分析，请稍候...")
         
         # Get target files
         target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
@@ -273,13 +274,14 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                                 response_placeholder.write(symbol_check_final_response)
                     
                     st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
-    
+        st.info("✅ 分析完成")
+        
     finally:
         # Clear the workflow running flag
         if workflow_key in st.session_state:
             del st.session_state[workflow_key]
 
-def render_consistency_check_tab(session_id):
+def render_special_symbols_check_tab(session_id):
     # Handle None session_id (user not logged in)
     if session_id is None:
         st.warning("请先登录以使用此功能。")

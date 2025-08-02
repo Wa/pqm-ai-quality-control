@@ -48,6 +48,7 @@ Quality_control_assistant/
 ├── file_completeness_check.py  # File completeness check tab
 ├── file_elements_check.py      # File elements check tab
 ├── history_issues_avoidance.py # History issues avoidance tab
+├── tab_special_symbols_check.py   # Special symbols check tab
 ├── requirements.txt       # Python dependencies
 ├── README.md             # This file
 ├── CP_files/             # Control plan files directory

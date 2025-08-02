@@ -1,5 +1,5 @@
 import streamlit as st
-from tab_consistency_check import render_consistency_check_tab
+from tab_special_symbols_check import render_special_symbols_check_tab
 from tab_parameters_check import render_parameters_check_tab
 from tab_file_elements_check import render_file_elements_check_tab
 from tab_file_completeness_check import render_file_completeness_check_tab
@@ -19,10 +19,10 @@ if username:
     session_id = get_user_session_id(username)
     
     # Main application tabs
-    一致性检查_tab, 设计制程检查_tab, 文件要素检查_tab, 文件齐套性检查_tab, 历史问题规避_tab, 设置_tab, 帮助文档_tab = st.tabs(["一致性检查", "设计制程检查", "文件要素检查", "文件齐套性检查", "历史问题规避", "设置", "帮助文档"])
+    特殊特性符号检查_tab, 设计制程检查_tab, 文件要素检查_tab, 文件齐套性检查_tab, 历史问题规避_tab, 设置_tab, 帮助文档_tab = st.tabs(["特殊特性符号检查", "设计制程检查", "文件要素检查", "文件齐套性检查", "历史问题规避", "设置", "帮助文档"])
 
-    with 一致性检查_tab:
-        render_consistency_check_tab(session_id)
+    with 特殊特性符号检查_tab:
+        render_special_symbols_check_tab(session_id)
     with 设计制程检查_tab:
         render_parameters_check_tab(session_id)
     with 文件要素检查_tab:
@@ -36,6 +36,4 @@ if username:
     with 帮助文档_tab:
         render_help_documentation_tab(session_id)
 else:
-    # User is not logged in - login widget is already shown by render_login_widget()
-    # No need to show additional message since the login form is already displayed
     pass 

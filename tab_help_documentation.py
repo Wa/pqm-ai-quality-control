@@ -19,7 +19,7 @@ def render_help_documentation_tab(session_id):
         # Define section mappings
         section_mappings = {
             "概述": "overview",
-            "一致性检查": "consistency_check",
+            "特殊特性符号检查": "special_symbols_check",
             "设计制程检查": "parameters_check",
             "文件要素检查": "file_elements_check",
             "文件齐套性检查": "file_completeness_check",
@@ -40,8 +40,8 @@ def render_help_documentation_tab(session_id):
         # Display content based on selection
         if selected_section == "概述":
             render_overview_section()
-        elif selected_section == "一致性检查":
-            render_consistency_check_section()
+        elif selected_section == "特殊特性符号检查":
+            render_special_symbols_check_section()
         elif selected_section == "设计制程检查":
             render_parameters_check_section()
         elif selected_section == "文件要素检查":
@@ -62,64 +62,55 @@ def render_overview_section():
     st.header("📖 系统概述")
     
     st.markdown("""
-    PQM_AI质量控制系统是一个专为汽车行业APQP（Advanced Product Quality Planning）流程设计的智能文档分析工具。
-    它利用大语言模型（LLM）技术，帮助质量工程师和项目经理快速、准确地检查和分析APQP相关文档。
+    ## 🎯 系统概述
     
-    ### 🎯 主要功能
+    PQM AI 质量控制系统是一个基于人工智能的文档分析工具，专门用于APQP（Advanced Product Quality Planning）文档的质量控制。
     
-    **🔍 一致性检查**
-    - 控制计划与目标文件的一致性验证
-    - 特殊特性符号的自动识别和匹配
-    - 智能提示和差异分析
+    ### 🔍 核心功能
     
-    **⚙️ 设计制程检查**
-    - 设计参数合理性验证
-    - 制程参数匹配度分析
-    - 设计到制造转换验证
+    **特殊特性符号检查**
+    - 智能识别和验证控制计划中的特殊特性符号
+    - 确保符号使用符合标准规范
+    - 提供详细的符号使用报告
     
-    **📋 文件要素检查**
-    - APQP文档完整性检查
-    - 必要要素的自动识别
-    - 规范性验证
+    **设计制程检查**
+    - 检查设计参数和制程参数的合理性
+    - 验证工艺参数的合规性
+    - 提供参数优化建议
     
-    **📁 文件齐套性检查**
-    - APQP阶段文件完整性检查
-    - 缺失文件自动识别
-    - 阶段要求对比分析
+    **文件要素检查**
+    - 检查APQP文档的完整性
+    - 验证必要要素的存在
+    - 确保文档结构符合标准
     
-    ### 🚀 技术特点
+    **文件齐套性检查**
+    - 检查相关文档的配套性
+    - 验证文档间的关联性
+    - 确保文档体系的完整性
     
-    - **智能分析**: 基于大语言模型的自然语言处理
-    - **多格式支持**: 支持Excel、Word、PDF等多种格式
-    - **实时处理**: 快速响应，即时反馈
-    - **用户友好**: 直观的界面设计，易于操作
-    - **多用户支持**: 支持多用户同时使用
-    
-    ### 🎯 适用场景
-    
-    - 汽车行业APQP文档检查
-    - 质量控制流程优化
-    - 项目管理效率提升
-    - 合规性验证
+    **历史问题规避**
+    - 基于历史数据识别潜在问题
+    - 提供预防性建议
+    - 帮助避免重复性错误
     """)
 
-def render_consistency_check_section():
-    """Render the consistency check section."""
-    st.header("🔍 一致性检查")
+def render_special_symbols_check_section():
+    """Render the special symbols check section."""
+    st.header("🔍 特殊特性符号检查")
     
     st.markdown("""
-    一致性检查是系统的核心功能，用于检查控制计划（Control Plan）与目标文件之间的一致性。
+    特殊特性符号检查功能用于识别和验证控制计划（Control Plan）中的特殊特性符号（★、☆、/），确保其使用符合标准规范。
     
     ### 📋 功能特点
     
     **🔍 智能识别**
-    - 自动识别特殊特性符号（★、☆、/）
-    - 智能匹配控制计划与目标文件
-    - 支持多种文件格式
+    - 自动识别控制计划中的特殊特性符号（★、☆、/）
+    - 支持多种文件格式（Excel、Word、PDF）
+    - 高精度匹配和验证
     
     **📊 详细分析**
-    - 提供详细的一致性分析报告
-    - 高亮显示差异和不一致之处
+    - 提供详细的符号使用报告
+    - 高亮显示不符合规范的符号
     - 智能建议和优化方案
     
     **⚡ 高效处理**
@@ -129,7 +120,7 @@ def render_consistency_check_section():
     
     ### 🎯 使用流程
     
-    1. **上传文件**: 上传控制计划文件和目标文件
+    1. **上传文件**: 上传控制计划文件
     2. **开始分析**: 点击"开始"按钮启动分析
     3. **查看结果**: 在结果区域查看详细分析
     4. **导出报告**: 可导出分析报告供后续使用

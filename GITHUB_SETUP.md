@@ -69,6 +69,7 @@ PQM_AI/
 ├── tab_history_issues_avoidance.py   # History issues avoidance tab
 ├── tab_settings.py                   # Settings tab
 ├── tab_help_documentation.py         # Help documentation tab
+├── tab_special_symbols_check.py          # Special symbols check tab
 ├── requirements.txt                  # Python dependencies
 ├── README.md                         # Project documentation
 ├── .gitignore                        # Git ignore rules
