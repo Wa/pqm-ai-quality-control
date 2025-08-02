@@ -393,10 +393,8 @@ def render_special_symbols_check_tab(session_id):
                 reset_user_session(session_id)
                 st.rerun()
             
-            # Check if we need to run analysis or display existing results
+            # Check if we need to run analysis
             target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
-            result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
-            
             if target_files_list:
                 if session['process_started'] and not session['analysis_completed']:
                     # Run the analysis workflow in full width within the main column
@@ -407,10 +405,6 @@ def render_special_symbols_check_tab(session_id):
                 else:
                     # Files exist but process wasn't explicitly started
                     st.info("检测到待检查文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
-            elif os.path.exists(result_file) and session['analysis_completed']:
-                # Target files are gone but analysis results exist - re-display them
-                st.info("📋 重新显示分析结果...")
-                run_analysis_workflow(session_id, session_dirs, prompt_generator)
             else:
                 st.warning("请先上传待检查文件")
 
