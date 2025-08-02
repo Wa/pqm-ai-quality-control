@@ -65,9 +65,8 @@ class BackendClient:
             return {"status": "error", "message": str(e)}
 
 # Global backend client instance
-@st.cache_resource
 def get_backend_client():
-    """Get cached backend client instance"""
+    """Get backend client instance"""
     return BackendClient()
 
 def is_backend_available() -> bool:
