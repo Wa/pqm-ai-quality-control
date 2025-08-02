@@ -637,6 +637,7 @@ def render_special_symbols_check_tab(session_id):
                 
                 if result.get("status") == "success":
                     st.success(f"✅ {result.get('message', '已清空所有文件')}")
+                    st.rerun()  # Force UI refresh
                 else:
                     st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
             else:
@@ -649,6 +650,7 @@ def render_special_symbols_check_tab(session_id):
                             if os.path.isfile(file_path):
                                 os.remove(file_path)
                     st.success("已清空所有文件")
+                    st.rerun()  # Force UI refresh
                 except Exception as e:
                     st.error(f"清空失败: {e}")
         
