@@ -237,72 +237,78 @@ def render_file_completeness_check_tab(session_id):
             ]
             
             for stage_name, stage_folder in stages:
-                if os.path.exists(stage_folder) and any(os.listdir(stage_folder)):
-                    # Generate prompt for this stage
-                    prompt = generate_stage_prompt(stage_name, stage_folder, stage_requirements[stage_name])
-                    
-                    # Save prompt to file
-                    prompt_file = os.path.join(generated_session_dir, f"prompt_{stage_name}.txt")
-                    with open(prompt_file, "w", encoding="utf-8") as f:
-                        f.write(prompt)
-                    
-                    st.divider()
-                    
-                    # Display the prompt and response side by side
-                    col_prompt, col_response = st.columns([1, 1])
-                    with col_prompt:
-                        st.subheader(f"{stage_name} - 提示词:")
-                        prompt_container = st.container(height=400)
-                        with prompt_container:
-                            with st.chat_message("user"):
-                                prompt_placeholder = st.empty()
-                                prompt_placeholder.text(prompt)
-                            
-                            st.chat_input(placeholder="", disabled=True, key=f"file_completeness_prompt_chat_input_{stage_name}_{session_id}")
-                    
-                    with col_response:
-                        st.subheader(f"{stage_name} - AI回复:")
-                        response_container = st.container(height=400)
-                        with response_container:
-                            with st.chat_message("assistant"):
-                                response_placeholder = st.empty()
+                if os.path.exists(stage_folder):
+                    if any(os.listdir(stage_folder)):
+                        # Stage has files - run full LLM analysis
+                        # Generate prompt for this stage
+                        prompt = generate_stage_prompt(stage_name, stage_folder, stage_requirements[stage_name])
+                        
+                        # Save prompt to file
+                        prompt_file = os.path.join(generated_session_dir, f"prompt_{stage_name}.txt")
+                        with open(prompt_file, "w", encoding="utf-8") as f:
+                            f.write(prompt)
+                        
+                        st.divider()
+                        
+                        # Display the prompt and response side by side
+                        col_prompt, col_response = st.columns([1, 1])
+                        with col_prompt:
+                            st.subheader(f"{stage_name} - 提示词:")
+                            prompt_container = st.container(height=400)
+                            with prompt_container:
+                                with st.chat_message("user"):
+                                    prompt_placeholder = st.empty()
+                                    prompt_placeholder.text(prompt)
                                 
-                                # Stream the response using selected LLM
-                                response_text = ""
-                                if llm_backend == "ollama":
-                                    for chunk in ollama_client.chat(
-                                        model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                                        messages=[{"role": "user", "content": prompt}],
-                                        stream=True,
-                                        options={
-                                            "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                                            "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                                            "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                                            "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
-                                            "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                                        }
-                                    ):
-                                        new_text = chunk['message']['content']
-                                        response_text += new_text
-                                        response_placeholder.write(response_text)
-                                elif llm_backend == "openai":
-                                    stream = openai.chat.completions.create(
-                                        model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                                        messages=[{"role": "user", "content": prompt}],
-                                        stream=True,
-                                        temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                                        top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                                        max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                                        presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                        frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-                                    )
-                                    for chunk in stream:
-                                        delta = chunk.choices[0].delta.content or ""
-                                        response_text += delta
-                                        response_placeholder.write(response_text)
-                                
-                                st.chat_input(placeholder="", disabled=True, key=f"file_completeness_response_chat_input_{stage_name}_{session_id}")
+                                st.chat_input(placeholder="", disabled=True, key=f"file_completeness_prompt_chat_input_{stage_name}_{session_id}")
+                        
+                        with col_response:
+                            st.subheader(f"{stage_name} - AI回复:")
+                            response_container = st.container(height=400)
+                            with response_container:
+                                with st.chat_message("assistant"):
+                                    response_placeholder = st.empty()
+                                    
+                                    # Stream the response using selected LLM
+                                    response_text = ""
+                                    if llm_backend == "ollama":
+                                        for chunk in ollama_client.chat(
+                                            model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
+                                            messages=[{"role": "user", "content": prompt}],
+                                            stream=True,
+                                            options={
+                                                "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
+                                                "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
+                                                "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
+                                                "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+                                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
+                                                "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
+                                            }
+                                        ):
+                                            new_text = chunk['message']['content']
+                                            response_text += new_text
+                                            response_placeholder.write(response_text)
+                                    elif llm_backend == "openai":
+                                        stream = openai.chat.completions.create(
+                                            model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
+                                            messages=[{"role": "user", "content": prompt}],
+                                            stream=True,
+                                            temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
+                                            top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
+                                            max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                                            presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
+                                            frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
+                                        )
+                                        for chunk in stream:
+                                            delta = chunk.choices[0].delta.content or ""
+                                            response_text += delta
+                                            response_placeholder.write(response_text)
+                                    
+                                    st.chat_input(placeholder="", disabled=True, key=f"file_completeness_response_chat_input_{stage_name}_{session_id}")
+                    else:
+                        # Stage has no files - show simple message
+                        st.divider()
+                        st.info(f"📁 {stage_name}文件夹为空，因此该阶段的所有必需文件均缺失。")
             
             # Mark analysis as completed
             if not session['analysis_completed']:
