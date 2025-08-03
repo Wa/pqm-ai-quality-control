@@ -94,24 +94,7 @@ def render_file_completeness_check_tab(session_id):
                 if files_c:
                     handle_file_upload(files_c, session_dirs["Stage_C"])
                     st.success(f"已上传 {len(files_c)} 个C样阶段文件")
-        with col_right:
-            st.markdown("#### 已上传文件列表")
-            for stage, folder in [
-                ("立项阶段", session_dirs["Stage_Initial"]),
-                ("A样阶段", session_dirs["Stage_A"]),
-                ("B样阶段", session_dirs["Stage_B"]),
-                ("C样阶段", session_dirs["Stage_C"]),
-            ]:
-                st.markdown(f"**{stage}:**")
-                if os.path.exists(folder):
-                    files = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
-                    if files:
-                        for f in files:
-                            st.markdown(f"- {f}")
-                    else:
-                        st.markdown("<span style='color:gray'>（无文件）</span>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<span style='color:gray'>（文件夹不存在）</span>", unsafe_allow_html=True)
+        # Removed duplicate file list - keeping only the File Manager in col_info
 
         # Start button - only show if process hasn't started
         if not session['process_started']:
