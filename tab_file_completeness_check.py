@@ -145,6 +145,8 @@ def render_file_completeness_check_tab(session_id):
                     st.info("🤖 分析进行中...")
                 else:
                     st.success("✅ 分析完成")
+                    # Add a more prominent reset option when analysis is completed
+                    st.info("💡 如需重新开始分析，请点击左侧的"重新开始"按钮")
             
             # Define stage requirements
             stage_requirements = {
