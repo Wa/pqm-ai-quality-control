@@ -3,45 +3,6 @@ import os
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
 
-def get_parameters_session(session_id):
-    """Get or create a structured user session specifically for parameters check tab."""
-    if 'parameters_user_sessions' not in st.session_state:
-        st.session_state.parameters_user_sessions = {}
-    
-    if session_id not in st.session_state.parameters_user_sessions:
-        st.session_state.parameters_user_sessions[session_id] = {
-            'analysis_completed': False,
-            'demo_files_copied': False,
-            'process_started': False,
-            'ollama_history': [],
-            'openai_history': [],
-        }
-    
-    return st.session_state.parameters_user_sessions[session_id]
-
-def reset_parameters_session(session_id):
-    """Reset the parameters check session to initial state."""
-    session = get_parameters_session(session_id)
-    session['analysis_completed'] = False
-    session['demo_files_copied'] = False
-    session['process_started'] = False
-    session['ollama_history'] = []
-    session['openai_history'] = []
-
-def start_parameters_analysis(session_id):
-    """Start analysis for the parameters check tab."""
-    session = get_parameters_session(session_id)
-    session['analysis_completed'] = False
-    session['demo_files_copied'] = False
-    session['process_started'] = True
-    session['ollama_history'] = []
-    session['openai_history'] = []
-
-def complete_parameters_analysis(session_id):
-    """Mark parameters analysis as completed."""
-    session = get_parameters_session(session_id)
-    session['analysis_completed'] = True
-
 def render_parameters_file_upload_section(session_dirs, session_id):
     """Render the file upload section for parameters check with unique keys."""
     col_cp, col_target, col_graph = st.columns([1, 1, 1])
@@ -95,8 +56,8 @@ def render_parameters_check_tab(session_id):
     col_main, col_info = st.columns([2, 1])
     
     with col_main:
-        # Get structured user session for parameters check (separate from consistency check)
-        session = get_parameters_session(session_id)
+        # Get structured user session
+        session = get_user_session(session_id, 'parameters')
 
         # Always show file upload section
         render_parameters_file_upload_section(session_dirs, session_id)
@@ -106,8 +67,9 @@ def render_parameters_check_tab(session_id):
             col_buttons = st.columns([1, 1])
             with col_buttons[0]:
                 if st.button("开始", key=f"parameters_start_button_{session_id}"):
-                    # Dummy message for now
-                    st.info("🚧 设计制程检查功能正在开发中，敬请期待！")
+                    # Start the analysis process
+                    start_analysis(session_id, 'parameters')
+                    st.rerun()
             with col_buttons[1]:
                 if st.button("演示", key=f"parameters_demo_button_{session_id}"):
                     # Dummy message for now
@@ -121,7 +83,7 @@ def render_parameters_check_tab(session_id):
             col_reset, col_status = st.columns([1, 2])
             with col_reset:
                 if st.button("重新开始", key=f"parameters_reset_button_{session_id}"):
-                    reset_parameters_session(session_id)
+                    reset_user_session(session_id, 'parameters')
                     st.rerun()
             
             with col_status:

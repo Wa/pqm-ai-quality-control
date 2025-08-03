@@ -357,20 +357,37 @@ def render_login_widget():
     
     return None 
 # --- Structured Session State Management ---
-def get_user_session(session_id):
-    """Get or create a structured user session."""
+def get_user_session(session_id, tab_name=None):
+    """Get or create a structured user session with optional tab-specific state."""
     if 'user_sessions' not in st.session_state:
         st.session_state.user_sessions = {}
     
     if session_id not in st.session_state.user_sessions:
         st.session_state.user_sessions[session_id] = {
-            'analysis_completed': False,
-            'demo_files_copied': False,  # Track if demo files have been copied
-            'process_started': False,
-            'ollama_history': [],
-            'openai_history': [],
+            # Tab-specific workflow state
+            'tabs': {
+                'special_symbols': {
+                    'process_started': False,
+                    'analysis_completed': False,
+                    'ollama_history': [],
+                    'openai_history': [],
+                },
+                'completeness': {
+                    'process_started': False,
+                    'analysis_completed': False,
+                    'ollama_history': [],
+                    'openai_history': [],
+                },
+                'parameters': {
+                    'process_started': False,
+                    'analysis_completed': False,
+                    'ollama_history': [],
+                    'openai_history': [],
+                }
+            },
+            
+            # Shared settings (global)
             'llm_backend': 'ollama',
-            # Ollama parameters
             'ollama_model': CONFIG["llm"]["ollama_model"],
             'ollama_temperature': 0.7,
             'ollama_top_p': 0.9,
@@ -378,7 +395,6 @@ def get_user_session(session_id):
             'ollama_repeat_penalty': 1.1,
             'ollama_num_ctx': 4096,
             'ollama_num_thread': 4,
-            # OpenAI parameters
             'openai_model': CONFIG["llm"]["openai_model"],
             'openai_temperature': 0.7,
             'openai_top_p': 1.0,
@@ -388,32 +404,52 @@ def get_user_session(session_id):
             'openai_logit_bias': '{}'
         }
     
-    return st.session_state.user_sessions[session_id]
+    session = st.session_state.user_sessions[session_id]
+    
+    # If tab_name is provided, return tab-specific state
+    if tab_name and tab_name in session['tabs']:
+        return session['tabs'][tab_name]
+    
+    # Otherwise return the full session (for backward compatibility)
+    return session
 
-def reset_user_session(session_id):
-    """Reset a user's session to initial state."""
-    session = get_user_session(session_id)
-    session['analysis_completed'] = False
-    session['demo_files_copied'] = False
-    session['process_started'] = False
-    session['ollama_history'] = []
-    session['openai_history'] = []
+def reset_user_session(session_id, tab_name=None):
+    """Reset a user's session to initial state, optionally for a specific tab."""
+    session = st.session_state.user_sessions[session_id]
+    
+    if tab_name and tab_name in session['tabs']:
+        # Reset specific tab
+        tab_session = session['tabs'][tab_name]
+        tab_session['analysis_completed'] = False
+        tab_session['process_started'] = False
+        tab_session['ollama_history'] = []
+        tab_session['openai_history'] = []
+    else:
+        # Reset all tabs (backward compatibility)
+        for tab_session in session['tabs'].values():
+            tab_session['analysis_completed'] = False
+            tab_session['process_started'] = False
+            tab_session['ollama_history'] = []
+            tab_session['openai_history'] = []
 
-def start_analysis(session_id):
-    """Start analysis for a user session."""
-    session = get_user_session(session_id)
-    session['analysis_completed'] = False
-    session['demo_files_copied'] = False
-    session['process_started'] = True
-    session['ollama_history'] = []
-    session['openai_history'] = []
+def start_analysis(session_id, tab_name):
+    """Start analysis for a specific tab in a user session."""
+    session = st.session_state.user_sessions[session_id]
+    if tab_name in session['tabs']:
+        tab_session = session['tabs'][tab_name]
+        tab_session['analysis_completed'] = False
+        tab_session['process_started'] = True
+        tab_session['ollama_history'] = []
+        tab_session['openai_history'] = []
 
-def complete_analysis(session_id):
-    """Mark analysis as completed for a user session."""
-    session = get_user_session(session_id)
-    session['analysis_completed'] = True
+def complete_analysis(session_id, tab_name):
+    """Mark analysis as completed for a specific tab in a user session."""
+    session = st.session_state.user_sessions[session_id]
+    if tab_name in session['tabs']:
+        session['tabs'][tab_name]['analysis_completed'] = True
 
-def mark_demo_files_copied(session_id):
-    """Mark that demo files have been copied."""
-    session = get_user_session(session_id)
-    session['demo_files_copied'] = True
+def mark_demo_files_copied(session_id, tab_name):
+    """Mark that demo files have been copied for a specific tab."""
+    session = st.session_state.user_sessions[session_id]
+    if tab_name in session['tabs']:
+        session['tabs'][tab_name]['demo_files_copied'] = True

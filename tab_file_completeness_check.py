@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
+from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, complete_analysis
 from config import CONFIG
 from ollama import Client as OllamaClient
 import openai
@@ -56,7 +56,7 @@ def render_file_completeness_check_tab(session_id):
     generated_session_dir = session_dirs["generated"]
 
     # Get structured user session
-    session = get_user_session(session_id)
+    session = get_user_session(session_id, 'completeness')
     
     # Initialize LLM clients
     llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
@@ -99,7 +99,7 @@ def render_file_completeness_check_tab(session_id):
             with col_buttons[0]:
                 if st.button("开始", key=f"file_completeness_start_button_{session_id}"):
                     # Start the analysis process
-                    start_analysis(session_id)
+                    start_analysis(session_id, 'completeness')
                     st.rerun()
             with col_buttons[1]:
                 if st.button("演示", key=f"file_completeness_demo_button_{session_id}"):
@@ -123,7 +123,7 @@ def render_file_completeness_check_tab(session_id):
                                     if os.path.isfile(demo_file_path):
                                         shutil.copy2(demo_file_path, session_file_path)
                         
-                        start_analysis(session_id)
+                        start_analysis(session_id, 'completeness')
                         st.success("演示已开始！正在分析演示文件...")
                         st.rerun()
                     else:
@@ -137,7 +137,7 @@ def render_file_completeness_check_tab(session_id):
             col_reset, col_status = st.columns([1, 2])
             with col_reset:
                 if st.button("重新开始", key=f"file_completeness_reset_button_{session_id}"):
-                    reset_user_session(session_id)
+                    reset_user_session(session_id, 'completeness')
                     st.rerun()
             
             with col_status:
@@ -146,7 +146,7 @@ def render_file_completeness_check_tab(session_id):
                 else:
                     st.success("✅ 分析完成")
                     # Add a more prominent reset option when analysis is completed
-                    st.info("💡 如需重新开始分析，请点击左侧的"重新开始"按钮")
+                    st.info('💡 如需重新开始分析，请点击左侧的"重新开始"按钮')
             
             # Define stage requirements
             stage_requirements = {
@@ -306,7 +306,7 @@ def render_file_completeness_check_tab(session_id):
             
             # Mark analysis as completed
             if not session['analysis_completed']:
-                session['analysis_completed'] = True
+                complete_analysis(session_id, 'completeness')
 
     with col_info:
         # --- File Manager Module ---

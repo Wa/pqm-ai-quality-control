@@ -303,7 +303,7 @@ def render_special_symbols_check_tab(session_id):
     
     with col_main:
         # Get structured user session
-        session = get_user_session(session_id)
+        session = get_user_session(session_id, 'special_symbols')
 
         # Always show file upload section
         render_file_upload_section(session_dirs, session_id)
@@ -328,7 +328,7 @@ def render_special_symbols_check_tab(session_id):
                     session['analysis_completed'] = False
                     
                     # Start the analysis process
-                    start_analysis(session_id)
+                    start_analysis(session_id, 'special_symbols')
                     st.rerun()
             with col_buttons[1]:
                 if st.button("演示", key=f"demo_button_{session_id}"):
@@ -390,7 +390,7 @@ def render_special_symbols_check_tab(session_id):
         if session['process_started']:
             # Add a button to reset and clear history
             if st.button("重新开始", key=f"reset_button_{session_id}"):
-                reset_user_session(session_id)
+                reset_user_session(session_id, 'special_symbols')
                 st.rerun()
             
             # Check if we need to run analysis
@@ -516,7 +516,7 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             
                             # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id)
+                            session = get_user_session(session_id, 'special_symbols')
                             workflow_safe = not session['process_started'] or session['analysis_completed']
                             
                             if workflow_safe:
@@ -566,7 +566,7 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             
                             # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id)
+                            session = get_user_session(session_id, 'special_symbols')
                             workflow_safe = not session['process_started'] or session['analysis_completed']
                             
                             if workflow_safe:
@@ -616,7 +616,7 @@ def render_special_symbols_check_tab(session_id):
                             delete_key = f"delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             
                             # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id)
+                            session = get_user_session(session_id, 'special_symbols')
                             workflow_safe = not session['process_started'] or session['analysis_completed']
                             
                             if workflow_safe:
@@ -657,7 +657,7 @@ def render_special_symbols_check_tab(session_id):
         backend_available = is_backend_available()
         
         # Only show clear button when workflow is not running and no analysis is in progress
-        session = get_user_session(session_id)
+        session = get_user_session(session_id, 'special_symbols')
         workflow_safe = not session['process_started'] or session['analysis_completed']
         
         if workflow_safe:
