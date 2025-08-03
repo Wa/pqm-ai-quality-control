@@ -248,8 +248,6 @@ def render_file_completeness_check_tab(session_id):
                         with open(prompt_file, "w", encoding="utf-8") as f:
                             f.write(prompt)
                         
-                        st.divider()
-                        
                         # Display the prompt and response side by side
                         col_prompt, col_response = st.columns([1, 1])
                         with col_prompt:
@@ -307,7 +305,6 @@ def render_file_completeness_check_tab(session_id):
                                     st.chat_input(placeholder="", disabled=True, key=f"file_completeness_response_chat_input_{stage_name}_{session_id}")
                     else:
                         # Stage has no files - show simple message
-                        st.divider()
                         st.info(f"📁 {stage_name}文件夹为空，因此该阶段的所有必需文件均缺失。")
             
             # Mark analysis as completed
