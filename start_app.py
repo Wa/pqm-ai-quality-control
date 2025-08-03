@@ -21,9 +21,8 @@ def check_dependencies():
         return True
     except ImportError as e:
         print(f"❌ Missing dependency: {e}")
-        print("Please install requirements:")
-        print("pip install -r requirements_backend.txt")
-        print("pip install streamlit requests")
+        print("❌ Dependencies not found. Please install them first:")
+        print("pip install -r requirements.txt")
         return False
 
 def start_backend():

@@ -447,9 +447,3 @@ def complete_analysis(session_id, tab_name):
     session = st.session_state.user_sessions[session_id]
     if tab_name in session['tabs']:
         session['tabs'][tab_name]['analysis_completed'] = True
-
-def mark_demo_files_copied(session_id, tab_name):
-    """Mark that demo files have been copied for a specific tab."""
-    session = st.session_state.user_sessions[session_id]
-    if tab_name in session['tabs']:
-        session['tabs'][tab_name]['demo_files_copied'] = True
