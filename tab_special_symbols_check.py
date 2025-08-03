@@ -45,7 +45,8 @@ def remove_think_blocks(text):
 
 def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     """Run the complete analysis workflow."""
-    session = get_user_session(session_id)
+    # Get tab-specific session state
+    session = get_user_session(session_id, 'special_symbols')
     cp_session_dir = session_dirs["cp"]
     target_session_dir = session_dirs["target"]
     generated_session_dir = session_dirs["generated"]
