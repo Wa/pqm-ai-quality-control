@@ -70,31 +70,28 @@ def render_file_completeness_check_tab(session_id):
     col_main, col_info = st.columns([2, 1])
     
     with col_main:
-        # Layout: left (uploaders), right (file list)
-        col_left, col_right = st.columns([3, 1])
-        with col_left:
-            col_initial, col_a, col_b, col_c = st.columns(4)
-            with col_initial:
-                files_initial = st.file_uploader("点击上传立项阶段文件", type=None, accept_multiple_files=True, key="stage_initial")
-                if files_initial:
-                    handle_file_upload(files_initial, session_dirs["Stage_Initial"])
-                    st.success(f"已上传 {len(files_initial)} 个立项阶段文件")
-            with col_a:
-                files_a = st.file_uploader("点击上传A样阶段文件", type=None, accept_multiple_files=True, key="stage_a")
-                if files_a:
-                    handle_file_upload(files_a, session_dirs["Stage_A"])
-                    st.success(f"已上传 {len(files_a)} 个A样阶段文件")
-            with col_b:
-                files_b = st.file_uploader("点击上传B样阶段文件", type=None, accept_multiple_files=True, key="stage_b")
-                if files_b:
-                    handle_file_upload(files_b, session_dirs["Stage_B"])
-                    st.success(f"已上传 {len(files_b)} 个B样阶段文件")
-            with col_c:
-                files_c = st.file_uploader("点击上传C样阶段文件", type=None, accept_multiple_files=True, key="stage_c")
-                if files_c:
-                    handle_file_upload(files_c, session_dirs["Stage_C"])
-                    st.success(f"已上传 {len(files_c)} 个C样阶段文件")
-        # Removed duplicate file list - keeping only the File Manager in col_info
+        # File uploads directly in col_main (no nested columns)
+        col_initial, col_a, col_b, col_c = st.columns(4)
+        with col_initial:
+            files_initial = st.file_uploader("点击上传立项阶段文件", type=None, accept_multiple_files=True, key="stage_initial")
+            if files_initial:
+                handle_file_upload(files_initial, session_dirs["Stage_Initial"])
+                st.success(f"已上传 {len(files_initial)} 个立项阶段文件")
+        with col_a:
+            files_a = st.file_uploader("点击上传A样阶段文件", type=None, accept_multiple_files=True, key="stage_a")
+            if files_a:
+                handle_file_upload(files_a, session_dirs["Stage_A"])
+                st.success(f"已上传 {len(files_a)} 个A样阶段文件")
+        with col_b:
+            files_b = st.file_uploader("点击上传B样阶段文件", type=None, accept_multiple_files=True, key="stage_b")
+            if files_b:
+                handle_file_upload(files_b, session_dirs["Stage_B"])
+                st.success(f"已上传 {len(files_b)} 个B样阶段文件")
+        with col_c:
+            files_c = st.file_uploader("点击上传C样阶段文件", type=None, accept_multiple_files=True, key="stage_c")
+            if files_c:
+                handle_file_upload(files_c, session_dirs["Stage_C"])
+                st.success(f"已上传 {len(files_c)} 个C样阶段文件")
 
         # Start button - only show if process hasn't started
         if not session['process_started']:
