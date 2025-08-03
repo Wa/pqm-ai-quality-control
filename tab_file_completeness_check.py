@@ -322,9 +322,11 @@ def render_file_completeness_check_tab(session_id):
                     files.append({
                         'name': f,
                         'size': stat.st_size,
-                        'modified': stat.st_mtime
+                        'modified': stat.st_mtime,
+                        'path': file_path
                     })
-            return sorted(files, key=lambda x: x['modified'], reverse=True)
+            # Use stable sorting by name first, then by modification time
+            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
 
         def format_file_size(size_bytes):
             if size_bytes == 0:
@@ -338,35 +340,161 @@ def render_file_completeness_check_tab(session_id):
 
         def format_timestamp(timestamp):
             from datetime import datetime
-            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
         def truncate_filename(filename, max_length=40):
             if len(filename) <= max_length:
                 return filename
             name, ext = os.path.splitext(filename)
-            return name[:max_length-len(ext)-3] + "..." + ext
+            available_length = max_length - len(ext) - 3  # 3 for "..."
+            
+            if available_length <= 0:
+                # If extension is too long, just truncate the whole thing
+                return filename[:max_length-3] + "..."
+            
+            # Truncate name part and add ellipsis
+            truncated_name = name[:available_length] + "..."
+            return truncated_name + ext
 
-        st.markdown("### 📁 文件管理器")
+        # File Manager Tabs
+        tab_initial, tab_a, tab_b, tab_c = st.tabs(["立项阶段", "A样阶段", "B样阶段", "C样阶段"])
         
-        # Stage folders
-        stage_folders = [
-            ("立项阶段", session_dirs["Stage_Initial"]),
-            ("A样阶段", session_dirs["Stage_A"]),
-            ("B样阶段", session_dirs["Stage_B"]),
-            ("C样阶段", session_dirs["Stage_C"])
-        ]
+        with tab_initial:
+            initial_files_list = get_file_list(session_dirs["Stage_Initial"])
+            
+            if initial_files_list:
+                for i, file_info in enumerate(initial_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            # Use a more stable key for delete button
+                            delete_key = f"delete_initial_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+                
+            # Upload new files directly in this tab
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_initial_files = st.file_uploader("选择立项阶段文件", type=None, accept_multiple_files=True, key=f"initial_uploader_tab_{session_id}")
+            if new_initial_files:
+                handle_file_upload(new_initial_files, session_dirs["Stage_Initial"])
+
+        with tab_a:
+            a_files_list = get_file_list(session_dirs["Stage_A"])
+            
+            if a_files_list:
+                for i, file_info in enumerate(a_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            # Use a more stable key for delete button
+                            delete_key = f"delete_a_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+                
+            # Upload new files directly in this tab
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_a_files = st.file_uploader("选择A样阶段文件", type=None, accept_multiple_files=True, key=f"a_uploader_tab_{session_id}")
+            if new_a_files:
+                handle_file_upload(new_a_files, session_dirs["Stage_A"])
+
+        with tab_b:
+            b_files_list = get_file_list(session_dirs["Stage_B"])
+            
+            if b_files_list:
+                for i, file_info in enumerate(b_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            # Use a more stable key for delete button
+                            delete_key = f"delete_b_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+                
+            # Upload new files directly in this tab
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_b_files = st.file_uploader("选择B样阶段文件", type=None, accept_multiple_files=True, key=f"b_uploader_tab_{session_id}")
+            if new_b_files:
+                handle_file_upload(new_b_files, session_dirs["Stage_B"])
+
+        with tab_c:
+            c_files_list = get_file_list(session_dirs["Stage_C"])
+            
+            if c_files_list:
+                for i, file_info in enumerate(c_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            # Use a more stable key for delete button
+                            delete_key = f"delete_c_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+                
+            # Upload new files directly in this tab
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_c_files = st.file_uploader("选择C样阶段文件", type=None, accept_multiple_files=True, key=f"c_uploader_tab_{session_id}")
+            if new_c_files:
+                handle_file_upload(new_c_files, session_dirs["Stage_C"])
+
+        # Bulk operations
+        st.markdown("---")
+        st.markdown("### 批量操作")
         
-        for stage_name, folder_path in stage_folders:
-            with st.expander(f"📂 {stage_name}", expanded=False):
-                files = get_file_list(folder_path)
-                if files:
-                    for file_info in files:
-                        col1, col2, col3 = st.columns([3, 1, 1])
-                        with col1:
-                            st.text(truncate_filename(file_info['name']))
-                        with col2:
-                            st.text(format_file_size(file_info['size']))
-                        with col3:
-                            st.text(format_timestamp(file_info['modified']))
-                else:
-                    st.info("📄 暂无文件") 
+        if st.button("🗑️ 清空所有文件", key=f"clear_all_files_completeness_{session_id}"):
+            try:
+                # Clear all session directories
+                for dir_path in [session_dirs["Stage_Initial"], session_dirs["Stage_A"], session_dirs["Stage_B"], session_dirs["Stage_C"]]:
+                    for file in os.listdir(dir_path):
+                        file_path = os.path.join(dir_path, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                st.success("已清空所有文件")
+            except Exception as e:
+                st.error(f"清空失败: {e}") 
