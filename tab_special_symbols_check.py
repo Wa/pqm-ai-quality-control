@@ -514,22 +514,31 @@ def render_special_symbols_check_tab(session_id):
                         with col_action:
                             # Use a more stable key for delete button
                             delete_key = f"delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    if is_backend_available():
-                                        # Use FastAPI backend
-                                        client = get_backend_client()
-                                        result = client.delete_file(session_id, file_info['path'])
-                                        if result.get("status") == "success":
-                                            st.success(f"已删除: {file_info['name']}")
+                            
+                            # Check if workflow is safe to interrupt
+                            session = get_user_session(session_id)
+                            workflow_safe = not session['process_started'] or session['analysis_completed']
+                            
+                            if workflow_safe:
+                                if st.button("🗑️ 删除", key=delete_key):
+                                    try:
+                                        if is_backend_available():
+                                            # Use FastAPI backend
+                                            client = get_backend_client()
+                                            result = client.delete_file(session_id, file_info['path'])
+                                            if result.get("status") == "success":
+                                                st.success(f"已删除: {file_info['name']}")
+                                            else:
+                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
                                         else:
-                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                    else:
-                                        # Fallback to direct file system access
-                                        os.remove(file_info['path'])
-                                        st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
+                                            # Fallback to direct file system access
+                                            os.remove(file_info['path'])
+                                            st.success(f"已删除: {file_info['name']}")
+                                    except Exception as e:
+                                        st.error(f"删除失败: {e}")
+                            else:
+                                # Show disabled button during workflow
+                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
             else:
                 st.write("（未上传）")
                 
@@ -555,22 +564,31 @@ def render_special_symbols_check_tab(session_id):
                         with col_action:
                             # Use a more stable key for delete button
                             delete_key = f"delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    if is_backend_available():
-                                        # Use FastAPI backend
-                                        client = get_backend_client()
-                                        result = client.delete_file(session_id, file_info['path'])
-                                        if result.get("status") == "success":
-                                            st.success(f"已删除: {file_info['name']}")
+                            
+                            # Check if workflow is safe to interrupt
+                            session = get_user_session(session_id)
+                            workflow_safe = not session['process_started'] or session['analysis_completed']
+                            
+                            if workflow_safe:
+                                if st.button("🗑️ 删除", key=delete_key):
+                                    try:
+                                        if is_backend_available():
+                                            # Use FastAPI backend
+                                            client = get_backend_client()
+                                            result = client.delete_file(session_id, file_info['path'])
+                                            if result.get("status") == "success":
+                                                st.success(f"已删除: {file_info['name']}")
+                                            else:
+                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
                                         else:
-                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                    else:
-                                        # Fallback to direct file system access
-                                        os.remove(file_info['path'])
-                                        st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
+                                            # Fallback to direct file system access
+                                            os.remove(file_info['path'])
+                                            st.success(f"已删除: {file_info['name']}")
+                                    except Exception as e:
+                                        st.error(f"删除失败: {e}")
+                            else:
+                                # Show disabled button during workflow
+                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
             else:
                 st.write("（未上传）")
                 
@@ -596,22 +614,31 @@ def render_special_symbols_check_tab(session_id):
                         with col_action:
                             # Use a more stable key for delete button
                             delete_key = f"delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    if is_backend_available():
-                                        # Use FastAPI backend
-                                        client = get_backend_client()
-                                        result = client.delete_file(session_id, file_info['path'])
-                                        if result.get("status") == "success":
-                                            st.success(f"已删除: {file_info['name']}")
+                            
+                            # Check if workflow is safe to interrupt
+                            session = get_user_session(session_id)
+                            workflow_safe = not session['process_started'] or session['analysis_completed']
+                            
+                            if workflow_safe:
+                                if st.button("🗑️ 删除", key=delete_key):
+                                    try:
+                                        if is_backend_available():
+                                            # Use FastAPI backend
+                                            client = get_backend_client()
+                                            result = client.delete_file(session_id, file_info['path'])
+                                            if result.get("status") == "success":
+                                                st.success(f"已删除: {file_info['name']}")
+                                            else:
+                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
                                         else:
-                                            st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                    else:
-                                        # Fallback to direct file system access
-                                        os.remove(file_info['path'])
-                                        st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
+                                            # Fallback to direct file system access
+                                            os.remove(file_info['path'])
+                                            st.success(f"已删除: {file_info['name']}")
+                                    except Exception as e:
+                                        st.error(f"删除失败: {e}")
+                            else:
+                                # Show disabled button during workflow
+                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
             else:
                 st.write("（未上传）")
                 
@@ -629,27 +656,36 @@ def render_special_symbols_check_tab(session_id):
         # Check if backend is available
         backend_available = is_backend_available()
         
-        if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
-            if backend_available:
-                # Use FastAPI backend
-                client = get_backend_client()
-                result = client.clear_files(session_id)
-                
-                if result.get("status") == "success":
-                    st.success(f"✅ {result.get('message', '已清空所有文件')}")
-                    st.rerun()  # Force UI refresh
+        # Only show clear button when workflow is not running and no analysis is in progress
+        session = get_user_session(session_id)
+        workflow_safe = not session['process_started'] or session['analysis_completed']
+        
+        if workflow_safe:
+            if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
+                if backend_available:
+                    # Use FastAPI backend
+                    client = get_backend_client()
+                    result = client.clear_files(session_id)
+                    
+                    if result.get("status") == "success":
+                        st.success(f"✅ {result.get('message', '已清空所有文件')}")
+                        # Don't use st.rerun() - let Streamlit handle the refresh naturally
+                    else:
+                        st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
                 else:
-                    st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
-            else:
-                # Fallback to direct file operations
-                try:
-                    # Clear all session directories
-                    for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                        for file in os.listdir(dir_path):
-                            file_path = os.path.join(dir_path, file)
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                    st.success("已清空所有文件")
-                    st.rerun()  # Force UI refresh
-                except Exception as e:
-                    st.error(f"清空失败: {e}") 
+                    # Fallback to direct file operations
+                    try:
+                        # Clear all session directories
+                        for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
+                            for file in os.listdir(dir_path):
+                                file_path = os.path.join(dir_path, file)
+                                if os.path.isfile(file_path):
+                                    os.remove(file_path)
+                        st.success("已清空所有文件")
+                        # Don't use st.rerun() - let Streamlit handle the refresh naturally
+                    except Exception as e:
+                        st.error(f"清空失败: {e}")
+        else:
+            # Show disabled state when workflow is running
+            st.info("🔄 分析进行中，请等待完成后再清空文件")
+            st.button("🗑️ 清空所有文件", key=f"clear_all_files_disabled_{session_id}", disabled=True) 
