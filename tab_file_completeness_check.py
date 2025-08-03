@@ -261,7 +261,7 @@ def render_file_completeness_check_tab(session_id):
                                 st.chat_input(placeholder="", disabled=True, key=f"file_completeness_prompt_chat_input_{stage_name}_{session_id}")
                         
                         with col_response:
-                            st.subheader(f"{stage_name} - AI回复:")
+                            st.subheader(f"{stage_name} - 检查结果:")
                             response_container = st.container(height=400)
                             with response_container:
                                 with st.chat_message("assistant"):
