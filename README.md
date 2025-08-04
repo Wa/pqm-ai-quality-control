@@ -1,157 +1,309 @@
-# Consistency Check Application
+# PQM AI Quality Control Assistant
 
-A Streamlit-based application for checking consistency between control plan files and target files using large language models.
+A comprehensive AI-powered application for APQP (Advanced Product Quality Planning) document analysis and quality control. Built with Streamlit frontend and FastAPI backend for optimal performance and user experience.
 
-## Installation
+## 🚀 Quick Start
 
-### Using pip (recommended)
+### Prerequisites
+- **Python 3.8+** (3.12 recommended)
+- **Anaconda** (recommended for environment management)
+- **Git** (for version control)
 
+### Installation
+
+#### Option 1: Automated Setup (Recommended)
 ```bash
-# Clone or copy the application files
+# Clone the repository
+git clone <your-repo-url>
+cd PQM_AI
+
+# Create and activate conda environment
+conda create -n PQM_AI python=3.12 -y
+conda activate PQM_AI
+
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the application
-streamlit run main.py
+# Start the application
+python start_app.py
 ```
 
-### Manual installation
-
+#### Option 2: Manual Setup
 ```bash
-# Install required packages
-pip install streamlit>=1.28.0 pandas>=2.0.0 openpyxl>=3.1.0 pyarrow>=10.0.0 requests>=2.31.0 ollama>=0.1.0 openai>=1.0.0
+# Install dependencies
+pip install -r requirements.txt
 
-# Run the application
-streamlit run main.py
+# Start backend (Terminal 1)
+python backend.py
+
+# Start frontend (Terminal 2)
+streamlit run main.py --server.port 8888
 ```
 
-## Configuration
+### Access the Application
+- **Frontend:** http://localhost:8888
+- **Backend API:** http://localhost:8001
+- **API Documentation:** http://localhost:8001/docs
 
-All file paths and settings are centralized in `config.py` for easy maintenance and portability.
+## 🎯 Features
+
+### Core Analysis Tabs
+1. **特殊特性符号检查** (Special Symbols Check)
+   - AI-powered consistency checking between control plans and target files
+   - Real-time streaming LLM responses
+   - File upload and management with FastAPI backend
+
+2. **设计制程检查** (Design Process Check)
+   - Parameter validation and process design analysis
+   - Independent session state management
+
+3. **文件齐套性检查** (File Completeness Check)
+   - APQP stage-based file completeness analysis
+   - Multi-stage comparison (立项阶段, A样阶段, B样阶段, C样阶段)
+   - Smart empty stage handling
+
+4. **文件要素检查** (File Elements Check)
+   - Integration with external APQP platforms
+   - Demo video and documentation access
+
+5. **历史问题规避** (Historical Issues Avoidance)
+   - Historical problem tracking and avoidance
+   - Excel-based data management
+
+### Advanced Features
+- **Multi-User Support:** Complete session isolation with tab-specific state management
+- **Dual LLM Backend:** Support for both Ollama (local) and OpenAI (cloud) models
+- **FastAPI Integration:** Efficient file operations with real-time updates
+- **Workflow Protection:** Prevents interruptions during analysis
+- **Demo Mode:** Pre-configured demonstration files for testing
+
+## 🏗️ Architecture
+
+### Frontend (Streamlit)
+- **Main Application:** `main.py`
+- **Tab Modules:** `tab_*.py` files for each analysis type
+- **Utilities:** `util.py` for shared functions
+- **Configuration:** `config.py` for centralized settings
+
+### Backend (FastAPI)
+- **File Operations:** Upload, delete, list, clear files
+- **Health Monitoring:** Service status and connectivity
+- **CORS Support:** Cross-origin request handling
 
 ### Session Management
-
-The application uses a user login system for session management:
-- **User Authentication**: Simple username/password login system
-- **Session Persistence**: Username is saved locally for auto-login
-- **Session Directories**: Each user gets their own subdirectories for file uploads
-- **Cross-computer Access**: Users can access their files from any computer using the same username
-
-### File Structure
-
-```
-Quality_control_assistant/
-├── config.py              # Centralized configuration
-├── util.py                # Utility functions and PromptGenerator class
-├── main.py                # Main Streamlit application
-├── consistency_check.py   # Consistency check tab
-├── file_completeness_check.py  # File completeness check tab
-├── file_elements_check.py      # File elements check tab
-├── history_issues_avoidance.py # History issues avoidance tab
-├── tab_special_symbols_check.py   # Special symbols check tab
-├── requirements.txt       # Python dependencies
-├── README.md             # This file
-├── CP_files/             # Control plan files directory
-├── target_files/         # Target files directory
-├── graph_files/          # Graph files directory
-├── generated_files/      # Generated output files
-├── APQP_files/          # APQP stage files
-└── media/               # Media files (images, videos)
+```python
+# Tab-specific session state structure
+session = {
+    'tabs': {
+        'special_symbols': {
+            'process_started': False,
+            'analysis_completed': False,
+            'ollama_history': [],
+            'openai_history': [],
+        },
+        'completeness': { ... },
+        'parameters': { ... }
+    },
+    # Shared global settings
+    'llm_backend': 'ollama',
+    'ollama_model': 'llama3.1',
+    # ... other settings
+}
 ```
 
-### Configuration Options
+## 📁 Project Structure
 
-The `config.py` file contains:
+```
+PQM_AI/
+├── main.py                          # Streamlit main application
+├── backend.py                       # FastAPI backend server
+├── backend_client.py                # Backend communication client
+├── start_app.py                     # Automated startup script
+├── config.py                        # Centralized configuration
+├── util.py                          # Utility functions and session management
+├── tab_special_symbols_check.py     # Special symbols analysis
+├── tab_parameters_check.py          # Design process analysis
+├── tab_file_completeness_check.py   # File completeness analysis
+├── tab_file_elements_check.py       # File elements integration
+├── tab_history_issues_avoidance.py  # Historical issues tracking
+├── tab_settings.py                  # Application settings
+├── tab_help_documentation.py        # Help and documentation
+├── requirements.txt                 # Python dependencies
+├── demonstration/                   # Demo files (Git LFS tracked)
+├── CP_files/                        # Control plan files
+├── target_files/                    # Target files for analysis
+├── graph_files/                     # Graph/drawing files
+├── APQP_files/                      # APQP stage files
+├── generated_files/                 # Generated outputs
+└── media/                          # Media files (images, videos)
+```
 
-#### Directories
-- `cp_files`: Control plan files directory
-- `target_files`: Target files to be checked
-- `graph_files`: Graph/drawing files
-- `generated_files`: Generated output files
-- `apqp_files`: APQP stage files
-- `media`: Media files (images, videos)
+## ⚙️ Configuration
 
-#### Files
-- `apqp_image`: APQP image file
-- `demo_video`: Demo video file
-- `history_excel`: History issues Excel file
-
-#### LLM Settings
-- `ollama_host`: Ollama server host
-- `ollama_model`: Ollama model name
-- `openai_base_url`: OpenAI API base URL
-- `openai_api_key`: OpenAI API key
-- `openai_model`: OpenAI model name
-
-### Usage
-
-To modify paths or settings, simply edit the `config.py` file:
+### Centralized Configuration (`config.py`)
+All settings are managed in `config.py` for easy maintenance:
 
 ```python
-# Example: Change the control plan files directory
-CONFIG["directories"]["cp_files"] = PROJECT_ROOT / "new_cp_files"
-
-# Example: Change the Ollama host
-CONFIG["llm"]["ollama_host"] = "http://localhost:11434"
+CONFIG = {
+    "directories": {
+        "cp_files": PROJECT_ROOT / "CP_files",
+        "target_files": PROJECT_ROOT / "target_files",
+        "graph_files": PROJECT_ROOT / "graph_files",
+        "apqp_files": PROJECT_ROOT / "APQP_files",
+        "generated_files": PROJECT_ROOT / "generated_files",
+        "media": PROJECT_ROOT / "media"
+    },
+    "llm": {
+        "ollama_host": "http://localhost:11434",
+        "ollama_model": "llama3.1",
+        "openai_base_url": "https://api.openai.com/v1",
+        "openai_api_key": "your-api-key",
+        "openai_model": "gpt-4"
+    }
+}
 ```
 
-### Benefits
+### Environment Variables
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `OLLAMA_HOST`: Ollama server host (default: localhost:11434)
 
-1. **Portability**: All paths are relative to the project root
-2. **Maintainability**: Centralized configuration makes updates easy
-3. **Flexibility**: Easy to change settings for different environments
-4. **No Hardcoded Paths**: All file paths are configurable
+## 🔧 Usage
 
-### Running the Application
+### 1. User Authentication
+- Simple username/password login system
+- Session persistence across browser refreshes
+- Cross-computer file access using username
 
+### 2. File Upload
+- Drag-and-drop or browse file upload
+- Support for multiple file types
+- Real-time file management with FastAPI backend
+
+### 3. Analysis Workflow
+1. **Upload Files:** Add control plans, target files, and related documents
+2. **Start Analysis:** Click "开始" to begin AI-powered analysis
+3. **Demo Mode:** Click "演示" to use pre-configured demo files
+4. **View Results:** Real-time streaming analysis results
+5. **Reset:** Click "重新开始" to clear and start over
+
+### 4. Settings Management
+- **LLM Backend Selection:** Choose between Ollama and OpenAI
+- **Model Configuration:** Adjust temperature, top-p, and other parameters
+- **Connection Testing:** Verify LLM service connectivity
+
+## 🛠️ Development
+
+### Adding New Tabs
+The application uses a modular tab system. To add a new analysis tab:
+
+1. **Create tab file:** `tab_new_analysis.py`
+2. **Add to main.py:** Import and render the new tab
+3. **Update session state:** Add tab-specific state in `util.py`
+4. **Follow naming conventions:** Use consistent key patterns
+
+### Session State Management
+```python
+# Get tab-specific session
+session = get_user_session(session_id, 'tab_name')
+
+# Start analysis
+start_analysis(session_id, 'tab_name')
+
+# Complete analysis
+complete_analysis(session_id, 'tab_name')
+
+# Reset session
+reset_user_session(session_id, 'tab_name')
+```
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+#### Backend Connection Issues
 ```bash
-cd /path/to/Quality_control_assistant
-streamlit run main.py
+# Check backend health
+curl http://localhost:8001/health
+
+# Restart backend
+python backend.py
 ```
 
-The application will automatically use the paths defined in `config.py` and create any missing directories as needed.
+#### Port Conflicts
+```bash
+# Find processes using ports
+lsof -i :8001
+lsof -i :8888
 
-## Dependencies
+# Kill conflicting processes
+pkill -f "python backend.py"
+pkill -f "streamlit"
+```
 
-### Core Dependencies
-- `streamlit>=1.28.0`: Web application framework
-- `pandas>=2.0.0`: Data manipulation and analysis
-- `openpyxl>=3.1.0`: Excel file reading and writing
-- `requests>=2.31.0`: HTTP requests for API calls
-- `pyarrow>=10.0.0`: DataFrame serialization (for Streamlit compatibility)
+#### Environment Issues
+```bash
+# Ensure correct environment
+conda activate PQM_AI
 
-### LLM Dependencies
-- `ollama>=0.1.0`: Local LLM client
-- `openai>=1.0.0`: OpenAI API client
+# Reinstall dependencies
+pip install -r requirements.txt
+```
 
-### System Requirements
-- Python 3.8 or higher
-- Internet connection (for LLM APIs)
-- Optional: Ollama server running locally
+#### File Upload Issues
+- **Large Files:** Use Git LFS for files > 50MB
+- **Permission Errors:** Check file permissions and directory access
+- **Duplicate Uploads:** Ensure unique session keys (automatically handled)
 
-## Troubleshooting
+### Performance Optimization
+- **Large Files:** Consider splitting files > 100MB
+- **Multiple Users:** Each user has isolated session state
+- **LLM Responses:** Streaming responses for better UX
 
-### DataFrame Serialization Issues
-If you encounter PyArrow serialization errors when displaying DataFrames, the application automatically handles mixed data types by converting all data to strings. This prevents compatibility issues between pandas DataFrames and Streamlit's display system.
+## 📚 API Documentation
 
-### Duplicate Upload Boxes
-If file upload boxes appear duplicated after clicking "开始", this was caused by `st.rerun()` calls that have been removed. The application now properly handles file uploads without page refreshes.
+### Backend Endpoints
+- `GET /health` - Service health check
+- `POST /upload-file` - File upload
+- `DELETE /delete-file` - File deletion
+- `GET /list-files` - File listing
+- `POST /clear-files` - Clear all files
 
-### Duplicate Element ID Errors
-If you encounter `StreamlitDuplicateElementId` errors with text areas, all text areas now have unique keys to prevent conflicts:
-- Prompt text areas: `prompt_1`, `prompt_2`, etc.
-- Response text areas: `ollama_response_1`, `openai_response_1`, etc.
-- Final section: `final_prompt`, `final_ollama_response`, `final_openai_response`
+### Frontend Integration
+```python
+from backend_client import get_backend_client, is_backend_available
 
-**Note**: For streaming responses, the application uses `st.empty()` with `placeholder.write()` instead of `text_area()` to avoid creating multiple widgets with the same key during streaming updates.
+# Check backend availability
+if is_backend_available():
+    client = get_backend_client()
+    result = client.list_files(session_id, file_type)
+```
 
-### Known Issues
-- The `st.cache` deprecation warning may appear but doesn't affect functionality
-- DataFrame display automatically converts mixed data types to strings for compatibility
+## 🤝 Contributing
 
-## Accessibility
+### Development Workflow
+1. **Fork the repository**
+2. **Create feature branch:** `git checkout -b feature/new-analysis`
+3. **Make changes:** Follow existing code patterns
+4. **Test thoroughly:** Ensure multi-user compatibility
+5. **Submit pull request:** Include detailed description
 
-The application follows accessibility best practices:
-- All form widgets have proper labels for screen readers
-- Empty labels are avoided by using `label_visibility="collapsed"` when needed
-- Text areas and input fields have descriptive labels that are hidden but accessible 
+### Code Standards
+- **Session Isolation:** Always use session-specific keys and state
+- **Error Handling:** Graceful fallbacks for backend unavailability
+- **Documentation:** Update README for new features
+- **Testing:** Test with multiple concurrent users
+
+## 📄 License
+
+This project is proprietary software developed for CALB quality control processes.
+
+## 🆘 Support
+
+For technical support or feature requests:
+1. Check the troubleshooting section above
+2. Review the help documentation in the application
+3. Contact the development team
+
+---
+
+**Built with ❤️ for CALB Quality Control Excellence** 
