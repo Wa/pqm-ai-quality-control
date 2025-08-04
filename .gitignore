@@ -53,7 +53,7 @@ Thumbs.db
 *.log
 temp.py
 
-# Session directories (user uploaded files) - EXCLUDE THESE
+# Session directories (user uploaded files)
 CP_files/
 target_files/
 graph_files/
@@ -66,15 +66,11 @@ temp/
 # User-specific settings and data
 user_settings/
 
-# Large data files (now handled by Git LFS)
-# demonstration/ - REMOVED: Now tracked with Git LFS
-# media/*.webm - REMOVED: Now tracked with Git LFS
-# media/*.xlsx - REMOVED: Now tracked with Git LFS
-
-# Generated files
+# Generated analysis files (keep requirements.txt and README.md)
 *.txt
 !requirements.txt
 !README.md
+!*.md
 
 # Jupyter Notebook
 .ipynb_checkpoints
