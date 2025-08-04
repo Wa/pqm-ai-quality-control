@@ -376,12 +376,6 @@ def render_special_symbols_check_tab(session_id):
                         session['ollama_history'] = []
                         session['openai_history'] = []
                         
-                        # 3. Run the analysis workflow - REMOVED: This was causing duplicate execution
-                        # run_analysis_workflow(session_id, session_dirs, prompt_generator)
-                        
-                        # 4. Display finish message - REMOVED: This was premature
-                        # st.success("✅ 分析完成")
-                        
                         # Force page refresh to hide buttons and show analysis
                         st.rerun()
                     else:
