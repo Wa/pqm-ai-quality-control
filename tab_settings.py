@@ -199,9 +199,7 @@ def render_settings_tab(session_id):
         </style>
         """, unsafe_allow_html=True)
         
-        # Page header
-        st.title("设置")
-        st.caption("配置大语言模型参数和连接设置")
+        # Compact header (removed title/caption for space)
         st.divider()
         
         # LLM Backend Selection
@@ -553,33 +551,10 @@ def render_settings_tab(session_id):
         
         st.divider()
         
-        # Action Buttons
+        # Action Buttons (refresh only)
         st.header("⚡ 快速操作")
         
         col1, col2 = st.columns(2)
-        with col1:
-            if st.button("重置为默认设置", key=f"reset_settings_{session_id}"):
-                # Reset Ollama settings
-                st.session_state[f'ollama_model_{session_id}'] = CONFIG['llm']['ollama_model']
-                st.session_state[f'ollama_temperature_{session_id}'] = 0.7
-                st.session_state[f'ollama_top_p_{session_id}'] = 0.9
-                st.session_state[f'ollama_top_k_{session_id}'] = 40
-                st.session_state[f'ollama_repeat_penalty_{session_id}'] = 1.1
-                st.session_state[f'ollama_num_ctx_{session_id}'] = 4096
-                st.session_state[f'ollama_num_thread_{session_id}'] = 4
-                
-                # Reset OpenAI settings
-                st.session_state[f'openai_model_{session_id}'] = CONFIG['llm']['openai_model']
-                st.session_state[f'openai_temperature_{session_id}'] = 0.7
-                st.session_state[f'openai_top_p_{session_id}'] = 1.0
-                st.session_state[f'openai_max_tokens_{session_id}'] = 2048
-                st.session_state[f'openai_presence_penalty_{session_id}'] = 0.0
-                st.session_state[f'openai_frequency_penalty_{session_id}'] = 0.0
-                st.session_state[f'openai_logit_bias_{session_id}'] = '{}'
-                
-                st.success("已重置为默认设置")
-                # No st.rerun() needed - Streamlit will update automatically
-        
         with col2:
             if st.button("刷新连接状态", key=f"refresh_connection_{session_id}"):
                 # Clear the cache to force fresh API calls
