@@ -63,7 +63,7 @@ def start_frontend():
         frontend_process = subprocess.Popen([
             sys.executable, "-m", "streamlit", "run", "main.py",
             "--server.port", "8888",
-            "--server.address", "localhost"
+            "--server.address", "0.0.0.0"
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         # Wait a moment for frontend to start
@@ -99,7 +99,7 @@ def main():
         return
     
     print("\n🎉 Application started successfully!")
-    print("📱 Frontend: http://localhost:8501")
+    print("📱 Frontend: http://localhost:8888")
     print("🔧 Backend:  http://localhost:8001")
     print("📚 API Docs: http://localhost:8001/docs")
     print("\nPress Ctrl+C to stop both services...")
