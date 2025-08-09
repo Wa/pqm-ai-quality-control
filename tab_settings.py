@@ -369,10 +369,33 @@ def render_settings_tab(session_id):
             with st.expander("高级设置", expanded=False):
                 col1, col2 = st.columns(2)
                 with col1:
+                    # Determine dynamic max context length from model info
+                    dynamic_max_ctx = 8192
+                    try:
+                        info = get_ollama_model_info(selected_model) or {}
+                        mi = info.get('model_info', {}) or {}
+                        # Try common keys first
+                        for key in [
+                            'gptoss.context_length',
+                            'qwen3.context_length',
+                            'llama.context_length',
+                            'general.context_length'
+                        ]:
+                            if key in mi and isinstance(mi[key], int):
+                                dynamic_max_ctx = int(mi[key])
+                                break
+                        else:
+                            # Fallback: search for any *.context_length field
+                            for k, v in mi.items():
+                                if isinstance(k, str) and k.endswith('context_length') and isinstance(v, int):
+                                    dynamic_max_ctx = int(v)
+                                    break
+                    except Exception:
+                        dynamic_max_ctx = 8192
                     num_ctx = st.number_input(
                         "上下文窗口大小",
                         min_value=512,
-                        max_value=8192,
+                        max_value=dynamic_max_ctx,
                         value=st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
                         step=512,
                         help="模型可以处理的最大上下文长度。",
