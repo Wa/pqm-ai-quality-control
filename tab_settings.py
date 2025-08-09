@@ -535,24 +535,6 @@ def render_settings_tab(session_id):
         
         st.divider()
         
-        # Action Buttons (refresh only)
-        st.header("⚡ 快速操作")
-        
-        col1, col2 = st.columns(2)
-        with col2:
-            if st.button("刷新连接状态", key=f"refresh_connection_{session_id}"):
-                # Clear the cache to force fresh API calls
-                get_ollama_models.clear()
-                get_ollama_model_info.clear()
-                test_ollama_connection.clear()
-                test_openai_connection.clear()
-                get_openai_models.clear()
-                
-                st.success("缓存已清除，正在刷新连接状态...")
-                # No st.rerun() needed - Streamlit will update automatically
-        
-        st.divider()
-        
         # Documentation Links
         st.header("📚 相关文档")
         
