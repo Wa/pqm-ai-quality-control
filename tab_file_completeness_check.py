@@ -5,6 +5,192 @@ from config import CONFIG
 from ollama import Client as OllamaClient
 import openai
 import re
+import pandas as pd
+from datetime import datetime
+import json
+
+def parse_llm_table_response(response_text):
+    """Parse LLM response to extract table data."""
+    if not response_text:
+        return []
+    
+    # Look for table patterns in the response
+    # Common patterns: "应包含的交付物文件清单" followed by "是" or "否"
+    table_data = []
+    
+    # Split response into lines and look for table-like patterns
+    lines = response_text.split('\n')
+    in_table = False
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Check if we're entering a table section
+        if '应包含的交付物文件清单' in line and ('存在' in line or '是' in line or '否' in line):
+            in_table = True
+            continue
+            
+        # Skip empty lines and non-table content
+        if not line or not in_table:
+            continue
+            
+        # Look for table row patterns
+        # Pattern: filename followed by "是" or "否"
+        if '|' in line:
+            # Handle pipe-separated format
+            parts = [part.strip() for part in line.split('|')]
+            if len(parts) >= 2:
+                filename = parts[0].strip()
+                status = parts[1].strip()
+                if filename and status in ['是', '否']:
+                    table_data.append({'filename': filename, 'status': status})
+        else:
+            # Handle other formats - look for filename and status
+            # Try to find patterns like "filename: 是" or "filename: 否"
+            status_match = re.search(r'[：:]\s*(是|否)', line)
+            if status_match:
+                status = status_match.group(1)
+                filename = line[:status_match.start()].strip()
+                if filename:
+                    table_data.append({'filename': filename, 'status': status})
+    
+    return table_data
+
+def get_stage_requirements(stage_name):
+    """Get hardcoded requirements for each stage."""
+    stage_requirements = {
+        "立项阶段": [
+            "项目立项报告", "项目可行性分析报告", "项目风险评估报告", "项目计划书",
+            "项目团队组建方案", "项目预算方案", "项目时间计划", "项目质量目标",
+            "项目成本目标", "项目交付物清单"
+        ],
+        "A样阶段": [
+            "电芯规格书", "尺寸链公差计算书", "初始DFMEA", "初始特殊特性清单",
+            "三新清单", "制程标准", "开模清单", "3D数模", "2D图纸", "BOM清单",
+            "仿真报告", "测试大纲", "专利挖掘清单", "初版PFMEA", "产线规划方案",
+            "过程设计初始方案", "产品可制造性分析及风险应对报告", "初始过程流程图",
+            "初始过程特殊特性", "初版CP", "初版SOP", "工艺验证计划", "样品包装方案"
+        ],
+        "B样阶段": [
+            "产品设计验证报告", "过程设计验证报告", "产品设计确认报告", "过程设计确认报告",
+            "产品设计评审报告", "过程设计评审报告", "产品设计变更记录", "过程设计变更记录",
+            "产品设计问题清单", "过程设计问题清单", "产品设计改进方案", "过程设计改进方案",
+            "产品设计风险评估", "过程设计风险评估", "产品设计成本分析", "过程设计成本分析",
+            "产品设计质量分析", "过程设计质量分析", "产品设计进度分析", "过程设计进度分析"
+        ],
+        "C样阶段": [
+            "产品设计冻结报告", "过程设计冻结报告", "产品设计发布报告", "过程设计发布报告",
+            "产品设计归档报告", "过程设计归档报告", "产品设计总结报告", "过程设计总结报告",
+            "产品设计经验总结", "过程设计经验总结", "产品设计教训总结", "过程设计教训总结",
+            "产品设计改进建议", "过程设计改进建议", "产品设计标准化建议", "过程设计标准化建议",
+            "产品设计培训材料", "过程设计培训材料", "产品设计文档清单", "过程设计文档清单"
+        ]
+    }
+    
+    return stage_requirements.get(stage_name, [])
+
+def create_completeness_excel(all_stage_data, session_id, generated_session_dir):
+    """Create and save Excel file with completeness results in normalized format.
+    Columns: [Stage, Deliverable, Exists, FileName, Notes]
+    """
+    try:
+        rows = []
+        # Keep a deterministic stage order
+        ordered_stages = ['立项阶段', 'A样阶段', 'B样阶段', 'C样阶段']
+        for stage_name in ordered_stages:
+            for item in all_stage_data.get(stage_name, []):
+                rows.append({
+                    'Stage': stage_name,
+                    'Deliverable': item.get('filename', ''),
+                    'Exists': item.get('status', ''),  # '是' / '否'
+                    'FileName': item.get('matched_file', ''),
+                    'Notes': item.get('note', '')
+                })
+
+        df = pd.DataFrame(rows, columns=['Stage', 'Deliverable', 'Exists', 'FileName', 'Notes'])
+        
+        # Generate timestamped filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"file_completeness_results_{session_id}_{timestamp}.xlsx"
+        filepath = os.path.join(generated_session_dir, filename)
+        
+        # Save to Excel
+        df.to_excel(filepath, index=False, engine='openpyxl')
+        
+        return filepath, filename
+        
+    except Exception as e:
+        st.error(f"Excel导出失败: {e}")
+        return None, None
+
+def export_completeness_results(session_id, stage_responses, generated_session_dir):
+    """Main function to export completeness results to Excel."""
+    try:
+        all_stage_data = {}
+        
+        # Process each stage response
+        for stage_name, response_text in stage_responses.items():
+            if response_text:
+                # Prefer strict JSON, fallback to legacy text parsing
+                parsed_ok = False
+                try:
+                    data = json.loads(response_text)
+                    if isinstance(data, dict) and isinstance(data.get('items'), list):
+                        table_data = []
+                        for item in data['items']:
+                            name = str(item.get('name', '')).strip()
+                            if not name:
+                                continue
+                            exists = bool(item.get('exists'))
+                            matched_file = str(item.get('matched_file', '') or '').strip()
+                            note = str(item.get('note', '') or '').strip()
+                            if not exists:
+                                matched_file = ''
+                            table_data.append({
+                                'filename': name,
+                                'status': '是' if exists else '否',
+                                'matched_file': matched_file,
+                                'note': note
+                            })
+                        all_stage_data[stage_name] = table_data
+                        parsed_ok = True
+                except Exception:
+                    parsed_ok = False
+                
+                if not parsed_ok:
+                    # Parse LLM response to extract table data (Markdown/loose text)
+                    table_data = parse_llm_table_response(response_text)
+                    # ensure keys for downstream export
+                    for it in table_data:
+                        it.setdefault('matched_file', '')
+                        it.setdefault('note', '')
+                    all_stage_data[stage_name] = table_data
+            else:
+                # For empty stages, create "否" entries for all requirements
+                stage_requirements = get_stage_requirements(stage_name)
+                all_stage_data[stage_name] = [
+                    {'filename': req, 'status': '否', 'matched_file': '', 'note': ''} for req in stage_requirements
+                ]
+        
+        # Create Excel file
+        filepath, filename = create_completeness_excel(all_stage_data, session_id, generated_session_dir)
+        
+        if filepath:
+            st.success(f"✅ 文件齐套性检查结果已导出到: {filename}")
+            # Display the exported Excel content as a table preview
+            try:
+                df_preview = pd.read_excel(filepath)
+                st.dataframe(df_preview, use_container_width=True)
+            except Exception as e:
+                st.warning(f"无法预览导出的Excel文件: {e}")
+            return filepath
+        else:
+            st.error("❌ Excel导出失败")
+            return None
+            
+    except Exception as e:
+        st.error(f"导出过程中发生错误: {e}")
+        return None
 
 def generate_stage_prompt(stage_name, stage_folder, stage_requirements):
     """Generate prompt for a specific stage based on requirements and actual files."""
@@ -24,7 +210,26 @@ def generate_stage_prompt(stage_name, stage_folder, stage_requirements):
 {stage_name}文件夹中已有的文件清单包括
 {chr(10).join(actual_files) if actual_files else "（无文件）"}
 
-对比{stage_name}应包含的文件清单和{stage_name}文件夹中已有的文件清单，并以表格的形式给出对比结果。表格的第一列是需要的交付物文件清单，第二列写"是"或者"否"，如果该文件能在{stage_name}文件夹里找到，则写"是"，如果该文件不能在{stage_name}文件夹里找到，"否"。注意，文件名不一定完全一致，所以需要你通过常识判断。例如应包含的交付物文件清单中的一个文件为"历史问题规避清单"，而{stage_name}文件夹中有一个文件为"副本 LL-lesson learn-历史问题规避-V9.4.xlsx"，虽然文件名不完全一致，但通过常识可判断这两个指的是同一个文件，所以判断"历史问题规避清单"已经存在。最后，如果一个文件出现在{stage_name}文件夹中里，但没出现在应包含的清单里，将这些文件单独罗列出来。"""
+对比{stage_name}应包含的文件清单和{stage_name}文件夹中已有的文件清单，做匹配判断（允许合理的名称近似，例如“历史问题规避清单”≈“副本 LL-lesson learn-历史问题规避-V9.4.xlsx”）。
+
+请只输出一个JSON对象，严格符合以下结构，不要输出任何额外文本（不要有解释、markdown或其他字符）：
+{{
+  "stage": "{stage_name}",
+  "items": [
+    {{
+      "name": "<应包含的交付物文件名>",
+      "exists": true|false,
+      "matched_file": "<若exists=true，请填写在该阶段文件夹中匹配到的实际文件名；若不存在则填空字符串>",
+      "note": "<可选：关于该行的说明/备注；若无则填空字符串>"
+    }}
+    // 针对应包含清单中的每一项都输出一条
+  ]
+}}
+
+要求：
+- items必须覆盖“应包含的交付物文件清单”中的每一项，且只出现一次；
+- exists为布尔类型；
+- 仅输出上述JSON对象本身。"""
     
     return prompt
 
@@ -185,47 +390,37 @@ def render_file_completeness_check_tab(session_id):
 22. 工艺验证计划
 23. 样品包装方案""",
                 
-                "B样阶段": """1. 产品设计验证报告
-2. 过程设计验证报告
-3. 产品设计确认报告
-4. 过程设计确认报告
-5. 产品设计评审报告
-6. 过程设计评审报告
-7. 产品设计变更记录
-8. 过程设计变更记录
-9. 产品设计问题清单
-10. 过程设计问题清单
-11. 产品设计改进方案
-12. 过程设计改进方案
-13. 产品设计风险评估
-14. 过程设计风险评估
-15. 产品设计成本分析
-16. 过程设计成本分析
-17. 产品设计质量分析
-18. 过程设计质量分析
-19. 产品设计进度分析
-20. 过程设计进度分析""",
+                "B样阶段": """1. 设计变更履历表
+2. 更新电芯规格书
+3. 更新DFMEA
+4. 更新特殊特性清单
+5. 制程标准
+6. 更新3D数模
+7. 更新2D图纸
+8. 尺寸链公差计算书
+9. 更新BOM清单
+10. 更新开模清单
+11. 更新三新清单
+12. 仿真报告
+13. DV测试报告""",
                 
-                "C样阶段": """1. 产品设计冻结报告
-2. 过程设计冻结报告
-3. 产品设计发布报告
-4. 过程设计发布报告
-5. 产品设计归档报告
-6. 过程设计归档报告
-7. 产品设计总结报告
-8. 过程设计总结报告
-9. 产品设计经验总结
-10. 过程设计经验总结
-11. 产品设计教训总结
-12. 过程设计教训总结
-13. 产品设计改进建议
-14. 过程设计改进建议
-15. 产品设计标准化建议
-16. 过程设计标准化建议
-17. 产品设计培训材料
-18. 过程设计培训材料
-19. 产品设计文档清单
-20. 过程设计文档清单"""
+                "C样阶段": """1. 更新PFMEA
+2. 量产产线开发进展报告
+3. 更新样品包装方案
+4. 更新过程流程图
+5. 更新过程特殊特性清单
+6. 更新CP
+7. 更新SOP
+8. 工艺验证计划
+9. 样品历史问题清单
+10. CMK分析报告
+11. CPK分析报告
+12. 工程变更履历表
+13. 产品可制造性分析及风险应对报告
+14. 设备停机率统计表&设备故障记录表
+15. 工艺验证报告
+16. 外观标准书
+17. PV测试报告"""
             }
             
             # Generate prompts and run analysis for each stage
@@ -235,6 +430,9 @@ def render_file_completeness_check_tab(session_id):
                 ("B样阶段", session_dirs["Stage_B"]),
                 ("C样阶段", session_dirs["Stage_C"])
             ]
+            
+            # Dictionary to store all stage responses for Excel export
+            stage_responses = {}
             
             for stage_name, stage_folder in stages:
                 if os.path.exists(stage_folder):
@@ -280,7 +478,8 @@ def render_file_completeness_check_tab(session_id):
                                                 "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                                                 "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
                                                 "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
-                                                "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
+                                                "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
+                                                "format": "json"
                                             }
                                         ):
                                             new_text = chunk['message']['content']
@@ -295,21 +494,31 @@ def render_file_completeness_check_tab(session_id):
                                             top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
                                             max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
                                             presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                            frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
+                                            frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
+                                            response_format={"type": "json_object"}
                                         )
                                         for chunk in stream:
                                             delta = chunk.choices[0].delta.content or ""
                                             response_text += delta
                                             response_placeholder.write(response_text)
                                     
+                                    # Store the response for Excel export
+                                    stage_responses[stage_name] = response_text
+                                    
                                     st.chat_input(placeholder="", disabled=True, key=f"file_completeness_response_chat_input_{stage_name}_{session_id}")
                     else:
                         # Stage has no files - show simple message
                         st.info(f"📁 {stage_name}文件夹为空，因此该阶段的所有必需文件均缺失。")
+                        # Store empty response for Excel export (will be handled as "否" for all requirements)
+                        stage_responses[stage_name] = ""
             
-            # Mark analysis as completed
+            # Mark analysis as completed and export Excel
             if not session['analysis_completed']:
                 complete_analysis(session_id, 'completeness')
+                
+                # Export results to Excel after all stages are processed
+                if stage_responses:
+                    export_completeness_results(session_id, stage_responses, generated_session_dir)
 
     with col_info:
         # --- File Manager Module ---
