@@ -485,50 +485,34 @@ def render_settings_tab(session_id):
         st.header("📋 当前配置概览")
         
         if selected_backend == "ollama":
-            # Display configuration in a more compact format
-            st.write("**后端:**", selected_display_name)
-            st.write("**主机:**", CONFIG['llm']['ollama_host'])
-            st.write("**当前模型:**", selected_model)
-            st.write("**Temperature:**", st.session_state.get(f'ollama_temperature_{session_id}', 0.7))
-            st.write("**Top-p:**", st.session_state.get(f'ollama_top_p_{session_id}', 0.9))
-            st.write("**Top-k:**", st.session_state.get(f'ollama_top_k_{session_id}', 40))
-            
-            with st.expander("完整配置JSON", expanded=False):
-                config_data = {
-                    "backend": "ollama",
-                    "host": CONFIG['llm']['ollama_host'],
-                    "model": selected_model,
-                    "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                    "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                    "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                    "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                    "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
-                    "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                }
-                st.json(config_data)
-        
+            # Two-column compact overview (no JSON toggle)
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.write("**后端:**", selected_display_name)
+                st.write("**主机:**", CONFIG['llm']['ollama_host'])
+                st.write("**当前模型:**", selected_model)
+            with col_right:
+                st.write("**Temperature:**", st.session_state.get(f'ollama_temperature_{session_id}', 0.7))
+                st.write("**Top-p:**", st.session_state.get(f'ollama_top_p_{session_id}', 0.9))
+                st.write("**Top-k:**", st.session_state.get(f'ollama_top_k_{session_id}', 40))
+                st.write("**Repeat Penalty:**", st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1))
+                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 4096))
+                st.write("**num_thread:**", st.session_state.get(f'ollama_num_thread_{session_id}', 4))
+         
         elif selected_backend == "openai":
-            # Display configuration in a more compact format
-            st.write("**后端:**", selected_display_name)
-            st.write("**API地址:**", CONFIG['llm']['openai_base_url'])
-            st.write("**当前模型:**", st.session_state.get(f'openai_model_{session_id}', CONFIG['llm']['openai_model']))
-            st.write("**Temperature:**", st.session_state.get(f'openai_temperature_{session_id}', 0.7))
-            st.write("**Top-p:**", st.session_state.get(f'openai_top_p_{session_id}', 1.0))
-            st.write("**Max Tokens:**", st.session_state.get(f'openai_max_tokens_{session_id}', 2048))
-            
-            with st.expander("完整配置JSON", expanded=False):
-                config_data = {
-                    "backend": "openai",
-                    "base_url": CONFIG['llm']['openai_base_url'],
-                    "model": st.session_state.get(f'openai_model_{session_id}', CONFIG['llm']['openai_model']),
-                    "temperature": st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                    "top_p": st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                    "max_tokens": st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                    "presence_penalty": st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                    "frequency_penalty": st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
-                    "logit_bias": st.session_state.get(f'openai_logit_bias_{session_id}', '{}')
-                }
-                st.json(config_data)
+            # Two-column compact overview (no JSON toggle)
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.write("**后端:**", selected_display_name)
+                st.write("**API地址:**", CONFIG['llm']['openai_base_url'])
+                st.write("**当前模型:**", st.session_state.get(f'openai_model_{session_id}', CONFIG['llm']['openai_model']))
+            with col_right:
+                st.write("**Temperature:**", st.session_state.get(f'openai_temperature_{session_id}', 0.7))
+                st.write("**Top-p:**", st.session_state.get(f'openai_top_p_{session_id}', 1.0))
+                st.write("**Max Tokens:**", st.session_state.get(f'openai_max_tokens_{session_id}', 2048))
+                st.write("**Presence Penalty:**", st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0))
+                st.write("**Frequency Penalty:**", st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0))
+                st.write("**Logit Bias:**", st.session_state.get(f'openai_logit_bias_{session_id}', '{}'))
         
         st.divider()
         
