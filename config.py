@@ -25,7 +25,7 @@ CONFIG = {
     },
     "llm": {
         "ollama_host": "http://10.31.60.127:11434",
-        "ollama_model": "qwen3:latest",
+        "ollama_model": "gpt-oss:latest",
         "openai_base_url": "https://sg.uiuiapi.com/v1",
         "openai_api_key": "sk-dDG9UBQHLshfb8Z5FYQQXFOZAe6FtUxltMwIxg0KNCSsGKjh",
         "openai_model": "gpt-3.5-turbo"

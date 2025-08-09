@@ -393,7 +393,7 @@ def get_user_session(session_id, tab_name=None):
             'ollama_top_p': 0.9,
             'ollama_top_k': 40,
             'ollama_repeat_penalty': 1.1,
-            'ollama_num_ctx': 4096,
+            'ollama_num_ctx': 40000,
             'ollama_num_thread': 4,
             'openai_model': CONFIG["llm"]["openai_model"],
             'openai_temperature': 0.7,
