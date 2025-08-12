@@ -33,12 +33,8 @@ def load_username():
 
 def get_user_session_id(username):
     """Generate session ID based on username for persistence."""
-    if 'user_session_id' not in st.session_state:
-        # Create session ID that uses only username for folder names
-        # This ensures users can access their files from any computer
-        session_id = username
-        st.session_state['user_session_id'] = session_id
-    return st.session_state['user_session_id']
+    # Always derive from the provided username to avoid cross-user leakage
+    return username
 
 # --- Session Directory Utilities ---
 def ensure_session_dirs(base_dirs, session_id):
@@ -380,16 +376,13 @@ def render_login_widget():
     # Get current user from URL parameter (truly browser-specific)
     current_user = st.query_params.get("user", None)
     
-    # If user is in URL, validate their session file
+    # If user is in URL, keep them logged in regardless of global active flag
+    # Ensure a session file exists so they appear in active users if desired
     if current_user:
         session_data = load_user_session(current_user)
-        if session_data and session_data.get('active', False):
-            # User session is valid - they're logged in
-            return current_user
-        else:
-            # Session expired - clear URL
-            st.query_params.clear()
-            st.rerun()
+        if not session_data or not session_data.get('active', False):
+            create_user_session(current_user)
+        return current_user
     
     # Auto-login with saved username (only if no current user)
     if not current_user:
@@ -431,6 +424,9 @@ def render_login_widget():
                 
                 # Create user session for multi-user support
                 create_user_session(username.strip())
+                
+                # Pin username to this browser via query params for isolation
+                st.query_params["user"] = username.strip()
                 
                 st.success(f"欢迎，{username.strip()}！")
                 st.rerun()
