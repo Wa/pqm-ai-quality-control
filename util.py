@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import streamlit as st
 from config import CONFIG
+import time
 
 # --- Login Management ---
 def get_username_file():
@@ -41,16 +42,16 @@ def get_user_session_id(username):
 
 # --- Session Directory Utilities ---
 def ensure_session_dirs(base_dirs, session_id):
-    """Ensure session directories exist. Handle None session_id gracefully."""
-    if session_id is None:
-        # Return empty dict if session_id is None (user not logged in)
-        return {}
+    """Ensure session directories exist."""
+    import os
     
+    # Create session-specific directories
     session_dirs = {}
-    for key, base_dir in base_dirs.items():
-        session_dir = os.path.join(base_dir, session_id)
+    for dir_type, base_dir in base_dirs.items():
+        session_dir = os.path.join(base_dir, str(session_id))
         os.makedirs(session_dir, exist_ok=True)
-        session_dirs[key] = session_dir
+        session_dirs[dir_type] = session_dir
+    
     return session_dirs
 
 # --- File Upload Utility ---
@@ -293,27 +294,112 @@ class PromptGenerator:
             self.write_sheet_results_to_file(sheet_name, sheet_rows[sheet_name], sheet_results, output_file, file_name=file_name)
         return output_file 
 
+# --- Multi-User Support (Simple Username-Based) ---
+
+def get_user_sessions_dir():
+    """Get the directory for storing user session files."""
+    sessions_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+    return sessions_dir
+
+def get_user_session_file(username):
+    """Get the path to a specific user's session file."""
+    sessions_dir = get_user_sessions_dir()
+    return os.path.join(sessions_dir, f"{username}_session.json")
+
+def load_user_session(username):
+    """Load user session data from JSON file if it exists."""
+    try:
+        session_file = get_user_session_file(username)
+        if os.path.exists(session_file):
+            with open(session_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def create_user_session(username):
+    """Create a new user session with simple username-based approach."""
+    session_data = {
+        "username": username,
+        "login_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_activity": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "active": True
+    }
+    
+    # Save the session
+    if save_user_session(username, session_data):
+        return session_data
+    return None
+
+def save_user_session(username, session_data):
+    """Save user session data to a JSON file."""
+    try:
+        session_file = get_user_session_file(username)
+        with open(session_file, 'w', encoding='utf-8') as f:
+            json.dump(session_data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"保存用户会话失败: {e}")
+        return False
+
+def update_user_activity(username):
+    """Update the last activity timestamp for a user session."""
+    session_data = load_user_session(username)
+    if session_data:
+        session_data["last_activity"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_user_session(username, session_data)
+
+def deactivate_user_session(username):
+    """Mark a user session as inactive (for logout)."""
+    session_data = load_user_session(username)
+    if session_data:
+        session_data["active"] = False
+        session_data["logout_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_user_session(username, session_data)
+
+def get_active_users():
+    """Get list of currently active users."""
+    sessions_dir = get_user_sessions_dir()
+    active_users = []
+    
+    if not os.path.exists(sessions_dir):
+        return active_users
+    
+    for filename in os.listdir(sessions_dir):
+        if filename.endswith('_session.json'):
+            username = filename.replace('_session.json', '')
+            session_data = load_user_session(username)
+            if session_data and session_data.get('active', False):
+                active_users.append(username)
+    
+    return active_users
+
 def render_login_widget():
-    """Render the login widget and return username if logged in."""
-    # Initialize login state
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
+    """Render login widget using URL parameter browser isolation - zero session state dependencies."""
+    # Get current user from URL parameter (truly browser-specific)
+    current_user = st.query_params.get("user", None)
     
-    if 'username' not in st.session_state:
-        st.session_state['username'] = None
-    
-    # Auto-login if user has saved username (for page refresh convenience)
-    if not st.session_state['logged_in'] and not st.session_state['username']:
-        saved_username = load_username()
-        if saved_username:
-            # Auto-login with saved username
-            st.session_state['logged_in'] = True
-            st.session_state['username'] = saved_username
+    # If user is in URL, validate their session file
+    if current_user:
+        session_data = load_user_session(current_user)
+        if session_data and session_data.get('active', False):
+            # User session is valid - they're logged in
+            return current_user
+        else:
+            # Session expired - clear URL
+            st.query_params.clear()
             st.rerun()
     
-    # If already logged in, show logout option
-    if st.session_state['logged_in'] and st.session_state['username']:
-        return st.session_state['username']
+    # Auto-login with saved username (only if no current user)
+    if not current_user:
+        saved_username = load_username()
+        if saved_username:
+            session_data = load_user_session(saved_username)
+            if session_data and session_data.get('active', False):
+                # Auto-login with saved username
+                st.query_params["user"] = saved_username
+                st.rerun()
     
     # Show login form
     st.markdown("### 用户登录")
@@ -342,6 +428,10 @@ def render_login_widget():
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = username.strip()
                 save_username(username.strip())
+                
+                # Create user session for multi-user support
+                create_user_session(username.strip())
+                
                 st.success(f"欢迎，{username.strip()}！")
                 st.rerun()
             else:
@@ -355,7 +445,8 @@ def render_login_widget():
             except:
                 st.error("清除失败")
     
-    return None 
+    return None
+
 # --- Structured Session State Management ---
 def get_user_session(session_id, tab_name=None):
     """Get or create a structured user session with optional tab-specific state."""
@@ -447,3 +538,46 @@ def complete_analysis(session_id, tab_name):
     session = st.session_state.user_sessions[session_id]
     if tab_name in session['tabs']:
         session['tabs'][tab_name]['analysis_completed'] = True
+
+# --- Prompt Generator and File Handling ---
+class PromptGenerator:
+    """Generate prompts for different analysis types."""
+    
+    def __init__(self, session_id):
+        self.session_id = session_id
+    
+    def generate_special_symbols_prompt(self, control_plan_content, file_content):
+        """Generate prompt for special symbols analysis."""
+        return f"""请分析以下控制计划文件和待检查文件中的特殊符号使用情况：
+
+控制计划文件内容：
+{control_plan_content}
+
+待检查文件内容：
+{file_content}
+
+请检查：
+1. 特殊符号的使用是否一致
+2. 是否有遗漏的特殊符号
+3. 特殊符号的格式是否正确
+4. 是否符合行业标准
+
+请提供详细的分析报告。"""
+
+def handle_file_upload(uploaded_file, session_id, file_type):
+    """Handle file upload and save to session directory."""
+    if uploaded_file is not None:
+        # Use the existing ensure_session_dirs function
+        base_dirs = {
+            'generated_files': os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_files")
+        }
+        session_dirs = ensure_session_dirs(base_dirs, session_id)
+        session_dir = session_dirs['generated_files']
+        
+        file_path = os.path.join(session_dir, f"{file_type}_{uploaded_file.name}")
+        
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        return file_path
+    return None

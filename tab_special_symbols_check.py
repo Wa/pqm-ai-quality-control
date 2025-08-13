@@ -296,8 +296,8 @@ def render_special_symbols_check_tab(session_id):
     graph_session_dir = session_dirs["graph"]
     generated_session_dir = session_dirs["generated"]
 
-    # Initialize PromptGenerator
-    prompt_generator = PromptGenerator()
+    # Initialize prompt generator
+    prompt_generator = PromptGenerator(session_id)
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])

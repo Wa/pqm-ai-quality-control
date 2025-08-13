@@ -18,22 +18,54 @@ if username:
     # Generate session ID based on username for persistence
     session_id = get_user_session_id(username)
     
-    # Main application tabs
-    特殊特性符号检查_tab, 设计制程检查_tab, 文件要素检查_tab, 文件齐套性检查_tab, 历史问题规避_tab, 设置_tab, 帮助文档_tab = st.tabs(["特殊特性符号检查", "设计制程检查", "文件要素检查", "文件齐套性检查", "历史问题规避", "设置", "帮助文档"])
+    # Main app header with logout button
+    st.title("🤖 PQM AI 质量控制系统")
+    
+    # Show active users (multi-user support)
+    from util import get_active_users
+    active_users = get_active_users()
+    if len(active_users) > 1:
+        st.info(f"👥 当前在线用户: {', '.join(active_users)}")
+    
+    # Simple logout button
+    if st.button("🚪 退出登录", type="secondary", key="logout_button"):
+        st.write("🔍 退出登录按钮被点击，正在执行登出...")  # Debug message
+        # Deactivate user session for multi-user support
+        current_username = st.session_state.get('username')
+        if current_username:
+            from util import deactivate_user_session
+            deactivate_user_session(current_username)
+            st.write(f"✅ 已停用用户会话: {current_username}")  # Debug
+        
+        # Clear all session state immediately
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.write("✅ 会话状态已清除，正在重新加载...")  # Debug message
+        st.rerun()
+    else:
+        st.write("🔍 退出登录按钮未被点击")  # Debug: button not clicked
+    
+    st.divider()
+    
+    # Main app tabs
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "🔍 特殊符号检查", "📊 参数检查", "📁 文件要素检查", 
+        "✅ 文件完整性检查", "📚 历史问题规避", "⚙️ 设置", "❓ 帮助文档"
+    ])
 
-    with 特殊特性符号检查_tab:
+    with tab1:
         render_special_symbols_check_tab(session_id)
-    with 设计制程检查_tab:
+    with tab2:
         render_parameters_check_tab(session_id)
-    with 文件要素检查_tab:
+    with tab3:
         render_file_elements_check_tab(session_id)
-    with 文件齐套性检查_tab:
+    with tab4:
         render_file_completeness_check_tab(session_id)
-    with 历史问题规避_tab:
+    with tab5:
         render_history_issues_avoidance_tab(session_id)
-    with 设置_tab:
+    with tab6:
         render_settings_tab(session_id)
-    with 帮助文档_tab:
+    with tab7:
         render_help_documentation_tab(session_id)
 else:
     pass 

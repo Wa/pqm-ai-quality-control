@@ -539,25 +539,6 @@ def render_settings_tab(session_id):
         
         st.divider()
         
-        # User Account Management
-        st.header("👤 用户账户")
-        
-        # Get current username from session state
-        current_username = st.session_state.get('username', 'Unknown')
-        
-        st.write(f"**当前用户:** {current_username}")
-        st.write("**会话ID:**", session_id)
-        
-        # Logout button
-        if st.button("🚪 退出登录", key=f"logout_button_{session_id}", type="secondary"):
-            st.session_state['logged_in'] = False
-            st.session_state['username'] = None
-            st.session_state['user_session_id'] = None
-            st.success("✅ 已退出登录，正在返回登录页面...")
-            st.rerun()  # Necessary to return to login screen
-        
-        st.divider()
-        
         # Documentation Links
         st.header("📚 相关文档")
         
