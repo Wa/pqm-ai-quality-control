@@ -470,7 +470,11 @@ def get_user_session(session_id, tab_name=None):
                     'analysis_completed': False,
                     'ollama_history': [],
                     'openai_history': [],
-                }
+                    },
+                    'ai_agent': {
+                        'ollama_history': [],
+                        'openai_history': []
+                    }
             },
             
             # Shared settings (global)

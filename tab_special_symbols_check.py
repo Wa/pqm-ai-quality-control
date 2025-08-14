@@ -276,12 +276,13 @@ def render_special_symbols_check_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
     
-    # Add CSS to hide chat input (required for auto-scroll to work)
-    st.markdown("""
-    <style>
-    [data-testid="stChatInput"] { display: none; }
-    </style>
-    """, unsafe_allow_html=True)
+    # Add CSS to hide chat input scoped ONLY to this tab's container
+    with st.container(key="special_symbols_root"):
+        st.markdown("""
+        <style>
+        .st-key-special_symbols_root [data-testid="stChatInput"] { display: none; }
+        </style>
+        """, unsafe_allow_html=True)
     
     # Page subheader
     st.subheader("🔍 特殊特性符号检查")
