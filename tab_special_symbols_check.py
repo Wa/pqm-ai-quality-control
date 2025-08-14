@@ -301,109 +301,36 @@ def render_special_symbols_check_tab(session_id):
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
-    
-    with col_main:
-        # Get structured user session
-        session = get_user_session(session_id, 'special_symbols')
 
-        # Always show file upload section
-        render_file_upload_section(session_dirs, session_id)
-        
-        # Start button - only show if process hasn't started
-        if not session['process_started']:
-            col_buttons = st.columns([1, 1])
-            with col_buttons[0]:
-                if st.button("开始", key=f"start_button_{session_id}"):
-                    # Clear any existing generated files to ensure fresh generation
-                    output_file = os.path.join(generated_session_dir, "prompt_output.txt")
-                    result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
-                    
-                    if os.path.exists(output_file):
-                        os.remove(output_file)
-                    if os.path.exists(result_file):
-                        os.remove(result_file)
-                    
-                    # Clear chat history for fresh analysis
-                    session['ollama_history'] = []
-                    session['openai_history'] = []
-                    session['analysis_completed'] = False
-                    
-                    # Start the analysis process
-                    start_analysis(session_id, 'special_symbols')
-                    st.rerun()
-            with col_buttons[1]:
-                if st.button("演示", key=f"demo_button_{session_id}"):
-                    # Workflow-based approach: Start → Run → Finish
-                    
-                    # 2. Run demo workflow
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
-                    
-                    # Copy files from demonstration folders to session folders
-                    demo_folder_mapping = {
-                        "CP_files": "cp",
-                        "graph_files": "graph", 
-                        "target_files": "target"
-                    }
-                    
-                    files_copied = False
-                    for demo_folder, session_key in demo_folder_mapping.items():
-                        demo_folder_path = os.path.join(demo_base_dir, demo_folder)
-                        session_folder_path = session_dirs[session_key]
-                        
-                        if os.path.exists(demo_folder_path):
-                            # Copy all files from demo folder to session folder
-                            for file_name in os.listdir(demo_folder_path):
-                                demo_file_path = os.path.join(demo_folder_path, file_name)
-                                session_file_path = os.path.join(session_folder_path, file_name)
-                                
-                                if os.path.isfile(demo_file_path):
-                                    import shutil
-                                    shutil.copy2(demo_file_path, session_file_path)
-                                    files_copied = True
-                    
-                    # Copy pre-generated prompt file (but not result file)
-                    demo_prompt_file = os.path.join(demo_base_dir, "generated_files", "prompt_output.txt")
-                    session_prompt_file = os.path.join(generated_session_dir, "prompt_output.txt")
-                    
-                    if os.path.exists(demo_prompt_file):
-                        import shutil
-                        shutil.copy2(demo_prompt_file, session_prompt_file)
-                    
-                    if files_copied:
-                        # Set up session for analysis
-                        session['analysis_completed'] = False
-                        session['process_started'] = True
-                        session['ollama_history'] = []
-                        session['openai_history'] = []
-                        
-                        # Force page refresh to hide buttons and show analysis
-                        st.rerun()
-                    else:
-                        st.error("演示文件不存在，请检查演示文件夹")
-        
-        # Show status and reset button if process has started
-        if session['process_started']:
-            # Add a button to reset and clear history
-            if st.button("重新开始", key=f"reset_button_{session_id}"):
-                reset_user_session(session_id, 'special_symbols')
-                st.rerun()
-            
-            # Check if we need to run analysis
-            target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
-            if target_files_list:
-                if session['process_started'] and not session['analysis_completed']:
-                    # Run the analysis workflow in full width within the main column
-                    run_analysis_workflow(session_id, session_dirs, prompt_generator)
-                    
-                    # Mark as completed
-                    session['analysis_completed'] = True
-                else:
-                    # Files exist but process wasn't explicitly started
-                    st.info("检测到待检查文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
-            else:
-                st.warning("请先上传待检查文件")
-
+    # Render the file/info column FIRST so file lists appear immediately after clicking buttons
     with col_info:
+        # Early bulk operations: handle clear-all before listing files so UI updates immediately
+        backend_available = is_backend_available()
+        sess_for_clear = get_user_session(session_id, 'special_symbols')
+        workflow_safe_for_clear = not sess_for_clear['process_started'] or sess_for_clear['analysis_completed']
+        if workflow_safe_for_clear:
+            if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
+                if backend_available:
+                    client = get_backend_client()
+                    result = client.clear_files(session_id)
+                    if result.get("status") == "success":
+                        st.success(f"✅ {result.get('message', '已清空所有文件')}")
+                    else:
+                        st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
+                else:
+                    try:
+                        for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
+                            for file in os.listdir(dir_path):
+                                file_path = os.path.join(dir_path, file)
+                                if os.path.isfile(file_path):
+                                    os.remove(file_path)
+                        st.success("已清空所有文件")
+                    except Exception as e:
+                        st.error(f"清空失败: {e}")
+        else:
+            st.info("🔄 分析进行中，请等待完成后再清空文件")
+            st.button("🗑️ 清空所有文件", key=f"clear_all_files_disabled_{session_id}", disabled=True)
+
         # --- File Manager Module ---
         def get_file_list(folder):
             # Always use FastAPI backend
@@ -644,43 +571,106 @@ def render_special_symbols_check_tab(session_id):
             if new_graph_files:
                 handle_file_upload(new_graph_files, graph_session_dir)
 
-        # Bulk operations
-        st.markdown("---")
-        st.markdown("### 批量操作")
-        
-        # Check if backend is available
-        backend_available = is_backend_available()
-        
-        # Only show clear button when workflow is not running and no analysis is in progress
+        # (Bulk operations moved earlier to avoid UI lag)
+
+    # Now render the MAIN column containing uploads, demo/start, and streaming analysis
+    with col_main:
+        # Get structured user session
         session = get_user_session(session_id, 'special_symbols')
-        workflow_safe = not session['process_started'] or session['analysis_completed']
+
+        # Always show file upload section
+        render_file_upload_section(session_dirs, session_id)
         
-        if workflow_safe:
-            if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
-                if backend_available:
-                    # Use FastAPI backend
-                    client = get_backend_client()
-                    result = client.clear_files(session_id)
+        # Start button - only show if process hasn't started
+        if not session['process_started']:
+            col_buttons = st.columns([1, 1])
+            with col_buttons[0]:
+                if st.button("开始", key=f"start_button_{session_id}"):
+                    # Clear any existing generated files to ensure fresh generation
+                    output_file = os.path.join(generated_session_dir, "prompt_output.txt")
+                    result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
                     
-                    if result.get("status") == "success":
-                        st.success(f"✅ {result.get('message', '已清空所有文件')}")
-                        # Don't use st.rerun() - let Streamlit handle the refresh naturally
+                    if os.path.exists(output_file):
+                        os.remove(output_file)
+                    if os.path.exists(result_file):
+                        os.remove(result_file)
+                    
+                    # Clear chat history for fresh analysis
+                    session['ollama_history'] = []
+                    session['openai_history'] = []
+                    session['analysis_completed'] = False
+                    
+                    # Start the analysis process
+                    start_analysis(session_id, 'special_symbols')
+                    st.rerun()
+            with col_buttons[1]:
+                if st.button("演示", key=f"demo_button_{session_id}"):
+                    # Workflow-based approach: Start → Run → Finish
+                    
+                    # 2. Run demo workflow
+                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    
+                    # Copy files from demonstration folders to session folders
+                    demo_folder_mapping = {
+                        "CP_files": "cp",
+                        "graph_files": "graph", 
+                        "target_files": "target"
+                    }
+                    
+                    files_copied = False
+                    for demo_folder, session_key in demo_folder_mapping.items():
+                        demo_folder_path = os.path.join(demo_base_dir, demo_folder)
+                        session_folder_path = session_dirs[session_key]
+                        
+                        if os.path.exists(demo_folder_path):
+                            # Copy all files from demo folder to session folder
+                            for file_name in os.listdir(demo_folder_path):
+                                demo_file_path = os.path.join(demo_folder_path, file_name)
+                                session_file_path = os.path.join(session_folder_path, file_name)
+                                
+                                if os.path.isfile(demo_file_path):
+                                    import shutil
+                                    shutil.copy2(demo_file_path, session_file_path)
+                                    files_copied = True
+                    
+                    # Copy pre-generated prompt file (but not result file)
+                    demo_prompt_file = os.path.join(demo_base_dir, "generated_files", "prompt_output.txt")
+                    session_prompt_file = os.path.join(generated_session_dir, "prompt_output.txt")
+                    
+                    if os.path.exists(demo_prompt_file):
+                        import shutil
+                        shutil.copy2(demo_prompt_file, session_prompt_file)
+                    
+                    if files_copied:
+                        # Set up session for analysis
+                        session['analysis_completed'] = False
+                        session['process_started'] = True
+                        session['ollama_history'] = []
+                        session['openai_history'] = []
+                        
+                        # Force page refresh to hide buttons and show analysis
+                        st.rerun()
                     else:
-                        st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
+                        st.error("演示文件不存在，请检查演示文件夹")
+        
+        # Show status and reset button if process has started
+        if session['process_started']:
+            # Add a button to reset and clear history
+            if st.button("重新开始", key=f"reset_button_{session_id}"):
+                reset_user_session(session_id, 'special_symbols')
+                st.rerun()
+            
+            # Check if we need to run analysis
+            target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
+            if target_files_list:
+                if session['process_started'] and not session['analysis_completed']:
+                    # Run the analysis workflow in full width within the main column
+                    run_analysis_workflow(session_id, session_dirs, prompt_generator)
+                    
+                    # Mark as completed
+                    session['analysis_completed'] = True
                 else:
-                    # Fallback to direct file operations
-                    try:
-                        # Clear all session directories
-                        for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                            for file in os.listdir(dir_path):
-                                file_path = os.path.join(dir_path, file)
-                                if os.path.isfile(file_path):
-                                    os.remove(file_path)
-                        st.success("已清空所有文件")
-                        # Don't use st.rerun() - let Streamlit handle the refresh naturally
-                    except Exception as e:
-                        st.error(f"清空失败: {e}")
-        else:
-            # Show disabled state when workflow is running
-            st.info("🔄 分析进行中，请等待完成后再清空文件")
-            st.button("🗑️ 清空所有文件", key=f"clear_all_files_disabled_{session_id}", disabled=True) 
+                    # Files exist but process wasn't explicitly started
+                    st.info("检测到待检查文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
+            else:
+                st.warning("请先上传待检查文件")

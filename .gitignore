@@ -65,6 +65,10 @@ temp/
 
 # User-specific settings and data
 user_settings/
+user_sessions/
+
+# Media uploads
+media/
 
 # Generated analysis files (keep requirements.txt and README.md)
 *.txt

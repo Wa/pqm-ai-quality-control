@@ -111,6 +111,30 @@ def get_ollama_model_info(model_name):
     except Exception:
         return None
 
+@st.cache_data(ttl=60)
+def get_ollama_tags_map():
+    """Return a mapping of model name -> tag info (size, modified_at, digest, etc.)."""
+    try:
+        response = requests.get(f"{CONFIG['llm']['ollama_host']}/api/tags", timeout=3)
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            return {m.get('name') or m.get('model'): m for m in models}
+    except Exception:
+        pass
+    return {}
+
+def _human_size(num_bytes: int) -> str:
+    try:
+        num = int(num_bytes)
+    except Exception:
+        return "N/A"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while num >= 1024 and i < len(units) - 1:
+        num /= 1024.0
+        i += 1
+    return f"{num:.1f} {units[i]}"
+
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def test_ollama_connection():
     """Test connection to Ollama server."""
@@ -333,19 +357,31 @@ def render_settings_tab(session_id):
                     # No st.rerun() needed - settings are saved and will apply to future runs
                     # This prevents interrupting any currently running analysis
             
-                # Model Information - with error handling
+                # Model Information - display always, enrich from /api/tags when /api/show lacks fields
                 try:
-                    model_info = get_ollama_model_info(selected_model)
-                    if model_info:
-                        with st.expander("模型详细信息", expanded=False):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.write(f"**模型名称:** {model_info.get('name', 'N/A')}")
-                                st.write(f"**模型大小:** {model_info.get('size', 'N/A')} bytes")
-                                st.write(f"**修改时间:** {model_info.get('modified_at', 'N/A')}")
-                            with col2:
-                                st.write(f"**参数数量:** {model_info.get('parameter_size', 'N/A')}")
-                                st.write(f"**量化级别:** {model_info.get('quantization_level', 'N/A')}")
+                    show_info = get_ollama_model_info(selected_model) or {}
+                    tags_map = get_ollama_tags_map() or {}
+                    tag_info = tags_map.get(selected_model, {})
+
+                    name = show_info.get('name') or tag_info.get('name') or selected_model
+                    size_val = show_info.get('size') or tag_info.get('size')
+                    size_h = _human_size(size_val) if size_val is not None else 'N/A'
+                    modified = show_info.get('modified_at') or tag_info.get('modified_at') or 'N/A'
+                    param_sz = (show_info.get('parameter_size')
+                                or (show_info.get('model_info') or {}).get('parameter_size')
+                                or 'N/A')
+                    quant_lvl = (show_info.get('quantization_level')
+                                 or (show_info.get('model_info') or {}).get('quantization_level')
+                                 or 'N/A')
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**模型名称:** {name}")
+                        st.write(f"**模型大小:** {size_h}")
+                        st.write(f"**修改时间:** {modified}")
+                    with col2:
+                        st.write(f"**参数数量:** {param_sz}")
+                        st.write(f"**量化级别:** {quant_lvl}")
                 except Exception as e:
                     st.warning(f"无法获取模型详细信息: {e}")
             
@@ -395,53 +431,60 @@ def render_settings_tab(session_id):
                     key=f"ollama_repeat_penalty_{session_id}"
                 )
             
-            # Advanced Ollama Settings
-            with st.expander("高级设置", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    # Determine dynamic max context length from model info
-                    dynamic_max_ctx = 8192
-                    try:
-                        info = get_ollama_model_info(selected_model) or {}
-                        mi = info.get('model_info', {}) or {}
-                        # Try common keys first
-                        for key in [
-                            'gptoss.context_length',
-                            'qwen3.context_length',
-                            'llama.context_length',
-                            'general.context_length'
-                        ]:
-                            if key in mi and isinstance(mi[key], int):
-                                dynamic_max_ctx = int(mi[key])
+            # Advanced Ollama Settings (always visible)
+            col1, col2 = st.columns(2)
+            with col1:
+                # Determine dynamic max context length from model info
+                dynamic_max_ctx = 8192
+                try:
+                    info = get_ollama_model_info(selected_model) or {}
+                    mi = info.get('model_info', {}) or {}
+                    # Try common keys first
+                    for key in [
+                        'gptoss.context_length',
+                        'qwen3.context_length',
+                        'llama.context_length',
+                        'general.context_length'
+                    ]:
+                        if key in mi and isinstance(mi[key], int):
+                            dynamic_max_ctx = int(mi[key])
+                            break
+                    else:
+                        # Fallback: search for any *.context_length field
+                        for k, v in mi.items():
+                            if isinstance(k, str) and k.endswith('context_length') and isinstance(v, int):
+                                dynamic_max_ctx = int(v)
                                 break
-                        else:
-                            # Fallback: search for any *.context_length field
-                            for k, v in mi.items():
-                                if isinstance(k, str) and k.endswith('context_length') and isinstance(v, int):
-                                    dynamic_max_ctx = int(v)
-                                    break
-                    except Exception:
-                        dynamic_max_ctx = 8192
-                    num_ctx = st.number_input(
-                        "上下文窗口大小",
-                        min_value=512,
-                        max_value=dynamic_max_ctx,
-                        value=st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
-                        step=512,
-                        help="模型可以处理的最大上下文长度。",
-                        key=f"ollama_num_ctx_{session_id}"
-                    )
-                
-                with col2:
-                    num_thread = st.number_input(
-                        "线程数",
-                        min_value=1,
-                        max_value=16,
-                        value=st.session_state.get(f'ollama_num_thread_{session_id}', 4),
-                        step=1,
-                        help="用于推理的CPU线程数。",
-                        key=f"ollama_num_thread_{session_id}"
-                    )
+                except Exception:
+                    dynamic_max_ctx = 8192
+                # Default to 40960; allow values beyond model-reported max (for RoPE scaling / custom builds)
+                _default_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 40960)
+                num_ctx = st.number_input(
+                    "上下文窗口大小",
+                    min_value=512,
+                    max_value=131072,
+                    value=_default_ctx,
+                    step=512,
+                    help="模型可以处理的最大上下文长度。",
+                    key=f"ollama_num_ctx_{session_id}"
+                )
+                # Hint if chosen value exceeds the model-reported max
+                try:
+                    if num_ctx > int(dynamic_max_ctx):
+                        st.caption(f"提示: 当前模型建议最大为 {dynamic_max_ctx}。较大的上下文可能依赖RoPE缩放/自定义模型或导致内存压力。")
+                except Exception:
+                    pass
+            
+            with col2:
+                num_thread = st.number_input(
+                    "线程数",
+                    min_value=1,
+                    max_value=16,
+                    value=st.session_state.get(f'ollama_num_thread_{session_id}', 4),
+                    step=1,
+                    help="用于推理的CPU线程数。",
+                    key=f"ollama_num_thread_{session_id}"
+                )
         
         elif selected_backend == "openai":
             # OpenAI Model Selection

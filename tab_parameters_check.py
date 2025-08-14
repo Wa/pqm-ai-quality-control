@@ -97,7 +97,149 @@ def render_parameters_check_tab(session_id):
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
-    
+
+    # Render the info/file column FIRST so lists appear immediately when demo starts
+    with col_info:
+        # Early bulk operations: handle clear-all before listing so UI updates immediately
+        if st.button("🗑️ 清空所有文件", key=f"parameters_clear_all_files_{session_id}"):
+            try:
+                for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
+                    for file in os.listdir(dir_path):
+                        file_path = os.path.join(dir_path, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                st.success("已清空所有文件")
+            except Exception as e:
+                st.error(f"清空失败: {e}")
+        # --- File Manager Module ---
+        def get_file_list(folder):
+            if not os.path.exists(folder):
+                return []
+            files = []
+            for f in os.listdir(folder):
+                file_path = os.path.join(folder, f)
+                if os.path.isfile(file_path):
+                    stat = os.stat(file_path)
+                    files.append({
+                        'name': f,
+                        'size': stat.st_size,
+                        'modified': stat.st_mtime,
+                        'path': file_path
+                    })
+            # Use stable sorting by name first, then by modification time
+            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
+
+        def format_file_size(size_bytes):
+            """Convert bytes to human readable format."""
+            if size_bytes == 0:
+                return "0 B"
+            size_names = ["B", "KB", "MB", "GB"]
+            i = 0
+            while size_bytes >= 1024 and i < len(size_names) - 1:
+                size_bytes /= 1024.0
+                i += 1
+            return f"{size_bytes:.1f} {size_names[i]}"
+
+        def format_timestamp(timestamp):
+            """Convert timestamp to readable date."""
+            from datetime import datetime
+            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
+
+        def truncate_filename(filename, max_length=40):
+            """Truncate filename if too long, preserving extension."""
+            if len(filename) <= max_length:
+                return filename
+            name, ext = os.path.splitext(filename)
+            available_length = max_length - len(ext) - 3
+            if available_length <= 0:
+                return filename[:max_length-3] + "..."
+            truncated_name = name[:available_length] + "..."
+            return truncated_name + ext
+
+        # File Manager Tabs
+        tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "待检查文件", "图纸文件"])
+        
+        with tab_cp:
+            cp_files_list = get_file_list(cp_session_dir)
+            if cp_files_list:
+                for i, file_info in enumerate(cp_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            delete_key = f"parameters_delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_cp_files = st.file_uploader("选择控制计划文件", type=None, accept_multiple_files=True, key=f"parameters_cp_uploader_tab_{session_id}")
+            if new_cp_files:
+                handle_file_upload(new_cp_files, cp_session_dir)
+
+        with tab_target:
+            target_files_list = get_file_list(target_session_dir)
+            if target_files_list:
+                for i, file_info in enumerate(target_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            delete_key = f"parameters_delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_target_files = st.file_uploader("选择待检查文件", type=None, accept_multiple_files=True, key=f"parameters_target_uploader_tab_{session_id}")
+            if new_target_files:
+                handle_file_upload(new_target_files, target_session_dir)
+
+        with tab_graph:
+            graph_files_list = get_file_list(graph_session_dir)
+            if graph_files_list:
+                for i, file_info in enumerate(graph_files_list):
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_info, col_action = st.columns([3, 1])
+                        with col_info:
+                            st.write(f"**文件名:** {file_info['name']}")
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_action:
+                            delete_key = f"parameters_delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+            st.markdown("---")
+            st.markdown("**上传新文件:**")
+            new_graph_files = st.file_uploader("选择图纸文件", type=None, accept_multiple_files=True, key=f"parameters_graph_uploader_tab_{session_id}")
+            if new_graph_files:
+                handle_file_upload(new_graph_files, graph_session_dir)
+    # Render MAIN column content: uploaders and controls
     with col_main:
         # Get structured user session
         session = get_user_session(session_id, 'parameters')
@@ -154,167 +296,5 @@ def render_parameters_check_tab(session_id):
             else:
                 st.warning("请先上传待检查文件")
 
-    with col_info:
-        # --- File Manager Module ---
-        def get_file_list(folder):
-            if not os.path.exists(folder):
-                return []
-            files = []
-            for f in os.listdir(folder):
-                file_path = os.path.join(folder, f)
-                if os.path.isfile(file_path):
-                    stat = os.stat(file_path)
-                    files.append({
-                        'name': f,
-                        'size': stat.st_size,
-                        'modified': stat.st_mtime,
-                        'path': file_path
-                    })
-            # Use stable sorting by name first, then by modification time
-            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
 
-        def format_file_size(size_bytes):
-            """Convert bytes to human readable format."""
-            if size_bytes == 0:
-                return "0 B"
-            size_names = ["B", "KB", "MB", "GB"]
-            i = 0
-            while size_bytes >= 1024 and i < len(size_names) - 1:
-                size_bytes /= 1024.0
-                i += 1
-            return f"{size_bytes:.1f} {size_names[i]}"
-
-        def format_timestamp(timestamp):
-            """Convert timestamp to readable date."""
-            from datetime import datetime
-            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
-
-        def truncate_filename(filename, max_length=40):
-            """Truncate filename if too long, preserving extension."""
-            if len(filename) <= max_length:
-                return filename
-            
-            # Split filename and extension
-            name, ext = os.path.splitext(filename)
-            # Calculate how much space we have for the name part
-            available_length = max_length - len(ext) - 3  # 3 for "..."
-            
-            if available_length <= 0:
-                # If extension is too long, just truncate the whole thing
-                return filename[:max_length-3] + "..."
-            
-            # Truncate name part and add ellipsis
-            truncated_name = name[:available_length] + "..."
-            return truncated_name + ext
-
-        # File Manager Tabs
-        tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "待检查文件", "图纸文件"])
-        
-        with tab_cp:
-            cp_files_list = get_file_list(cp_session_dir)
-            
-            if cp_files_list:
-                for i, file_info in enumerate(cp_files_list):
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"parameters_delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
-            else:
-                st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_cp_files = st.file_uploader("选择控制计划文件", type=None, accept_multiple_files=True, key=f"parameters_cp_uploader_tab_{session_id}")
-            if new_cp_files:
-                handle_file_upload(new_cp_files, cp_session_dir)
-
-        with tab_target:
-            target_files_list = get_file_list(target_session_dir)
-            
-            if target_files_list:
-                for i, file_info in enumerate(target_files_list):
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"parameters_delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
-            else:
-                st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_target_files = st.file_uploader("选择待检查文件", type=None, accept_multiple_files=True, key=f"parameters_target_uploader_tab_{session_id}")
-            if new_target_files:
-                handle_file_upload(new_target_files, target_session_dir)
-
-        with tab_graph:
-            graph_files_list = get_file_list(graph_session_dir)
-            
-            if graph_files_list:
-                for i, file_info in enumerate(graph_files_list):
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"parameters_delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
-            else:
-                st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_graph_files = st.file_uploader("选择图纸文件", type=None, accept_multiple_files=True, key=f"parameters_graph_uploader_tab_{session_id}")
-            if new_graph_files:
-                handle_file_upload(new_graph_files, graph_session_dir)
-
-        # Bulk operations
-        st.markdown("---")
-        st.markdown("### 批量操作")
-        
-        if st.button("🗑️ 清空所有文件", key=f"parameters_clear_all_files_{session_id}"):
-            try:
-                # Clear all session directories
-                for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                    for file in os.listdir(dir_path):
-                        file_path = os.path.join(dir_path, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                st.success("已清空所有文件")
-            except Exception as e:
-                st.error(f"清空失败: {e}") 
+        # (Bulk operations moved earlier to avoid duplicate keys and to update UI promptly)
