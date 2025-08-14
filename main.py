@@ -6,6 +6,7 @@ from tab_file_completeness_check import render_file_completeness_check_tab
 from tab_history_issues_avoidance import render_history_issues_avoidance_tab
 from tab_settings import render_settings_tab
 from tab_help_documentation import render_help_documentation_tab
+from tab_home import render_home_tab
 from util import render_login_widget, get_user_session_id
 
 st.set_page_config(layout="wide")
@@ -21,11 +22,13 @@ if username:
     # Login-related UI moved to Settings tab
     
     # Main app tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "🔍 特殊符号检查", "📊 参数检查", "📁 文件要素检查", 
-        "✅ 文件完整性检查", "📚 历史问题规避", "⚙️ 设置", "❓ 帮助文档"
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "🏠 首页", "🔍 特殊特性符号检查", "📊 设计制程检查", "✅ 文件要素检查", 
+        "📁 文件齐套性检查", "📋 历史问题规避", "⚙️ 设置", "📖 帮助文档"
     ])
 
+    with tab0:
+        render_home_tab(session_id)
     with tab1:
         render_special_symbols_check_tab(session_id)
     with tab2:

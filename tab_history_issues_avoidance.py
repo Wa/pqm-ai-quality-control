@@ -8,7 +8,7 @@ def render_history_issues_avoidance_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
     
-    st.title("历史问题规避")
+    
     st.info("此功能暂未开放。下方为占位符内容，后续将替换为实际历史问题规避数据。")
     # Display a subset of the Excel sheet as a placeholder
     excel_path = str(CONFIG["files"]["history_excel"])

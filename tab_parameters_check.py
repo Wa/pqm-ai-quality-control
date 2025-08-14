@@ -5,7 +5,6 @@ from config import CONFIG
 
 class ParametersPromptGenerator:
     """Generate prompts for LLM to perform parameters check on Excel files."""
-    
     def __init__(self):
         """Initialize the ParametersPromptGenerator."""
         pass
@@ -75,9 +74,9 @@ def render_parameters_check_tab(session_id):
     [data-testid="stChatInput"] { display: none; }
     </style>
     """, unsafe_allow_html=True)
+    # Page subheader
+    st.subheader("📊 设计制程检查")
     
-    st.title("设计制程检查")
-    st.caption("检查设计参数和制程参数的合理性")
     
     # Base directories for each upload box - using centralized config
     BASE_DIRS = {

@@ -13,15 +13,12 @@ def parse_llm_table_response(response_text):
     """Parse LLM response to extract table data."""
     if not response_text:
         return []
-    
     # Look for table patterns in the response
     # Common patterns: "应包含的交付物文件清单" followed by "是" or "否"
     table_data = []
-    
     # Split response into lines and look for table-like patterns
     lines = response_text.split('\n')
     in_table = False
-    
     for line in lines:
         line = line.strip()
         
@@ -53,7 +50,6 @@ def parse_llm_table_response(response_text):
                 filename = line[:status_match.start()].strip()
                 if filename:
                     table_data.append({'filename': filename, 'status': status})
-    
     return table_data
 
 def get_stage_requirements(stage_name):
@@ -239,6 +235,9 @@ def render_file_completeness_check_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
     
+    # Page subheader
+    st.subheader("📁 文件齐套性检查")
+    
     # Add CSS to hide chat input (required for auto-scroll to work)
     st.markdown("""
     <style>
@@ -246,7 +245,7 @@ def render_file_completeness_check_tab(session_id):
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("文件齐套性检查")
+    
     
     # Define APQP stage directories (with session subfolders) - using centralized config
     base_dir = str(CONFIG["directories"]["apqp_files"])

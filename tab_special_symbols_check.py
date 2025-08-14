@@ -283,6 +283,9 @@ def render_special_symbols_check_tab(session_id):
     </style>
     """, unsafe_allow_html=True)
     
+    # Page subheader
+    st.subheader("🔍 特殊特性符号检查")
+    
     # Base directories for each upload box - using centralized config
     BASE_DIRS = {
         "cp": str(CONFIG["directories"]["cp_files"]),

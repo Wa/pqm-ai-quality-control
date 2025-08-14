@@ -8,53 +8,87 @@ def render_help_documentation_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
     
-    st.title("📚 帮助文档")
+    
     
     # Create two columns: sidebar navigation and main content
     col1, col2 = st.columns([1, 3])
-    
+
+    # Define section mappings (label -> key)
+    section_mappings = {
+        "📖 概述": "overview",
+        "🔍 特殊特性符号检查": "special_symbols_check",
+        "📊 设计制程检查": "parameters_check",
+        "✅ 文件要素检查": "file_elements_check",
+        "📁 文件齐套性检查": "file_completeness_check",
+        "📋 历史问题规避": "history_issues_avoidance",
+        "⚙️ 设置": "settings",
+        "❓ 常见问题": "faq",
+        "🛠 技术支持": "support",
+    }
+
     with col1:
-        st.markdown("### 📋 目录")
-        
-        # Define section mappings
-        section_mappings = {
-            "概述": "overview",
-            "特殊特性符号检查": "special_symbols_check",
-            "设计制程检查": "parameters_check",
-            "文件要素检查": "file_elements_check",
-            "文件齐套性检查": "file_completeness_check",
-            "历史问题规避": "history_issues_avoidance",
-            "设置": "settings",
-            "常见问题": "faq",
-            "技术支持": "support"
-        }
-        
-        # Get the selected section
-        selected_section = st.selectbox(
-            "选择章节",
-            list(section_mappings.keys()),
-            key=f"help_section_{session_id}"
+        # Minimal nav styling to resemble docs sidebar
+        st.markdown(
+            """
+            <style>
+            .help-nav a, .help-nav button {
+                width: 100%;
+                text-align: left;
+            }
+            .help-nav .nav-item {
+                padding: 6px 8px;
+                margin: 2px 0;
+                border-radius: 6px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
-    
+
+        st.markdown("### 目录")
+
+        # Current selected section in session_state (default to 📖 概述)
+        selected_section = st.session_state.get(
+            f"help_section_active_{session_id}", "📖 概述"
+        )
+        # Backward compatibility: if an old value without icon is stored, reset to default
+        valid_labels = set(section_mappings.keys())
+        if selected_section not in valid_labels:
+            selected_section = "📖 概述"
+            st.session_state[f"help_section_active_{session_id}"] = selected_section
+
+        # Render a vertical list of buttons
+        for label, key_name in section_mappings.items():
+            is_active = (label == selected_section)
+            button_label = f"{label}"
+            if st.button(
+                button_label,
+                key=f"help_nav_{key_name}_{session_id}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[f"help_section_active_{session_id}"] = label
+                st.rerun()
+
     with col2:
         # Display content based on selection
-        if selected_section == "概述":
+        if selected_section == "📖 概述":
             render_overview_section()
-        elif selected_section == "特殊特性符号检查":
+        elif selected_section == "🔍 特殊特性符号检查":
             render_special_symbols_check_section()
-        elif selected_section == "设计制程检查":
+        elif selected_section == "📊 设计制程检查":
             render_parameters_check_section()
-        elif selected_section == "文件要素检查":
+        elif selected_section == "✅ 文件要素检查":
             render_file_elements_check_section()
-        elif selected_section == "文件齐套性检查":
+        elif selected_section == "📁 文件齐套性检查":
             render_file_completeness_check_section()
-        elif selected_section == "历史问题规避":
+        elif selected_section == "📋 历史问题规避":
             render_history_issues_avoidance_section()
-        elif selected_section == "设置":
+        elif selected_section == "⚙️ 设置":
             render_settings_section()
-        elif selected_section == "常见问题":
+        elif selected_section == "❓ 常见问题":
             render_faq_section()
-        elif selected_section == "技术支持":
+        elif selected_section == "🛠 技术支持":
             render_support_section()
 
 def render_overview_section():
@@ -62,7 +96,6 @@ def render_overview_section():
     st.header("📖 系统概述")
     
     st.markdown("""
-    ## 🎯 系统概述
     
     PQM AI 质量控制系统是一个基于人工智能的文档分析工具，专门用于APQP（Advanced Product Quality Planning）文档的质量控制。
     
