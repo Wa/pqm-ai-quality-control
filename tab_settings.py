@@ -39,6 +39,8 @@ def load_user_settings(session_id):
                 'ollama_top_p': 0.9,
                 'ollama_top_k': 40,
                 'ollama_repeat_penalty': 1.1,
+                'ollama_num_ctx': 40960,
+                'ollama_num_thread': 4,
                 'openai_temperature': 0.7,
                 'openai_top_p': 1.0,
                 'openai_max_tokens': 2048,
@@ -56,6 +58,8 @@ def load_user_settings(session_id):
             'ollama_top_p': 0.9,
             'ollama_top_k': 40,
             'ollama_repeat_penalty': 1.1,
+            'ollama_num_ctx': 40960,
+            'ollama_num_thread': 4,
             'openai_temperature': 0.7,
             'openai_top_p': 1.0,
             'openai_max_tokens': 2048,
@@ -73,6 +77,8 @@ def save_current_settings(session_id):
         'ollama_top_p': st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
         'ollama_top_k': st.session_state.get(f'ollama_top_k_{session_id}', 40),
         'ollama_repeat_penalty': st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+        'ollama_num_ctx': st.session_state.get(f'ollama_num_ctx_{session_id}', 40960),
+        'ollama_num_thread': st.session_state.get(f'ollama_num_thread_{session_id}', 4),
         'openai_temperature': st.session_state.get(f'openai_temperature_{session_id}', 0.7),
         'openai_top_p': st.session_state.get(f'openai_top_p_{session_id}', 1.0),
         'openai_max_tokens': st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
@@ -592,7 +598,7 @@ def render_settings_tab(session_id):
                 st.write("**Top-p:**", st.session_state.get(f'ollama_top_p_{session_id}', 0.9))
                 st.write("**Top-k:**", st.session_state.get(f'ollama_top_k_{session_id}', 40))
                 st.write("**Repeat Penalty:**", st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1))
-                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 4096))
+                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 40960))
                 st.write("**num_thread:**", st.session_state.get(f'ollama_num_thread_{session_id}', 4))
          
         elif selected_backend == "openai":
@@ -627,3 +633,7 @@ def render_settings_tab(session_id):
             st.link_button("API文档", "https://platform.openai.com/docs/api-reference")
             st.link_button("模型参数", "https://platform.openai.com/docs/api-reference/chat/create")
             st.link_button("UIUIApi", "https://sg.uiuiapi.com/") 
+
+        # Persist any changes made during this run (sliders, inputs, etc.)
+        # Model selection already saves explicitly above; this ensures other parameters are saved too.
+        save_current_settings(session_id)
