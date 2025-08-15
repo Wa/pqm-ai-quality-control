@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from util import get_user_session, reset_user_session, start_analysis, complete_analysis, PromptGenerator, ensure_session_dirs, handle_file_upload
+from util import get_user_session, reset_user_session, start_analysis, complete_analysis, SimplePromptGenerator, ensure_session_dirs, handle_file_upload
 from config import CONFIG
 from backend_client import get_backend_client, is_backend_available
 from ollama import Client as OllamaClient
@@ -301,7 +301,7 @@ def render_special_symbols_check_tab(session_id):
     generated_session_dir = session_dirs["generated"]
 
     # Initialize prompt generator
-    prompt_generator = PromptGenerator(session_id)
+    prompt_generator = SimplePromptGenerator(session_id)
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])

@@ -540,8 +540,12 @@ def complete_analysis(session_id, tab_name):
         session['tabs'][tab_name]['analysis_completed'] = True
 
 # --- Prompt Generator and File Handling ---
-class PromptGenerator:
-    """Generate prompts for different analysis types."""
+class SimplePromptGenerator:
+    """Generate prompts for different analysis types.
+
+    Note: Renamed from PromptGenerator to avoid colliding with the
+    earlier PromptGenerator class used by the special symbols workflow.
+    """
     
     def __init__(self, session_id):
         self.session_id = session_id
@@ -564,8 +568,17 @@ class PromptGenerator:
 
 请提供详细的分析报告。"""
 
-def handle_file_upload(uploaded_file, session_id, file_type):
-    """Handle file upload and save to session directory."""
+    def generate_prompt(self, control_plan_dir, target_file, output_file):
+        """Compatibility wrapper used by tabs expecting generate_prompt()."""
+        delegate = PromptGenerator()
+        return delegate.generate_prompt(control_plan_dir, target_file, output_file)
+
+def save_uploaded_file(uploaded_file, session_id, file_type):
+    """Handle a single file upload and save to the session directory.
+
+    Note: Renamed from handle_file_upload to avoid clashing with the
+    bulk-upload helper used across tabs (files, save_dir).
+    """
     if uploaded_file is not None:
         # Use the existing ensure_session_dirs function
         base_dirs = {
