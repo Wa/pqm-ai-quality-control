@@ -23,9 +23,12 @@ def render_ai_agent_tab(session_id):
     )
 
     # Determine backend and initialize clients
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
-    if llm_backend == 'ollama':
-        ollama_client = OllamaClient(host=CONFIG["llm"]["ollama_host"]) 
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+    if llm_backend in ('ollama_127', 'ollama_9'):
+        host = CONFIG["llm"]["ollama_host"]
+        if llm_backend == 'ollama_9':
+            host = host.replace("10.31.60.127", "10.31.60.9")
+        ollama_client = OllamaClient(host=host) 
     else:
         openai.base_url = CONFIG["llm"]["openai_base_url"]
         openai.api_key = CONFIG["llm"]["openai_api_key"]
@@ -55,7 +58,7 @@ def render_ai_agent_tab(session_id):
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         response_text = ""
-        if llm_backend == 'ollama':
+        if llm_backend in ('ollama_127','ollama_9'):
             for chunk in ollama_client.chat(
                 model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
                 messages=messages,

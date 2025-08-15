@@ -266,12 +266,13 @@ def render_settings_tab(session_id):
         st.header("🤖 大语言模型选择")
         
         llm_options = {
-            "Ollama (local)": "ollama",
+            "Ollama (10.31.60.127:11434)": "ollama_127",
+            "Ollama (10.31.60.9:11434)": "ollama_9",
             "OpenAI (sg.uiuiapi.com)": "openai"
         }
         
         # Get current LLM choice from session state
-        current_llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
+        current_llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
         
         # Find the display name for current backend
         current_display_name = None
@@ -306,7 +307,7 @@ def render_settings_tab(session_id):
         
         col1, col2 = st.columns(2)
         with col1:
-            if selected_backend == "ollama":
+            if selected_backend in ("ollama_127", "ollama_9"):
                 if test_ollama_connection():
                     st.success("✅ Ollama服务器连接正常")
                 else:
@@ -320,7 +321,7 @@ def render_settings_tab(session_id):
         with col2:
             st.info(f"""
             **当前后端:** {selected_display_name}  
-            **状态:** {'在线' if (selected_backend == "ollama" and test_ollama_connection()) or (selected_backend == "openai" and test_openai_connection()) else '离线'}
+            **状态:** {'在线' if (selected_backend in ("ollama_127", "ollama_9") and test_ollama_connection()) or (selected_backend == "openai" and test_openai_connection()) else '离线'}
             """)
         
         st.divider()
@@ -328,7 +329,7 @@ def render_settings_tab(session_id):
         # Model Configuration
         st.header("⚙️ 模型配置")
         
-        if selected_backend == "ollama":
+        if selected_backend in ("ollama_127", "ollama_9"):
             # Initialize selected_model variable from session state
             selected_model = st.session_state.get(f'ollama_model_{session_id}', CONFIG['llm']['ollama_model'])
             
@@ -365,7 +366,17 @@ def render_settings_tab(session_id):
             
                 # Model Information - display always, enrich from /api/tags when /api/show lacks fields
                 try:
-                    show_info = get_ollama_model_info(selected_model) or {}
+                    # Switch host dynamically for model info queries
+                    import requests
+                    host = CONFIG['llm']['ollama_host']
+                    if selected_backend == "ollama_9":
+                        host = host.replace("10.31.60.127", "10.31.60.9")
+                    response = requests.post(
+                        f"{host}/api/show",
+                        json={"name": selected_model},
+                        timeout=3
+                    )
+                    show_info = response.json() if response.status_code == 200 else {}
                     tags_map = get_ollama_tags_map() or {}
                     tag_info = tags_map.get(selected_model, {})
 

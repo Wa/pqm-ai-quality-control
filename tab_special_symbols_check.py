@@ -70,11 +70,14 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
     
     # Get LLM backend from session state (default to ollama)
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
     
     # Initialize LLM clients based on selected backend
-    if llm_backend == "ollama":
-        ollama_client = OllamaClient(host=CONFIG["llm"]["ollama_host"])
+    if llm_backend in ("ollama_127","ollama_9"):
+        host = CONFIG["llm"]["ollama_host"]
+        if llm_backend == "ollama_9":
+            host = host.replace("10.31.60.127", "10.31.60.9")
+        ollama_client = OllamaClient(host=host)
         
         # Streaming generator for Ollama
         def llm_stream_chat(prompt):

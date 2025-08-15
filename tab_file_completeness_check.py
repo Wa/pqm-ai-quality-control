@@ -263,9 +263,12 @@ def render_file_completeness_check_tab(session_id):
     session = get_user_session(session_id, 'completeness')
     
     # Initialize LLM clients
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama')
-    if llm_backend == "ollama":
-        ollama_client = OllamaClient(host=CONFIG["llm"]["ollama_host"])
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+    if llm_backend in ("ollama_127","ollama_9"):
+        host = CONFIG["llm"]["ollama_host"]
+        if llm_backend == "ollama_9":
+            host = host.replace("10.31.60.127", "10.31.60.9")
+        ollama_client = OllamaClient(host=host)
     elif llm_backend == "openai":
         openai.api_key = CONFIG["llm"]["openai_api_key"]
         openai.base_url = CONFIG["llm"]["openai_base_url"]
