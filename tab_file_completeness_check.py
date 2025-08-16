@@ -130,6 +130,7 @@ def export_completeness_results(session_id, stage_responses, generated_session_d
                 # Prefer strict JSON, fallback to legacy text parsing
                 parsed_ok = False
                 try:
+                    # Try direct JSON first
                     data = json.loads(response_text)
                     if isinstance(data, dict) and isinstance(data.get('items'), list):
                         table_data = []
@@ -137,7 +138,13 @@ def export_completeness_results(session_id, stage_responses, generated_session_d
                             name = str(item.get('name', '')).strip()
                             if not name:
                                 continue
-                            exists = bool(item.get('exists'))
+                            # Robust boolean coercion for various model outputs
+                            exists_raw = item.get('exists')
+                            if isinstance(exists_raw, bool):
+                                exists = exists_raw
+                            else:
+                                s = str(exists_raw).strip().lower()
+                                exists = s in ("true", "1", "yes", "y", "是", "存在")
                             matched_file = str(item.get('matched_file', '') or '').strip()
                             note = str(item.get('note', '') or '').strip()
                             if not exists:
@@ -151,7 +158,49 @@ def export_completeness_results(session_id, stage_responses, generated_session_d
                         all_stage_data[stage_name] = table_data
                         parsed_ok = True
                 except Exception:
-                    parsed_ok = False
+                    # Try to extract JSON object from code fences or extra text
+                    try:
+                        # Remove markdown fences if present
+                        cleaned = response_text.strip()
+                        if cleaned.startswith("```"):
+                            cleaned = cleaned.strip('`')
+                            idx = cleaned.find("{")
+                            if idx >= 0:
+                                cleaned = cleaned[idx:]
+                        # Fallback: slice first {...} block
+                        start = cleaned.find('{')
+                        end = cleaned.rfind('}')
+                        if start >= 0 and end > start:
+                            cleaned = cleaned[start:end+1]
+                        data = json.loads(cleaned)
+                        if isinstance(data, dict) and isinstance(data.get('items'), list):
+                            table_data = []
+                            for item in data['items']:
+                                name = str(item.get('name', '')).strip()
+                                if not name:
+                                    continue
+                                exists_raw = item.get('exists')
+                                if isinstance(exists_raw, bool):
+                                    exists = exists_raw
+                                else:
+                                    s = str(exists_raw).strip().lower()
+                                    exists = s in ("true", "1", "yes", "y", "是", "存在")
+                                matched_file = str(item.get('matched_file', '') or '').strip()
+                                note = str(item.get('note', '') or '').strip()
+                                if not exists:
+                                    matched_file = ''
+                                table_data.append({
+                                    'filename': name,
+                                    'status': '是' if exists else '否',
+                                    'matched_file': matched_file,
+                                    'note': note
+                                })
+                            all_stage_data[stage_name] = table_data
+                            parsed_ok = True
+                        else:
+                            parsed_ok = False
+                    except Exception:
+                        parsed_ok = False
                 
                 if not parsed_ok:
                     # Parse LLM response to extract table data (Markdown/loose text)
@@ -635,7 +684,7 @@ def render_file_completeness_check_tab(session_id):
                                     
                                     # Stream the response using selected LLM
                                     response_text = ""
-                                    if llm_backend == "ollama":
+                                    if llm_backend in ("ollama_127", "ollama_9"):
                                         for chunk in ollama_client.chat(
                                             model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
                                             messages=[{"role": "user", "content": prompt}],
@@ -645,7 +694,7 @@ def render_file_completeness_check_tab(session_id):
                                                 "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                                                 "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                                                 "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 40960),
+                                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
                                                 "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
                                                 "format": "json"
                                             }

@@ -90,7 +90,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             top_p = st.session_state.get(f'ollama_top_p_{session_id}', 0.9)
             top_k = st.session_state.get(f'ollama_top_k_{session_id}', 40)
             repeat_penalty = st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1)
-            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 40960)
+            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 131072)
             num_thread = st.session_state.get(f'ollama_num_thread_{session_id}', 4)
             
             for chunk in ollama_client.chat(
@@ -237,7 +237,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                     
                     # Stream the final response using selected LLM
                     symbol_check_final_response = ""
-                    if llm_backend == "ollama":
+                    if llm_backend in ("ollama_127", "ollama_9"):
                         for chunk in ollama_client.chat(
                             model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
                             messages=[{"role": "user", "content": symbol_check_final_prompt}],
@@ -247,7 +247,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                                 "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                                 "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                                 "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 4096),
+                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
                                 "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
                             }
                         ):
