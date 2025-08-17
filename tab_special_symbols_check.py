@@ -50,6 +50,8 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     cp_session_dir = session_dirs["cp"]
     target_session_dir = session_dirs["target"]
     generated_session_dir = session_dirs["generated"]
+    special_dir = session_dirs.get("generated_special_symbols_check", os.path.join(generated_session_dir, "special_symbols_check"))
+    os.makedirs(special_dir, exist_ok=True)
     st.info("🔍 开始特殊特性符号检查分析，请稍候...")
     
     # Get target files
@@ -59,7 +61,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
         return
     
     target_file_path = os.path.join(target_session_dir, target_files_list[0])
-    output_file = os.path.join(generated_session_dir, "prompt_output.txt")
+    output_file = os.path.join(special_dir, "prompt_output.txt")
     
     # Check if prompt_output.txt already exists (from demo or previous run)
     if not os.path.exists(output_file):
@@ -67,7 +69,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
         prompt_generator.generate_prompt(cp_session_dir, target_file_path, output_file)
     
     prompts = parse_prompts(output_file)
-    result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
+    result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
     
     # Get LLM backend from session state (default to ollama)
     llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
@@ -211,7 +213,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     
     # --- 特殊特性符号不一致结论 (symbol_check_final) ---
     # Read the content of 2_symbol_check_result.txt as the new prompt
-    symbol_check_final_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
+    symbol_check_final_file = os.path.join(special_dir, "2_symbol_check_result.txt")
     if os.path.exists(symbol_check_final_file):
         with open(symbol_check_final_file, "r", encoding="utf-8") as f:
             symbol_check_final_prompt = f.read()
@@ -269,6 +271,11 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                             delta = chunk.choices[0].delta.content or ""
                             symbol_check_final_response += delta
                             response_placeholder.write(symbol_check_final_response)
+                    
+                    # Save only the AI response to the subfolder
+                    result_path = os.path.join(special_dir, "special_symbols_check_result.txt")
+                    with open(result_path, "w", encoding="utf-8") as f:
+                        f.write(symbol_check_final_response)
                 
                 st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
     st.info("✅ 分析完成")
@@ -302,6 +309,8 @@ def render_special_symbols_check_tab(session_id):
     target_session_dir = session_dirs["target"]
     graph_session_dir = session_dirs["graph"]
     generated_session_dir = session_dirs["generated"]
+    special_dir = session_dirs.get("generated_special_symbols_check", os.path.join(generated_session_dir, "special_symbols_check"))
+    os.makedirs(special_dir, exist_ok=True)
 
     # Initialize prompt generator
     prompt_generator = SimplePromptGenerator(session_id)
@@ -594,8 +603,8 @@ def render_special_symbols_check_tab(session_id):
             with col_buttons[0]:
                 if st.button("开始", key=f"start_button_{session_id}"):
                     # Clear any existing generated files to ensure fresh generation
-                    output_file = os.path.join(generated_session_dir, "prompt_output.txt")
-                    result_file = os.path.join(generated_session_dir, "2_symbol_check_result.txt")
+                    output_file = os.path.join(special_dir, "prompt_output.txt")
+                    result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
                     
                     if os.path.exists(output_file):
                         os.remove(output_file)
@@ -642,7 +651,7 @@ def render_special_symbols_check_tab(session_id):
                     
                     # Copy pre-generated prompt file (but not result file)
                     demo_prompt_file = os.path.join(demo_base_dir, "generated_files", "prompt_output.txt")
-                    session_prompt_file = os.path.join(generated_session_dir, "prompt_output.txt")
+                    session_prompt_file = os.path.join(special_dir, "prompt_output.txt")
                     
                     if os.path.exists(demo_prompt_file):
                         import shutil

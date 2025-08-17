@@ -307,6 +307,8 @@ def render_file_completeness_check_tab(session_id):
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     generated_session_dir = session_dirs["generated"]
+    completeness_dir = session_dirs.get("generated_file_completeness_check", os.path.join(generated_session_dir, "file_completeness_check"))
+    os.makedirs(completeness_dir, exist_ok=True)
 
     # Get structured user session
     session = get_user_session(session_id, 'completeness')
@@ -659,7 +661,7 @@ def render_file_completeness_check_tab(session_id):
                         prompt = generate_stage_prompt(stage_name, stage_folder, stage_requirements[stage_name])
                         
                         # Save prompt to file
-                        prompt_file = os.path.join(generated_session_dir, f"prompt_{stage_name}.txt")
+                        prompt_file = os.path.join(completeness_dir, f"prompt_{stage_name}.txt")
                         with open(prompt_file, "w", encoding="utf-8") as f:
                             f.write(prompt)
                         
@@ -735,7 +737,7 @@ def render_file_completeness_check_tab(session_id):
                 
                 # Export results to Excel after all stages are processed
                 if stage_responses:
-                    export_completeness_results(session_id, stage_responses, generated_session_dir)
+                    export_completeness_results(session_id, stage_responses, completeness_dir)
 
 
         # (Bulk operations moved earlier to avoid duplicate keys and to update UI promptly)

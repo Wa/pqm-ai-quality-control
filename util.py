@@ -40,14 +40,34 @@ def get_user_session_id(username):
 def ensure_session_dirs(base_dirs, session_id):
     """Ensure session directories exist."""
     import os
-    
+
     # Create session-specific directories
     session_dirs = {}
     for dir_type, base_dir in base_dirs.items():
         session_dir = os.path.join(base_dir, str(session_id))
         os.makedirs(session_dir, exist_ok=True)
         session_dirs[dir_type] = session_dir
-    
+
+    # Ensure standard subfolders inside generated/<session_id>
+    for gen_key in ("generated", "generated_files"):
+        if gen_key in session_dirs:
+            generated_root = session_dirs[gen_key]
+            subfolders = [
+                "special_symbols_check",
+                "parameters_check",
+                "file_elements_check",
+                "file_completeness_check",
+                "history_issues_avoidance",
+            ]
+            for name in subfolders:
+                os.makedirs(os.path.join(generated_root, name), exist_ok=True)
+            # Convenience keys
+            session_dirs["generated_special_symbols_check"] = os.path.join(generated_root, "special_symbols_check")
+            session_dirs["generated_parameters_check"] = os.path.join(generated_root, "parameters_check")
+            session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
+            session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
+            session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
+
     return session_dirs
 
 # --- File Upload Utility ---
