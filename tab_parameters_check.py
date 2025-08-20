@@ -3,25 +3,6 @@ import os
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
 
-class ParametersPromptGenerator:
-    """Generate prompts for LLM to perform parameters check on Excel files."""
-    def __init__(self):
-        """Initialize the ParametersPromptGenerator."""
-        pass
-    
-    def generate_prompt(self, cp_session_dir, target_file_path, output_file):
-        """
-        Generate prompts for parameters check analysis.
-        
-        Args:
-            cp_session_dir: Directory containing control plan files
-            target_file_path: Path to the target file to be checked
-            output_file: Output file path for generated prompts
-        """
-        # TODO: Implement prompt generation logic
-        # This will read Excel files and generate prompts for parameters check
-        pass
-
 def render_parameters_file_upload_section(session_dirs, session_id):
     """Render the file upload section for parameters check with unique keys."""
     col_cp, col_target, col_graph = st.columns([1, 1, 1])
@@ -41,7 +22,7 @@ def render_parameters_file_upload_section(session_dirs, session_id):
         if graph_files:
             handle_file_upload(graph_files, session_dirs["graph"])
 
-def run_parameters_analysis_workflow(session_id, session_dirs, prompt_generator):
+def run_parameters_analysis_workflow(session_id, session_dirs):
     """Run the complete parameters analysis workflow."""
     # Get tab-specific session state
     session = get_user_session(session_id, 'parameters')
@@ -90,9 +71,8 @@ def render_parameters_check_tab(session_id):
     target_session_dir = session_dirs["target"]
     graph_session_dir = session_dirs["graph"]
     generated_session_dir = session_dirs["generated"]
-
-    # Initialize ParametersPromptGenerator
-    prompt_generator = ParametersPromptGenerator()
+    parameters_dir = session_dirs.get("generated_parameters_check", os.path.join(generated_session_dir, "parameters_check"))
+    os.makedirs(parameters_dir, exist_ok=True)
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
@@ -252,8 +232,8 @@ def render_parameters_check_tab(session_id):
             with col_buttons[0]:
                 if st.button("开始", key=f"parameters_start_button_{session_id}"):
                     # Clear any existing generated files to ensure fresh generation
-                    output_file = os.path.join(generated_session_dir, "parameters_prompt_output.txt")
-                    result_file = os.path.join(generated_session_dir, "parameters_check_result.txt")
+                    output_file = os.path.join(parameters_dir, "parameters_prompt_output.txt")
+                    result_file = os.path.join(parameters_dir, "parameters_check_result.txt")
                     
                     if os.path.exists(output_file):
                         os.remove(output_file)
@@ -270,8 +250,37 @@ def render_parameters_check_tab(session_id):
                     st.rerun()
             with col_buttons[1]:
                 if st.button("演示", key=f"parameters_demo_button_{session_id}"):
-                    # TODO: Implement demo functionality
-                    st.info("🚧 演示功能正在开发中，敬请期待！")
+                    # Copy demo files into this tab's session directories only (isolated)
+                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    # Map demonstration folders to this tab's session directories
+                    demo_folder_mapping = {
+                        "CP_files": "cp",
+                        "graph_files": "graph",
+                        "target_files": "target",
+                    }
+                    files_copied = False
+                    for demo_folder, session_key in demo_folder_mapping.items():
+                        demo_folder_path = os.path.join(demo_base_dir, demo_folder)
+                        session_folder_path = session_dirs[session_key]
+
+                        if os.path.exists(demo_folder_path):
+                            for file_name in os.listdir(demo_folder_path):
+                                demo_file_path = os.path.join(demo_folder_path, file_name)
+                                session_file_path = os.path.join(session_folder_path, file_name)
+                                if os.path.isfile(demo_file_path):
+                                    import shutil
+                                    shutil.copy2(demo_file_path, session_file_path)
+                                    files_copied = True
+
+                    if files_copied:
+                        # Prepare this tab's session state and start analysis lifecycle
+                        session['analysis_completed'] = False
+                        session['process_started'] = True
+                        session['ollama_history'] = []
+                        session['openai_history'] = []
+                        st.rerun()
+                    else:
+                        st.info("未找到演示文件，请检查 demonstration 目录。")
         
         # Show status and reset button if process has started
         if session['process_started']:
@@ -285,7 +294,7 @@ def render_parameters_check_tab(session_id):
             if target_files_list:
                 if session['process_started'] and not session['analysis_completed']:
                     # Run the analysis workflow
-                    run_parameters_analysis_workflow(session_id, session_dirs, prompt_generator)
+                    run_parameters_analysis_workflow(session_id, session_dirs)
                     
                     # Mark as completed
                     session['analysis_completed'] = True
