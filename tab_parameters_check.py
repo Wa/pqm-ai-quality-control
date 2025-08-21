@@ -1,7 +1,9 @@
 import streamlit as st
 import os
+import json
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
+from extract_parameters import extract_parameters_to_json
 
 def render_parameters_file_upload_section(session_dirs, session_id):
     """Render the file upload section for parameters check with unique keys."""
@@ -240,6 +242,57 @@ def render_parameters_check_tab(session_id):
                     if os.path.exists(result_file):
                         os.remove(result_file)
                     
+                    # Extract parameters into JSON for this tab
+                    try:
+                        # Extract CP parameters JSON
+                        json_output_path = os.path.join(parameters_dir, "extracted_data.json")
+                        summary = extract_parameters_to_json(
+                            cp_session_dir=cp_session_dir,
+                            output_json_path=json_output_path,
+                            # Read config from parameters subfolder instead of CP_files/<user>
+                            config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
+                        )
+                        st.success(f"已生成参数JSON: {summary['output']} (表: {summary['sheets']}, 行: {summary['rows']})")
+
+                        # Extract Target parameters JSON
+                        json_output_path_t = os.path.join(parameters_dir, "extracted_target_data.json")
+                        summary_t = extract_parameters_to_json(
+                            cp_session_dir=target_session_dir,
+                            output_json_path=json_output_path_t,
+                            config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
+                        )
+                        st.success(f"已生成目标参数JSON: {summary_t['output']} (表: {summary_t['sheets']}, 行: {summary_t['rows']})")
+
+                        # Build LLM prompt that embeds both JSON payloads and save to file
+                        try:
+                            with open(json_output_path_t, 'r', encoding='utf-8') as f:
+                                target_json_obj = json.load(f)
+                            with open(json_output_path, 'r', encoding='utf-8') as f:
+                                cp_json_obj = json.load(f)
+                            target_files = sorted({str(item.get('File')) for item in target_json_obj if item.get('File')}) or ["目标文件"]
+                            target_json_str = json.dumps(target_json_obj, ensure_ascii=False, indent=2)
+                            cp_json_str = json.dumps(cp_json_obj, ensure_ascii=False, indent=2)
+                            prompt_text = (
+                                "你是一名 APQP 专家，需要对应用交付物进行设计与制程参数一致性评审。\n"
+                                "请对比目标文件与控制计划中的参数名称、单位、取值/公差范围等是否一致，逐项给出：是否一致、不一致项、缺失项、疑似问题，"
+                                "并提供引用依据（段落/数据）与改进建议；最后给出总体结论。\n\n"
+                                f"以下为目标文件（提取自：{', '.join(target_files)}）的参数数据（JSON）：\n"
+                                f"{target_json_str}\n\n"
+                                "以下为相关控制计划文件汇总得到的参数数据（JSON）：\n"
+                                f"{cp_json_str}\n\n"
+                                "请基于上述数据完成评审，并按参数项分组输出。"
+                            )
+                            prompt_path = os.path.join(parameters_dir, "parameters_llm_prompt.txt")
+                            with open(prompt_path, 'w', encoding='utf-8') as f:
+                                f.write(prompt_text)
+                            st.success(f"已生成评审提示词: {prompt_path}")
+                        except Exception as e:
+                            st.warning(f"提示词生成失败（不会影响后续JSON结果）：{e}")
+
+                    except Exception as e:
+                        st.error(f"参数提取失败: {e}")
+                        return
+                    
                     # Clear chat history for fresh analysis
                     session['ollama_history'] = []
                     session['openai_history'] = []
@@ -272,6 +325,12 @@ def render_parameters_check_tab(session_id):
                                     shutil.copy2(demo_file_path, session_file_path)
                                     files_copied = True
 
+                    # Also copy excel_sheets.csv config into parameters_dir for this tab
+                    demo_config_file = os.path.join(demo_base_dir, "excel_sheets.csv")
+                    if os.path.exists(demo_config_file):
+                        import shutil
+                        shutil.copy2(demo_config_file, os.path.join(parameters_dir, "excel_sheets.csv"))
+
                     if files_copied:
                         # Prepare this tab's session state and start analysis lifecycle
                         session['analysis_completed'] = False
@@ -281,6 +340,8 @@ def render_parameters_check_tab(session_id):
                         st.rerun()
                     else:
                         st.info("未找到演示文件，请检查 demonstration 目录。")
+
+            
         
         # Show status and reset button if process has started
         if session['process_started']:
