@@ -3,7 +3,7 @@ import os
 import json
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
-from extract_parameters import extract_parameters_to_json
+from util import extract_parameters_to_json
 from ollama import Client as OllamaClient
 import openai
 
