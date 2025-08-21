@@ -4,6 +4,8 @@ import json
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
 from extract_parameters import extract_parameters_to_json
+from ollama import Client as OllamaClient
+import openai
 
 def render_parameters_file_upload_section(session_dirs, session_id):
     """Render the file upload section for parameters check with unique keys."""
@@ -31,8 +33,9 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
     cp_session_dir = session_dirs["cp"]
     target_session_dir = session_dirs["target"]
     generated_session_dir = session_dirs["generated"]
+    parameters_dir = session_dirs.get("generated_parameters_check", os.path.join(generated_session_dir, "parameters_check"))
     
-    st.info("🔍 开始设计制程检查分析，请稍候...")
+    st.info("🔍 正在进行设计制程参数一致性分析…")
     
     # Get target files
     target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
@@ -40,9 +43,90 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
         st.warning("请先上传待检查文件")
         return
     
-    # TODO: Implement the actual parameters analysis workflow
-    # This will be similar to the special symbols check but for parameters
-    st.info("🚧 设计制程检查功能正在开发中，敬请期待！")
+    # Initialize LLM backend (default to ollama)
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+    if llm_backend in ("ollama_127", "ollama_9"):
+        host = CONFIG["llm"]["ollama_host"]
+        if llm_backend == "ollama_9":
+            host = host.replace("10.31.60.127", "10.31.60.9")
+        ollama_client = OllamaClient(host=host)
+    elif llm_backend == "openai":
+        openai.base_url = CONFIG["llm"]["openai_base_url"]
+        openai.api_key = CONFIG["llm"]["openai_api_key"]
+
+    # Load prompt from parameters_llm_prompt.txt
+    prompt_path = os.path.join(parameters_dir, "parameters_llm_prompt.txt")
+    if not os.path.exists(prompt_path):
+        st.warning("未找到提示词文件，请先点击“开始”生成 JSON 与提示词后再试。")
+        return
+    with open(prompt_path, 'r', encoding='utf-8') as f:
+        full_prompt_text = f.read()
+
+    # Display prompt and stream LLM response side by side
+    col_prompt, col_response = st.columns([1, 1])
+    with col_prompt:
+        st.subheader("目标参数评审 - 提示词")
+        prompt_container = st.container(height=400)
+        with prompt_container:
+            with st.chat_message("user"):
+                prompt_placeholder = st.empty()
+                streamed = ""
+                for line in full_prompt_text.splitlines(True):
+                    streamed += line
+                    prompt_placeholder.text(streamed)
+        st.chat_input(placeholder="", disabled=True, key=f"parameters_prompt_input_{session_id}")
+
+    with col_response:
+        st.subheader("目标参数评审 - AI回复")
+        response_container = st.container(height=400)
+        with response_container:
+            with st.chat_message("assistant"):
+                response_placeholder = st.empty()
+                response_text = ""
+
+                if llm_backend in ("ollama_127", "ollama_9"):
+                    for chunk in ollama_client.chat(
+                        model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
+                        messages=[{"role": "user", "content": full_prompt_text}],
+                        stream=True,
+                        options={
+                            "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
+                            "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
+                            "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
+                            "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                            "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
+                        }
+                    ):
+                        new_text = chunk['message']['content']
+                        response_text += new_text
+                        response_placeholder.write(response_text)
+                elif llm_backend == "openai":
+                    stream = openai.chat.completions.create(
+                        model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
+                        messages=[{"role": "user", "content": full_prompt_text}],
+                        stream=True,
+                        temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
+                        top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
+                        max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                        presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
+                        frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
+                    )
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content or ""
+                        response_text += delta
+                        response_placeholder.write(response_text)
+
+                # Save LLM response to file in parameters_check subfolder
+                try:
+                    result_path = os.path.join(parameters_dir, "parameters_check_result.txt")
+                    with open(result_path, 'w', encoding='utf-8') as f:
+                        f.write(response_text)
+                    st.success(f"已保存评审结果: {result_path}")
+                except Exception as e:
+                    st.warning(f"评审结果保存失败: {e}")
+
+        st.chat_input(placeholder="", disabled=True, key=f"parameters_response_input_{session_id}")
 
 def render_parameters_check_tab(session_id):
     """Render the design process parameters check tab."""

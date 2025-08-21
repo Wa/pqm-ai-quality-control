@@ -6,6 +6,7 @@ import json
 import streamlit as st
 from config import CONFIG
 import time
+import hashlib
 
 # --- Login Management ---
 def get_username_file():
@@ -614,3 +615,39 @@ def save_uploaded_file(uploaded_file, session_id, file_type):
         
         return file_path
     return None
+
+
+# --- Utility helpers (migrated from temporary scripts) ---
+def json_canonical_sha256(obj) -> str:
+    """Compute a canonical SHA-256 for a JSON-serializable object (sorted keys, compact)."""
+    canon = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest().upper()
+
+def convert_extracted_json_to_dataframe(records):
+    """Convert extracted JSON format [{File, Sheet, data: [[...], ...]}, ...] to a flat DataFrame.
+
+    Columns: File, Sheet, Row, C1..Ck
+    """
+    rows = []
+    max_cols = 0
+    for rec in records:
+        file_name = rec.get("File")
+        sheet_name = rec.get("Sheet")
+        data = rec.get("data", []) or []
+        for idx, row in enumerate(data, start=1):
+            max_cols = max(max_cols, len(row))
+            rows.append({
+                "File": file_name,
+                "Sheet": sheet_name,
+                "Row": idx,
+                "_cells": row,
+            })
+    columns = [f"C{i}" for i in range(1, max_cols + 1)]
+    table_rows = []
+    for r in rows:
+        base = {"File": r["File"], "Sheet": r["Sheet"], "Row": r["Row"]}
+        cells = r["_cells"]
+        for i, col_name in enumerate(columns, start=1):
+            base[col_name] = cells[i - 1] if i - 1 < len(cells) else ""
+        table_rows.append(base)
+    return pd.DataFrame(table_rows, columns=["File", "Sheet", "Row"] + columns)
