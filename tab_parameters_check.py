@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import json
+import pandas as pd
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
 from config import CONFIG
 from util import extract_parameters_to_json
@@ -127,6 +128,166 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
                     st.warning(f"评审结果保存失败: {e}")
 
         st.chat_input(placeholder="", disabled=True, key=f"parameters_response_input_{session_id}")
+
+    # --- 第二阶段：仅提取“不一致项”并输出为JSON ---
+    st.divider()
+    st.subheader("不一致项提取（JSON）")
+
+    # Load prior free-form results (may exist from one or multiple runs)
+    result_paths = [
+        os.path.join(parameters_dir, "parameters_check_result.txt"),
+        os.path.join(parameters_dir, "parameters_check_result2.txt"),
+    ]
+    prior_texts = []
+    for p in result_paths:
+        if os.path.exists(p):
+            try:
+                prior_texts.append(open(p, 'r', encoding='utf-8').read())
+            except Exception:
+                pass
+    prior_merged = "\n\n---\n\n".join(prior_texts) if prior_texts else ""
+
+    if not prior_merged:
+        st.info("未找到先前的评审结果文本（parameters_check_result*.txt），请先完成上一阶段评审。")
+        return
+
+    # Build JSON-only extraction prompt
+    extraction_prompt = (
+        "你是一名 APQP 专家。现在请从以下评审文本中“只提取不一致项”，忽略所有“一致项”和“控制计划中无对应项/缺失项”的描述。\n"
+        "请将不一致项整理为统一的 JSON 对象并严格只输出 JSON（不要输出解释/Markdown）。\n"
+        "在每条不一致项中，location 字段必须提供明确定位：‘目标文件文件名 + 目标文件Sheet名称；控制计划文件文件名 + 控制计划Sheet名称’，"
+        "若无法确定其中任一项，请以空字符串代替。不要提供行号。\n\n"
+        "JSON 结构要求如下：\n"
+        "{\n"
+        "  \"items\": [\n"
+        "    {\n"
+        "      \"parameter\": \"参数名称\",\n"
+        "      \"target_value\": \"目标文件中的取值/范围（若无法确定则空字符串）\",\n"
+        "      \"cp_value\": \"控制计划中的取值/范围（若无法确定则空字符串）\",\n"
+        "      \"location\": \"目标文件：<文件名>/<Sheet名>；控制计划：<文件名>/<Sheet名>\",\n"
+        "      \"issue\": \"一句话说明不一致点\",\n"
+        "      \"suggestion\": \"简短的修订建议\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "评审文本如下：\n"
+        f"{prior_merged}"
+    )
+
+    col_json_prompt, col_json_response = st.columns([1, 1])
+    with col_json_prompt:
+        st.markdown("**JSON 提取 - 提示词**")
+        prompt_container2 = st.container(height=400)
+        with prompt_container2:
+            with st.chat_message("user"):
+                ph = st.empty()
+                streamed = ""
+                for line in extraction_prompt.splitlines(True):
+                    streamed += line
+                    ph.text(streamed)
+        st.chat_input(placeholder="", disabled=True, key=f"parameters_json_prompt_input_{session_id}")
+
+    with col_json_response:
+        st.markdown("**JSON 提取 - AI回复**")
+        response_container2 = st.container(height=400)
+        with response_container2:
+            with st.chat_message("assistant"):
+                ph2 = st.empty()
+                json_response_text = ""
+
+                if llm_backend in ("ollama_127", "ollama_9"):
+                    for chunk in ollama_client.chat(
+                        model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
+                        messages=[{"role": "user", "content": extraction_prompt}],
+                        stream=True,
+                        options={
+                            "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
+                            "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
+                            "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
+                            "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                            "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
+                            "format": "json",
+                        }
+                    ):
+                        new_text = chunk['message']['content']
+                        json_response_text += new_text
+                        ph2.write(json_response_text)
+                elif llm_backend == "openai":
+                    stream = openai.chat.completions.create(
+                        model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
+                        messages=[{"role": "user", "content": extraction_prompt}],
+                        stream=True,
+                        temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
+                        top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
+                        max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                        presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
+                        frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
+                        response_format={"type": "json_object"},
+                    )
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content or ""
+                        json_response_text += delta
+                        ph2.write(json_response_text)
+
+        st.chat_input(placeholder="", disabled=True, key=f"parameters_json_response_input_{session_id}")
+
+    # Parse and persist JSON
+    parsed = None
+    try:
+        parsed = json.loads(json_response_text)
+    except Exception:
+        try:
+            cleaned = json_response_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip('`')
+                idx = cleaned.find("{")
+                if idx >= 0:
+                    cleaned = cleaned[idx:]
+            start = cleaned.find('{')
+            end = cleaned.rfind('}')
+            if start >= 0 and end > start:
+                cleaned = cleaned[start:end+1]
+            parsed = json.loads(cleaned)
+        except Exception:
+            parsed = None
+
+    if parsed and isinstance(parsed, dict):
+        save_path = os.path.join(parameters_dir, "parameters_check_result.json")
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(parsed, f, ensure_ascii=False, indent=2)
+            st.success(f"已保存不一致项JSON: {save_path}")
+        except Exception as e:
+            st.warning(f"保存JSON失败: {e}")
+
+        # Show as table
+        items = parsed.get('items') if isinstance(parsed.get('items'), list) else []
+        # Ensure column order, fill missing keys
+        norm_rows = []
+        for it in items:
+            norm_rows.append({
+                'parameter': str(it.get('parameter', '')),
+                'target_value': str(it.get('target_value', '')),
+                'cp_value': str(it.get('cp_value', '')),
+                'location': str(it.get('location', '')),
+                'issue': str(it.get('issue', '')),
+                'suggestion': str(it.get('suggestion', '')),
+            })
+        if norm_rows:
+            df = pd.DataFrame(norm_rows, columns=['parameter', 'target_value', 'cp_value', 'location', 'issue', 'suggestion'])
+            st.dataframe(df, use_container_width=True)
+            # Save CSV to parameters_check folder
+            try:
+                csv_path = os.path.join(parameters_dir, 'parameters_check_result.csv')
+                df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                st.success(f"已保存不一致项表格: {csv_path}")
+            except Exception as e:
+                st.warning(f"保存CSV失败: {e}")
+        else:
+            st.info("未解析到任何不一致项。")
+    else:
+        st.warning("未能解析为有效的JSON，请检查上方AI回复内容。")
 
 def render_parameters_check_tab(session_id):
     """Render the design process parameters check tab."""
@@ -359,7 +520,7 @@ def render_parameters_check_tab(session_id):
                             prompt_text = (
                                 "你是一名 APQP 专家，需要对应用交付物进行设计与制程参数一致性评审。\n"
                                 "请对比目标文件与控制计划中的参数名称、单位、取值/公差范围等是否一致，逐项给出：是否一致、不一致项、缺失项、疑似问题，"
-                                "并提供引用依据（段落/数据）与改进建议；最后给出总体结论。\n\n"
+                                "并提供引用依据（段落/数据），且在引用中务必标明“文件名 + Sheet 名称”（不要提供行号）；给出简明的改进建议；最后给出总体结论。\n\n"
                                 f"以下为目标文件（提取自：{', '.join(target_files)}）的参数数据（JSON）：\n"
                                 f"{target_json_str}\n\n"
                                 "以下为相关控制计划文件汇总得到的参数数据（JSON）：\n"
