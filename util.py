@@ -407,15 +407,18 @@ def render_login_widget():
             create_user_session(current_user)
         return current_user
     
-    # Auto-login with saved username (only if no current user)
+    # Auto-login with saved username (disabled to avoid cross-browser auto-login)
+    # Previously, if there was a saved active username on the server, the app would
+    # automatically set the ?user=<username> query param and rerun, which caused
+    # new browsers to be auto-logged in as the last user. We now skip that step
+    # so that new browsers land on the login form instead.
     if not current_user:
         saved_username = load_username()
         if saved_username:
             session_data = load_user_session(saved_username)
             if session_data and session_data.get('active', False):
-                # Auto-login with saved username
-                st.query_params["user"] = saved_username
-                st.rerun()
+                # Intentionally do nothing here; show login form below
+                pass
     
     # Show login form
     st.markdown("### 用户登录")
