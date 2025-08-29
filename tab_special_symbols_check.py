@@ -10,6 +10,7 @@ from backend_client import get_backend_client, is_backend_available
 from ollama import Client as OllamaClient
 import openai
 import re
+import pandas as pd
 
 def render_file_upload_section(session_dirs, session_id):
     """Render the file upload section with proper keys to prevent duplication."""
@@ -213,6 +214,14 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     if os.path.exists(symbol_check_final_file):
         with open(symbol_check_final_file, "r", encoding="utf-8") as f:
             symbol_check_final_prompt = f.read()
+        # Augment prompt to require including an explicit parameter field per item
+        _parameter_requirement = "\n\n请在每条结论中明确提供一个\"参数\"字段（可称为\"参数\"/\"目标参数\"/\"零件参数\"等），用于标示相关的参数名称。"
+        # Also require explicit file references (目标文件与控制计划文件)，包含文件名与工作表（若已知）
+        _file_fields_requirement = (
+            "\n请在每条结论中同时给出对应的\"目标文件\"与\"控制计划文件\"来源（若可判定），"
+            "格式为：目标文件：<文件名>/<Sheet名>；控制计划：<文件名>/<Sheet名>。若未知请留空字符串。"
+        )
+        symbol_check_final_prompt_aug = symbol_check_final_prompt + _parameter_requirement + _file_fields_requirement
         
         # Display the prompt and response side by side
         col_final_prompt, col_final_response = st.columns([1, 1])
@@ -222,7 +231,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             with prompt_container:
                 with st.chat_message("user"):
                     prompt_placeholder = st.empty()
-                    prompt_placeholder.text(symbol_check_final_prompt)
+                    prompt_placeholder.text(symbol_check_final_prompt_aug)
                 
                 st.chat_input(placeholder="", disabled=True, key=f"workflow_final_prompt_{timestamp}_{session_id}")
         
@@ -238,7 +247,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                     if llm_backend in ("ollama_127", "ollama_9"):
                         for chunk in ollama_client.chat(
                             model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                            messages=[{"role": "user", "content": symbol_check_final_prompt}],
+                            messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
                             stream=True,
                             options={
                                 "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
@@ -255,7 +264,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                     elif llm_backend == "openai":
                         stream = openai.chat.completions.create(
                             model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                            messages=[{"role": "user", "content": symbol_check_final_prompt}],
+                            messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
                             stream=True,
                             temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
                             top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
@@ -269,11 +278,140 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                             response_placeholder.write(symbol_check_final_response)
                     
                     # Save only the AI response to the subfolder
-                    result_path = os.path.join(special_dir, "special_symbols_check_result.txt")
+                    result_path = os.path.join(special_dir, "3_special_symbols_check_result.txt")
                     with open(result_path, "w", encoding="utf-8") as f:
                         f.write(symbol_check_final_response)
                 
                 st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
+
+    # --- JSON 转换步骤（无标题、无分割线）---
+    # 读取上一步保存的文本并构建“转换为 JSON”的提示词
+    json_source_file = os.path.join(special_dir, "3_special_symbols_check_result.txt")
+    if os.path.exists(json_source_file):
+        try:
+            with open(json_source_file, "r", encoding="utf-8") as f:
+                source_text_for_json = f.read()
+        except Exception:
+            source_text_for_json = ""
+        
+        # 参考文件齐套性检查中的严格 JSON 要求，构造仅输出 JSON 的提示词
+        # 更新字段：
+        # - issue: 要求为“参数”（如 参数/目标参数/零件参数），而非问题描述
+        # - location: 拆分为 target_file 与 control_plan_file 两列
+        json_conversion_prompt = (
+            "请将以下内容转换为严格的 JSON 对象，并且仅输出 JSON（不要输出解释、Markdown 或其他文本）。\n"
+            "请将结果组织为：{\n"
+            "  \"items\": [\n"
+            "    {\n"
+            "      \"issue\": \"参数名称（如 参数/目标参数/零件参数 等）\",\n"
+            "      \"target_file\": \"目标文件：<文件名>/<Sheet名>，未知则空字符串\",\n"
+            "      \"control_plan_file\": \"控制计划：<文件名>/<Sheet名>，未知则空字符串\",\n"
+            "      \"note\": \"可选的补充说明，没有则空字符串\",\n"
+            "      \"suggestion\": \"简短的修订建议，没有则空字符串\"\n"
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "请确保 issue 字段填写为参数名称，而非问题描述。\n\n"
+            "内容如下：\n"
+            f"{source_text_for_json}"
+        )
+        
+        col_json_left, col_json_right = st.columns([1, 1])
+        with col_json_left:
+            # 左侧显示提示词（无标题）
+            left_container = st.container(height=400)
+            with left_container:
+                with st.chat_message("user"):
+                    ph_left = st.empty()
+                    ph_left.text(json_conversion_prompt)
+            st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_prompt_{timestamp}_{session_id}")
+        
+        with col_json_right:
+            # 右侧流式显示 LLM 回复（无标题）
+            right_container = st.container(height=400)
+            with right_container:
+                with st.chat_message("assistant"):
+                    ph_right = st.empty()
+                    json_response_text = ""
+                    if llm_backend in ("ollama_127", "ollama_9"):
+                        for chunk in ollama_client.chat(
+                            model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
+                            messages=[{"role": "user", "content": json_conversion_prompt}],
+                            stream=True,
+                            options={
+                                "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
+                                "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
+                                "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
+                                "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
+                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 100000),
+                                "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
+                                "format": "json",
+                            }
+                        ):
+                            new_text = chunk['message']['content']
+                            json_response_text += new_text
+                            ph_right.write(json_response_text)
+                    elif llm_backend == "openai":
+                        stream = openai.chat.completions.create(
+                            model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
+                            messages=[{"role": "user", "content": json_conversion_prompt}],
+                            stream=True,
+                            temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
+                            top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
+                            max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                            presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
+                            frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
+                            response_format={"type": "json_object"},
+                        )
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta.content or ""
+                            json_response_text += delta
+                            ph_right.write(json_response_text)
+            st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_response_{timestamp}_{session_id}")
+
+        # 解析 JSON 并导出为 Excel，显示在页面
+        parsed_json = None
+        try:
+            parsed_json = json.loads(json_response_text)
+        except Exception:
+            # 尝试从代码块/杂文中提取 JSON 对象
+            try:
+                cleaned = (json_response_text or "").strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.strip('`')
+                    idx = cleaned.find("{")
+                    if idx >= 0:
+                        cleaned = cleaned[idx:]
+                start = cleaned.find('{')
+                end = cleaned.rfind('}')
+                if start >= 0 and end > start:
+                    cleaned = cleaned[start:end+1]
+                parsed_json = json.loads(cleaned)
+            except Exception:
+                parsed_json = None
+
+        if isinstance(parsed_json, dict):
+            items = parsed_json.get('items')
+            if isinstance(items, list) and items:
+                # 归一化为表格
+                try:
+                    df = pd.DataFrame(items)
+                except Exception:
+                    df = pd.DataFrame()
+                if not df.empty:
+                    try:
+                        from datetime import datetime as _dt
+                        ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+                        excel_path = os.path.join(special_dir, f"special_symbols_json_result_{ts}.xlsx")
+                        df.to_excel(excel_path, index=False, engine='openpyxl')
+                        st.success(f"已导出 JSON 结果为 Excel: {os.path.basename(excel_path)}")
+                        # 展示在页面
+                        st.dataframe(df, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"导出或展示 Excel 失败: {e}")
+            else:
+                st.info("JSON 中未找到可用的 items 列表。")
+
     st.info("✅ 分析完成")
 
 def render_special_symbols_check_tab(session_id):
