@@ -81,9 +81,8 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             host = host.replace("10.31.60.127", "10.31.60.9")
         ollama_client = OllamaClient(host=host)
         
-        # Streaming generator for Ollama
+        # Streaming generator for Ollama (stateless per call)
         def llm_stream_chat(prompt):
-            session['ollama_history'].append({"role": "user", "content": prompt})
             response_text = ""
             
             # Get Ollama parameters from session state
@@ -92,12 +91,12 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             top_p = st.session_state.get(f'ollama_top_p_{session_id}', 0.9)
             top_k = st.session_state.get(f'ollama_top_k_{session_id}', 40)
             repeat_penalty = st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1)
-            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 131072)
+            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 65536)
             num_thread = st.session_state.get(f'ollama_num_thread_{session_id}', 4)
             
             for chunk in ollama_client.chat(
                 model=model,
-                messages=session['ollama_history'],
+                messages=[{"role": "user", "content": prompt}],
                 stream=True,
                 options={
                     "temperature": temperature,
@@ -111,15 +110,13 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                 new_text = chunk['message']['content']
                 response_text += new_text
                 yield new_text
-            session['ollama_history'].append({"role": "assistant", "content": response_text})
 
     elif llm_backend == "openai":
         openai.base_url = CONFIG["llm"]["openai_base_url"]
         openai.api_key = CONFIG["llm"]["openai_api_key"]
         
-        # Streaming generator for OpenAI
+        # Streaming generator for OpenAI (stateless per call)
         def llm_stream_chat(prompt):
-            session['openai_history'].append({"role": "user", "content": prompt})
             response_text = ""
             
             # Get OpenAI parameters from session state
@@ -141,7 +138,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             
             stream = openai.chat.completions.create(
                 model=model,
-                messages=session['openai_history'],
+                messages=[{"role": "user", "content": prompt}],
                 stream=True,
                 temperature=temperature,
                 top_p=top_p,
@@ -154,7 +151,6 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                 delta = chunk.choices[0].delta.content or ""
                 response_text += delta
                 yield delta
-            session['openai_history'].append({"role": "assistant", "content": response_text})
 
     # Add timestamp to make keys even more unique
     import time
@@ -249,7 +245,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                                 "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                                 "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                                 "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
                                 "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
                             }
                         ):

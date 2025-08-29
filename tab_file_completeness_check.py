@@ -696,7 +696,7 @@ def render_file_completeness_check_tab(session_id):
                                                 "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                                                 "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                                                 "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                                                "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
                                                 "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
                                                 "format": "json"
                                             }

@@ -95,7 +95,7 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
                             "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                             "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                             "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
                             "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
                         }
                     ):
@@ -205,7 +205,7 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
                             "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
                             "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
                             "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 131072),
+                            "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
                             "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
                             "format": "json",
                         }
@@ -576,7 +576,47 @@ def render_parameters_check_tab(session_id):
                         import shutil
                         shutil.copy2(demo_config_file, os.path.join(parameters_dir, "excel_sheets.csv"))
 
-                    if files_copied:
+                    if files_copied and os.path.exists(os.path.join(parameters_dir, "excel_sheets.csv")):
+                        # Auto-generate JSONs and prompt so the analysis view works immediately
+                        try:
+                            # CP JSON
+                            json_output_path = os.path.join(parameters_dir, "extracted_data.json")
+                            extract_parameters_to_json(
+                                cp_session_dir=cp_session_dir,
+                                output_json_path=json_output_path,
+                                config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
+                            )
+                            # Target JSON
+                            json_output_path_t = os.path.join(parameters_dir, "extracted_target_data.json")
+                            extract_parameters_to_json(
+                                cp_session_dir=target_session_dir,
+                                output_json_path=json_output_path_t,
+                                config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
+                            )
+                            # Prompt
+                            with open(json_output_path_t, 'r', encoding='utf-8') as f:
+                                target_json_obj = json.load(f)
+                            with open(json_output_path, 'r', encoding='utf-8') as f:
+                                cp_json_obj = json.load(f)
+                            target_files = sorted({str(item.get('File')) for item in target_json_obj if item.get('File')}) or ["目标文件"]
+                            target_json_str = json.dumps(target_json_obj, ensure_ascii=False, indent=2)
+                            cp_json_str = json.dumps(cp_json_obj, ensure_ascii=False, indent=2)
+                            prompt_text = (
+                                "你是一名 APQP 专家，需要对应用交付物进行设计与制程参数一致性评审。\n"
+                                "请对比目标文件与控制计划中的参数名称、单位、取值/公差范围等是否一致，逐项给出：是否一致、不一致项、缺失项、疑似问题，"
+                                "并提供引用依据（段落/数据），且在引用中务必标明“文件名 + Sheet 名称”（不要提供行号）；给出简明的改进建议；最后给出总体结论。\n\n"
+                                f"以下为目标文件（提取自：{', '.join(target_files)}）的参数数据（JSON）：\n"
+                                f"{target_json_str}\n\n"
+                                "以下为相关控制计划文件汇总得到的参数数据（JSON）：\n"
+                                f"{cp_json_str}\n\n"
+                                "请基于上述数据完成评审，并按参数项分组输出。"
+                            )
+                            prompt_path = os.path.join(parameters_dir, "parameters_llm_prompt.txt")
+                            with open(prompt_path, 'w', encoding='utf-8') as f:
+                                f.write(prompt_text)
+                        except Exception as e:
+                            st.warning(f"演示准备提示词失败：{e}")
+
                         # Prepare this tab's session state and start analysis lifecycle
                         session['analysis_completed'] = False
                         session['process_started'] = True

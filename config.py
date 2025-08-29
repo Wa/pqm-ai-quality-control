@@ -1,8 +1,3 @@
-"""
-Configuration file for the consistency check application.
-All file paths and settings are centralized here for easy maintenance and portability.
-"""
-
 from pathlib import Path
 
 # Get the project root directory (where this script is located)
@@ -24,7 +19,7 @@ CONFIG = {
         "history_excel": PROJECT_ROOT / "demonstration" / "副本LL-lesson learn-历史问题规避-V9.4.xlsx"
     },
     "llm": {
-        "ollama_host": "http://10.31.60.127:11434",
+        "ollama_host": "http://10.31.60.9:11434",
         "ollama_model": "gpt-oss:latest",
         "openai_base_url": "https://sg.uiuiapi.com/v1",
         "openai_api_key": "sk-dDG9UBQHLshfb8Z5FYQQXFOZAe6FtUxltMwIxg0KNCSsGKjh",

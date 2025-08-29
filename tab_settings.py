@@ -39,11 +39,11 @@ def load_user_settings(session_id):
                 'ollama_top_p': 0.9,
                 'ollama_top_k': 40,
                 'ollama_repeat_penalty': 1.1,
-                'ollama_num_ctx': 40960,
+                'ollama_num_ctx': 65536,
                 'ollama_num_thread': 4,
                 'openai_temperature': 0.7,
                 'openai_top_p': 1.0,
-                'openai_max_tokens': 2048,
+                'openai_max_tokens': 65536,
                 'openai_presence_penalty': 0.0,
                 'openai_frequency_penalty': 0.0
             }
@@ -58,11 +58,11 @@ def load_user_settings(session_id):
             'ollama_top_p': 0.9,
             'ollama_top_k': 40,
             'ollama_repeat_penalty': 1.1,
-            'ollama_num_ctx': 40960,
+            'ollama_num_ctx': 65536,
             'ollama_num_thread': 4,
             'openai_temperature': 0.7,
             'openai_top_p': 1.0,
-            'openai_max_tokens': 2048,
+            'openai_max_tokens': 65536,
             'openai_presence_penalty': 0.0,
             'openai_frequency_penalty': 0.0
         }
@@ -77,24 +77,24 @@ def save_current_settings(session_id):
         'ollama_top_p': st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
         'ollama_top_k': st.session_state.get(f'ollama_top_k_{session_id}', 40),
         'ollama_repeat_penalty': st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-        'ollama_num_ctx': st.session_state.get(f'ollama_num_ctx_{session_id}', 40960),
+        'ollama_num_ctx': st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
         'ollama_num_thread': st.session_state.get(f'ollama_num_thread_{session_id}', 4),
         'openai_temperature': st.session_state.get(f'openai_temperature_{session_id}', 0.7),
         'openai_top_p': st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-        'openai_max_tokens': st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+        'openai_max_tokens': st.session_state.get(f'openai_max_tokens_{session_id}', 65536),
         'openai_presence_penalty': st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
         'openai_frequency_penalty': st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
     }
     return save_user_settings(session_id, current_settings)
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds
-def get_ollama_models():
-    """Get available Ollama models from the local server."""
+def get_ollama_models(host: str):
+    """Get available Ollama models from the specified server."""
     try:
-        response = requests.get(f"{CONFIG['llm']['ollama_host']}/api/tags", timeout=3)
+        response = requests.get(f"{host}/api/tags", timeout=3)
         if response.status_code == 200:
             models = response.json().get('models', [])
-            return [model['name'] for model in models]
+            return [m.get('name') or m.get('model') for m in models]
         else:
             return []
     except Exception as e:
@@ -102,11 +102,11 @@ def get_ollama_models():
         return []
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds
-def get_ollama_model_info(model_name):
-    """Get detailed information about a specific Ollama model."""
+def get_ollama_model_info(model_name, host: str):
+    """Get detailed information about a specific Ollama model on the specified server."""
     try:
         response = requests.post(
-            f"{CONFIG['llm']['ollama_host']}/api/show",
+            f"{host}/api/show",
             json={"name": model_name},
             timeout=3
         )
@@ -118,13 +118,13 @@ def get_ollama_model_info(model_name):
         return None
 
 @st.cache_data(ttl=60)
-def get_ollama_tags_map():
-    """Return a mapping of model name -> tag info (size, modified_at, digest, etc.)."""
+def get_ollama_tags_map(host: str):
+    """Return a mapping of model name -> tag info (size, modified_at, digest, etc.) from the specified server."""
     try:
-        response = requests.get(f"{CONFIG['llm']['ollama_host']}/api/tags", timeout=3)
+        response = requests.get(f"{host}/api/tags", timeout=3)
         if response.status_code == 200:
             models = response.json().get('models', [])
-            return {m.get('name') or m.get('model'): m for m in models}
+            return {(m.get('name') or m.get('model')): m for m in models}
     except Exception:
         pass
     return {}
@@ -142,10 +142,10 @@ def _human_size(num_bytes: int) -> str:
     return f"{num:.1f} {units[i]}"
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
-def test_ollama_connection():
-    """Test connection to Ollama server."""
+def test_ollama_connection(host: str):
+    """Test connection to the specified Ollama server."""
     try:
-        response = requests.get(f"{CONFIG['llm']['ollama_host']}/api/tags", timeout=3)
+        response = requests.get(f"{host}/api/tags", timeout=3)
         return response.status_code == 200
     except Exception:
         return False
@@ -304,11 +304,16 @@ def render_settings_tab(session_id):
         
         # Connection Status
         st.header("🔗 连接状态")
+
+        # Resolve host for selected backend
+        host = CONFIG['llm']['ollama_host']
+        if selected_backend == "ollama_9":
+            host = host.replace("10.31.60.127", "10.31.60.9")
         
         col1, col2 = st.columns(2)
         with col1:
             if selected_backend in ("ollama_127", "ollama_9"):
-                if test_ollama_connection():
+                if test_ollama_connection(host):
                     st.success("✅ Ollama服务器连接正常")
                 else:
                     st.error("❌ 无法连接到Ollama服务器")
@@ -321,9 +326,9 @@ def render_settings_tab(session_id):
         with col2:
             st.info(f"""
             **当前后端:** {selected_display_name}  
-            **状态:** {'在线' if (selected_backend in ("ollama_127", "ollama_9") and test_ollama_connection()) or (selected_backend == "openai" and test_openai_connection()) else '离线'}
+            **状态:** {'在线' if (selected_backend in ("ollama_127", "ollama_9") and test_ollama_connection(host)) or (selected_backend == "openai" and test_openai_connection()) else '离线'}
             """)
-        
+
         st.divider()
         
         # Model Configuration
@@ -335,11 +340,11 @@ def render_settings_tab(session_id):
             
             # Ollama Model Selection
             with st.spinner("正在获取可用模型列表..."):
-                available_models = get_ollama_models()
+                available_models = get_ollama_models(host)
             
             if available_models:
                 current_model = st.session_state.get(f'ollama_model_{session_id}', CONFIG['llm']['ollama_model'])
-                
+
                 # Ensure current model is in the list, otherwise use first available
                 if current_model not in available_models:
                     current_model = available_models[0]
@@ -366,18 +371,8 @@ def render_settings_tab(session_id):
             
                 # Model Information - display always, enrich from /api/tags when /api/show lacks fields
                 try:
-                    # Switch host dynamically for model info queries
-                    import requests
-                    host = CONFIG['llm']['ollama_host']
-                    if selected_backend == "ollama_9":
-                        host = host.replace("10.31.60.127", "10.31.60.9")
-                    response = requests.post(
-                        f"{host}/api/show",
-                        json={"name": selected_model},
-                        timeout=3
-                    )
-                    show_info = response.json() if response.status_code == 200 else {}
-                    tags_map = get_ollama_tags_map() or {}
+                    show_info = get_ollama_model_info(selected_model, host) or {}
+                    tags_map = get_ollama_tags_map(host) or {}
                     tag_info = tags_map.get(selected_model, {})
 
                     name = show_info.get('name') or tag_info.get('name') or selected_model
@@ -401,7 +396,7 @@ def render_settings_tab(session_id):
                         st.write(f"**量化级别:** {quant_lvl}")
                 except Exception as e:
                     st.warning(f"无法获取模型详细信息: {e}")
-            
+
             # Ollama Parameters
             st.subheader("Ollama参数设置")
             
@@ -474,8 +469,8 @@ def render_settings_tab(session_id):
                                 break
                 except Exception:
                     dynamic_max_ctx = 8192
-                # Default to 40960; allow values beyond model-reported max (for RoPE scaling / custom builds)
-                _default_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 40960)
+                # Default to 65536; allow values beyond model-reported max (for RoPE scaling / custom builds)
+                _default_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 65536)
                 num_ctx = st.number_input(
                     "上下文窗口大小",
                     min_value=512,
@@ -554,7 +549,7 @@ def render_settings_tab(session_id):
                     "最大输出长度",
                     min_value=1,
                     max_value=4096,
-                    value=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
+                    value=st.session_state.get(f'openai_max_tokens_{session_id}', 65536),
                     step=1,
                     help="生成响应的最大token数量。",
                     key=f"openai_max_tokens_{session_id}"
@@ -596,22 +591,22 @@ def render_settings_tab(session_id):
         
         # Current Configuration Overview
         st.header("📋 当前配置概览")
-        
-        if selected_backend == "ollama":
+
+        if selected_backend in ("ollama_127", "ollama_9"):
             # Two-column compact overview (no JSON toggle)
             col_left, col_right = st.columns(2)
             with col_left:
                 st.write("**后端:**", selected_display_name)
-                st.write("**主机:**", CONFIG['llm']['ollama_host'])
+                st.write("**主机:**", host)
                 st.write("**当前模型:**", selected_model)
             with col_right:
                 st.write("**Temperature:**", st.session_state.get(f'ollama_temperature_{session_id}', 0.7))
                 st.write("**Top-p:**", st.session_state.get(f'ollama_top_p_{session_id}', 0.9))
                 st.write("**Top-k:**", st.session_state.get(f'ollama_top_k_{session_id}', 40))
                 st.write("**Repeat Penalty:**", st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1))
-                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 40960))
+                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 65536))
                 st.write("**num_thread:**", st.session_state.get(f'ollama_num_thread_{session_id}', 4))
-         
+
         elif selected_backend == "openai":
             # Two-column compact overview (no JSON toggle)
             col_left, col_right = st.columns(2)
@@ -622,7 +617,7 @@ def render_settings_tab(session_id):
             with col_right:
                 st.write("**Temperature:**", st.session_state.get(f'openai_temperature_{session_id}', 0.7))
                 st.write("**Top-p:**", st.session_state.get(f'openai_top_p_{session_id}', 1.0))
-                st.write("**Max Tokens:**", st.session_state.get(f'openai_max_tokens_{session_id}', 2048))
+                st.write("**Max Tokens:**", st.session_state.get(f'openai_max_tokens_{session_id}', 65536))
                 st.write("**Presence Penalty:**", st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0))
                 st.write("**Frequency Penalty:**", st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0))
                 st.write("**Logit Bias:**", st.session_state.get(f'openai_logit_bias_{session_id}', '{}'))
