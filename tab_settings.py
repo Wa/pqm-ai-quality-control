@@ -233,15 +233,6 @@ def render_settings_tab(session_id):
         st.header("👤 用户与会话")
         st.write(f"**当前用户:** {session_id}")
 
-        # Active users list
-        try:
-            from util import get_active_users
-            active_users = get_active_users()
-            if active_users:
-                st.info(f"👥 当前在线用户: {', '.join(active_users)}")
-        except Exception:
-            pass
-
         cols = st.columns(1)
         with cols[0]:
             if st.button("🚪 退出登录", key=f"logout_btn_{session_id}"):
@@ -253,9 +244,10 @@ def render_settings_tab(session_id):
                 # Clear session state
                 for k in list(st.session_state.keys()):
                     del st.session_state[k]
-                # Clear URL user pin
+                # Keep 'user' to remember username on this PC; remove only auth flag
                 try:
-                    st.query_params.clear()
+                    if "auth" in st.query_params:
+                        del st.query_params["auth"]
                 except Exception:
                     pass
                 st.rerun()

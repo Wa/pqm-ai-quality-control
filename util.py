@@ -395,78 +395,68 @@ def get_active_users():
     return active_users
 
 def render_login_widget():
-    """Render login widget using URL parameter browser isolation - zero session state dependencies."""
-    # Get current user from URL parameter (truly browser-specific)
+    """Render login widget using URL params for per-browser username and auth flag."""
+    # Read browser-specific params
     current_user = st.query_params.get("user", None)
-    
-    # If user is in URL, keep them logged in regardless of global active flag
-    # Ensure a session file exists so they appear in active users if desired
-    if current_user:
+    auth = st.query_params.get("auth", None)
+
+    # If auth flag is present, auto-login this browser
+    if current_user and auth == "1":
         session_data = load_user_session(current_user)
         if not session_data or not session_data.get('active', False):
             create_user_session(current_user)
         return current_user
-    
-    # Auto-login with saved username (disabled to avoid cross-browser auto-login)
-    # Previously, if there was a saved active username on the server, the app would
-    # automatically set the ?user=<username> query param and rerun, which caused
-    # new browsers to be auto-logged in as the last user. We now skip that step
-    # so that new browsers land on the login form instead.
-    if not current_user:
-        saved_username = load_username()
-        if saved_username:
-            session_data = load_user_session(saved_username)
-            if session_data and session_data.get('active', False):
-                # Intentionally do nothing here; show login form below
-                pass
-    
-    # Show login form
+
+    # Show login form (no global server-side prefill)
     st.markdown("### 用户登录")
     st.markdown("使用OA用户名和密码，不用加@calb-tech.com后缀")
-    
-    # Load saved username
-    saved_username = load_username()
-    
-    # Login form
+
+    # Prefill from this browser's query param only
+    prefill_username = current_user or ""
+
     with st.form("login_form"):
-        username = st.text_input("用户名", value=saved_username or "", placeholder="请输入您的用户名")
+        username = st.text_input("用户名", value=prefill_username, placeholder="请输入您的用户名")
         password = st.text_input("密码", type="password", placeholder="请输入密码")
-        
+
         col1, col2 = st.columns([1, 1])
         with col1:
             login_button = st.form_submit_button("登录")
         with col2:
-            if saved_username:
-                clear_button = st.form_submit_button("清除保存的用户名")
+            # Allow clearing just this browser's remembered username
+            if current_user:
+                clear_button = st.form_submit_button("清除本机用户名")
             else:
                 clear_button = st.form_submit_button("清除", disabled=True)
-        
+
         if login_button:
             if username.strip():
                 # Accept any password (as requested)
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = username.strip()
-                save_username(username.strip())
-                
+
                 # Create user session for multi-user support
                 create_user_session(username.strip())
-                
-                # Pin username to this browser via query params for isolation
+
+                # Pin username and auth to this browser via query params
                 st.query_params["user"] = username.strip()
-                
+                st.query_params["auth"] = "1"
+
                 st.success(f"欢迎，{username.strip()}！")
                 st.rerun()
             else:
                 st.error("请输入用户名")
-        
+
         if clear_button:
             try:
-                os.remove(get_username_file())
-                st.success("已清除保存的用户名")
+                if "user" in st.query_params:
+                    del st.query_params["user"]
+                if "auth" in st.query_params:
+                    del st.query_params["auth"]
+                st.success("已清除本机用户名")
                 st.rerun()
-            except:
+            except Exception:
                 st.error("清除失败")
-    
+
     return None
 
 # --- Structured Session State Management ---
