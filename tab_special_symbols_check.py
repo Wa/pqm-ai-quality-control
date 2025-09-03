@@ -459,27 +459,82 @@ def render_special_symbols_check_tab(session_id):
         sess_for_clear = get_user_session(session_id, 'special_symbols')
         workflow_safe_for_clear = not sess_for_clear['process_started'] or sess_for_clear['analysis_completed']
         if workflow_safe_for_clear:
-            if st.button("🗑️ 清空所有文件", key=f"clear_all_files_{session_id}"):
-                if backend_available:
-                    client = get_backend_client()
-                    result = client.clear_files(session_id)
-                    if result.get("status") == "success":
-                        st.success(f"✅ {result.get('message', '已清空所有文件')}")
+            col_clear_cp, col_clear_target, col_clear_graph = st.columns(3)
+            with col_clear_cp:
+                if st.button("🗑️ 清空控制计划文件", key=f"clear_cp_files_{session_id}"):
+                    if backend_available:
+                        try:
+                            client = get_backend_client()
+                            # No dedicated endpoint per bucket; list and delete
+                            result = client.list_files(session_id, file_type="cp")
+                            deleted = 0
+                            for fi in result.get("cp", []):
+                                del_res = client.delete_file(session_id, os.path.join(cp_session_dir, fi["name"]))
+                                if del_res.get("status") == "success":
+                                    deleted += 1
+                            st.success(f"已清空控制计划文件（{deleted} 个）")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
                     else:
-                        st.error(f"❌ 清空失败: {result.get('message', '未知错误')}")
-                else:
-                    try:
-                        for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                            for file in os.listdir(dir_path):
-                                file_path = os.path.join(dir_path, file)
+                        try:
+                            for file in os.listdir(cp_session_dir):
+                                file_path = os.path.join(cp_session_dir, file)
                                 if os.path.isfile(file_path):
                                     os.remove(file_path)
-                        st.success("已清空所有文件")
-                    except Exception as e:
-                        st.error(f"清空失败: {e}")
+                            st.success("已清空控制计划文件")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
+            with col_clear_target:
+                if st.button("🗑️ 清空待检查文件", key=f"clear_target_files_{session_id}"):
+                    if backend_available:
+                        try:
+                            client = get_backend_client()
+                            result = client.list_files(session_id, file_type="target")
+                            deleted = 0
+                            for fi in result.get("target", []):
+                                del_res = client.delete_file(session_id, os.path.join(target_session_dir, fi["name"]))
+                                if del_res.get("status") == "success":
+                                    deleted += 1
+                            st.success(f"已清空待检查文件（{deleted} 个）")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
+                    else:
+                        try:
+                            for file in os.listdir(target_session_dir):
+                                file_path = os.path.join(target_session_dir, file)
+                                if os.path.isfile(file_path):
+                                    os.remove(file_path)
+                            st.success("已清空待检查文件")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
+            with col_clear_graph:
+                if st.button("🗑️ 清空图纸文件", key=f"clear_graph_files_{session_id}"):
+                    if backend_available:
+                        try:
+                            client = get_backend_client()
+                            result = client.list_files(session_id, file_type="graph")
+                            deleted = 0
+                            for fi in result.get("graph", []):
+                                del_res = client.delete_file(session_id, os.path.join(graph_session_dir, fi["name"]))
+                                if del_res.get("status") == "success":
+                                    deleted += 1
+                            st.success(f"已清空图纸文件（{deleted} 个）")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
+                    else:
+                        try:
+                            for file in os.listdir(graph_session_dir):
+                                file_path = os.path.join(graph_session_dir, file)
+                                if os.path.isfile(file_path):
+                                    os.remove(file_path)
+                            st.success("已清空图纸文件")
+                        except Exception as e:
+                            st.error(f"清空失败: {e}")
         else:
             st.info("🔄 分析进行中，请等待完成后再清空文件")
-            st.button("🗑️ 清空所有文件", key=f"clear_all_files_disabled_{session_id}", disabled=True)
+            st.button("🗑️ 清空控制计划文件", key=f"clear_cp_files_disabled_{session_id}", disabled=True)
+            st.button("🗑️ 清空待检查文件", key=f"clear_target_files_disabled_{session_id}", disabled=True)
+            st.button("🗑️ 清空图纸文件", key=f"clear_graph_files_disabled_{session_id}", disabled=True)
 
         # --- File Manager Module ---
         def get_file_list(folder):

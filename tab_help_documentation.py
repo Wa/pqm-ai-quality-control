@@ -19,6 +19,7 @@ def render_help_documentation_tab(session_id):
         "📊 设计制程检查": "parameters_check",
         "✅ 文件要素检查": "file_elements_check",
         "📁 文件齐套性检查": "file_completeness_check",
+        "🏢 企业标准检查": "enterprise_standard_check",
         "📋 历史问题规避": "history_issues_avoidance",
         "🤖 AI智能体": "ai_agent",
         "⚙️ 设置": "settings",

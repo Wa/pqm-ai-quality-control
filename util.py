@@ -39,6 +39,14 @@ def get_user_session_id(username):
     # Always derive from the provided username to avoid cross-user leakage
     return username
 
+# New helper to determine if a user is an admin
+def is_admin(username: str) -> bool:
+    admins_env = os.getenv("ADMIN_USERS", "")
+    admins = {u.strip() for u in admins_env.split(",") if u.strip()}
+    if not admins:
+        admins = {"admin"}
+    return username in admins
+
 # --- Session Directory Utilities ---
 def ensure_session_dirs(base_dirs, session_id):
     """Ensure session directories exist."""
@@ -70,6 +78,23 @@ def ensure_session_dirs(base_dirs, session_id):
             session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
             session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
             session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
+
+    # Ensure enterprise standard directories exist under project root:
+    # ./PQM_AI/enterprise_standard_files/standards/<username>
+    # ./PQM_AI/enterprise_standard_files/examined_files/<username>
+    try:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        enterprise_root = os.path.join(project_root, "enterprise_standard_files")
+        standards_dir = os.path.join(enterprise_root, "standards", str(session_id))
+        examined_dir = os.path.join(enterprise_root, "examined_files", str(session_id))
+        os.makedirs(standards_dir, exist_ok=True)
+        os.makedirs(examined_dir, exist_ok=True)
+        # Expose convenience keys regardless of input base_dirs
+        session_dirs.setdefault("enterprise_standards", standards_dir)
+        session_dirs.setdefault("enterprise_examined", examined_dir)
+    except Exception:
+        # Fail-safe: do not break callers if path operations fail
+        pass
 
     return session_dirs
 

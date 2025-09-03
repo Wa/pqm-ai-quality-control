@@ -3,12 +3,15 @@ from tab_special_symbols_check import render_special_symbols_check_tab
 from tab_parameters_check import render_parameters_check_tab
 from tab_file_elements_check import render_file_elements_check_tab
 from tab_file_completeness_check import render_file_completeness_check_tab
+from tab_enterprise_standard_check import render_enterprise_standard_check_tab
 from tab_history_issues_avoidance import render_history_issues_avoidance_tab
 from tab_settings import render_settings_tab
 from tab_ai_agent import render_ai_agent_tab
 from tab_help_documentation import render_help_documentation_tab
 from tab_home import render_home_tab
+from tab_admin import render_admin_tab
 from util import render_login_widget, get_user_session_id
+from util import is_admin
 
 st.set_page_config(layout="wide")
 
@@ -20,31 +23,48 @@ if username:
     # Generate session ID based on username for persistence
     session_id = get_user_session_id(username)
     
-    # Login-related UI moved to Settings tab
-    
-    # Main app tabs
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "🏠 首页", "🔍 特殊特性符号检查", "📊 设计制程检查", "✅ 文件要素检查", 
-        "📁 文件齐套性检查", "📋 历史问题规避", "🤖 AI智能体", "⚙️ 设置", "📖 帮助文档"
-    ])
+    # Labels and conditional admin tab
+    HOME = "🏠 首页"
+    SPECIAL = "🔍 特殊特性符号检查"
+    PARAMETERS = "📊 设计制程检查"
+    ELEMENTS = "✅ 文件要素检查"
+    COMPLETE = "📁 文件齐套性检查"
+    ENTERPRISE = "🏢 企业标准检查"
+    HISTORY = "📋 历史问题规避"
+    AI = "🤖 AI智能体"
+    SETTINGS = "⚙️ 设置"
+    HELP = "📖 帮助文档"
+    ADMIN = "🛡️ 网站管理"
 
-    with tab0:
+    tab_labels = [HOME, SPECIAL, PARAMETERS, ELEMENTS, COMPLETE, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
+    if is_admin(username):
+        tab_labels.insert(8, ADMIN)
+
+    tabs = st.tabs(tab_labels)
+    idx = {label: i for i, label in enumerate(tab_labels)}
+
+    with tabs[idx[HOME]]:
         render_home_tab(session_id)
-    with tab1:
+    with tabs[idx[SPECIAL]]:
         render_special_symbols_check_tab(session_id)
-    with tab2:
+    with tabs[idx[PARAMETERS]]:
         render_parameters_check_tab(session_id)
-    with tab3:
+    with tabs[idx[ELEMENTS]]:
         render_file_elements_check_tab(session_id)
-    with tab4:
+    with tabs[idx[COMPLETE]]:
         render_file_completeness_check_tab(session_id)
-    with tab5:
+    with tabs[idx[ENTERPRISE]]:
+        render_enterprise_standard_check_tab(session_id)
+    with tabs[idx[HISTORY]]:
         render_history_issues_avoidance_tab(session_id)
-    with tab6:
+    with tabs[idx[AI]]:
         render_ai_agent_tab(session_id)
-    with tab7:
+    if ADMIN in idx:
+        with tabs[idx[ADMIN]]:
+            render_admin_tab(session_id)
+    with tabs[idx[SETTINGS]]:
         render_settings_tab(session_id)
-    with tab8:
+    with tabs[idx[HELP]]:
         render_help_documentation_tab(session_id)
 else:
     pass 

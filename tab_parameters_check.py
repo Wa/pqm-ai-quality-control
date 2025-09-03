@@ -326,17 +326,38 @@ def render_parameters_check_tab(session_id):
 
     # Render the info/file column FIRST so lists appear immediately when demo starts
     with col_info:
-        # Early bulk operations: handle clear-all before listing so UI updates immediately
-        if st.button("🗑️ 清空所有文件", key=f"parameters_clear_all_files_{session_id}"):
-            try:
-                for dir_path in [cp_session_dir, target_session_dir, graph_session_dir]:
-                    for file in os.listdir(dir_path):
-                        file_path = os.path.join(dir_path, file)
+        # Early scoped clear operations: three per-bucket buttons
+        col_clear_cp, col_clear_target, col_clear_graph = st.columns(3)
+        with col_clear_cp:
+            if st.button("🗑️ 清空控制计划文件", key=f"parameters_clear_cp_files_{session_id}"):
+                try:
+                    for file in os.listdir(cp_session_dir):
+                        file_path = os.path.join(cp_session_dir, file)
                         if os.path.isfile(file_path):
                             os.remove(file_path)
-                st.success("已清空所有文件")
-            except Exception as e:
-                st.error(f"清空失败: {e}")
+                    st.success("已清空控制计划文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        with col_clear_target:
+            if st.button("🗑️ 清空待检查文件", key=f"parameters_clear_target_files_{session_id}"):
+                try:
+                    for file in os.listdir(target_session_dir):
+                        file_path = os.path.join(target_session_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    st.success("已清空待检查文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        with col_clear_graph:
+            if st.button("🗑️ 清空图纸文件", key=f"parameters_clear_graph_files_{session_id}"):
+                try:
+                    for file in os.listdir(graph_session_dir):
+                        file_path = os.path.join(graph_session_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    st.success("已清空图纸文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
         # --- File Manager Module ---
         def get_file_list(folder):
             if not os.path.exists(folder):
