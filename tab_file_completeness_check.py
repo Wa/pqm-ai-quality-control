@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, complete_analysis
+from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, complete_analysis, resolve_ollama_host
 from config import CONFIG
 from ollama import Client as OllamaClient
 import openai
@@ -316,9 +316,7 @@ def render_file_completeness_check_tab(session_id):
     # Initialize LLM clients
     llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
     if llm_backend in ("ollama_127","ollama_9"):
-        host = CONFIG["llm"]["ollama_host"]
-        if llm_backend == "ollama_9":
-            host = host.replace("10.31.60.127", "10.31.60.9")
+        host = resolve_ollama_host(llm_backend)
         ollama_client = OllamaClient(host=host)
     elif llm_backend == "openai":
         openai.api_key = CONFIG["llm"]["openai_api_key"]

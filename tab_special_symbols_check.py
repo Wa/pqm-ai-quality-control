@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from util import get_user_session, reset_user_session, start_analysis, complete_analysis, SimplePromptGenerator, ensure_session_dirs, handle_file_upload
+from util import get_user_session, reset_user_session, start_analysis, complete_analysis, SimplePromptGenerator, ensure_session_dirs, handle_file_upload, resolve_ollama_host
 from config import CONFIG
 from backend_client import get_backend_client, is_backend_available
 from ollama import Client as OllamaClient
@@ -77,9 +77,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     
     # Initialize LLM clients based on selected backend
     if llm_backend in ("ollama_127","ollama_9"):
-        host = CONFIG["llm"]["ollama_host"]
-        if llm_backend == "ollama_9":
-            host = host.replace("10.31.60.127", "10.31.60.9")
+        host = resolve_ollama_host(llm_backend)
         ollama_client = OllamaClient(host=host)
         
         # Streaming generator for Ollama (stateless per call)

@@ -42,7 +42,32 @@ def render_enterprise_standard_check_tab(session_id):
 				st.info("即将上线，预计在9月5日前准备就绪。")
 		with btn_col2:
 			if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
-				st.session_state[f"enterprise_demo_{session_id}"] = True
+				# Copy demonstration files into the user's enterprise folders
+				try:
+					from config import CONFIG
+					import shutil
+					# Locate demonstration root (same convention as other tabs)
+					demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+					demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
+					# Subfolders to copy from → to
+					pairs = [
+						(os.path.join(demo_enterprise, "standards"), standards_dir),
+						(os.path.join(demo_enterprise, "examined_files"), examined_dir),
+					]
+					files_copied = 0
+					for src, dst in pairs:
+						if os.path.exists(src):
+							for name in os.listdir(src):
+								src_path = os.path.join(src, name)
+								dst_path = os.path.join(dst, name)
+								if os.path.isfile(src_path):
+									shutil.copy2(src_path, dst_path)
+									files_copied += 1
+					st.session_state[f"enterprise_demo_{session_id}"] = True
+					st.success(f"已复制演示文件：{files_copied} 个")
+				except Exception as e:
+					st.error(f"演示文件复制失败: {e}")
+				# Placeholder info
 				st.info("即将上线，预计在9月5日前准备就绪。")
 
 		# If started previously, keep showing placeholder message

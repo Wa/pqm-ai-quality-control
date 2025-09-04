@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import json
 import pandas as pd
-from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session
+from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, resolve_ollama_host
 from config import CONFIG
 from util import extract_parameters_to_json
 from ollama import Client as OllamaClient
@@ -47,9 +47,7 @@ def run_parameters_analysis_workflow(session_id, session_dirs):
     # Initialize LLM backend (default to ollama)
     llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
     if llm_backend in ("ollama_127", "ollama_9"):
-        host = CONFIG["llm"]["ollama_host"]
-        if llm_backend == "ollama_9":
-            host = host.replace("10.31.60.127", "10.31.60.9")
+        host = resolve_ollama_host(llm_backend)
         ollama_client = OllamaClient(host=host)
     elif llm_backend == "openai":
         openai.base_url = CONFIG["llm"]["openai_base_url"]

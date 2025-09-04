@@ -10,6 +10,24 @@ import hashlib
 import openpyxl
 import pandas as pd
 
+# --- LLM Host Resolution ---
+def resolve_ollama_host(llm_backend: str) -> str:
+    """Return the Ollama host URL based on selected backend key.
+
+    Recognized keys:
+    - 'ollama_127' -> CONFIG['llm']['ollama_host_127'] if present, else fallback to CONFIG['llm']['ollama_host']
+    - 'ollama_9'   -> CONFIG['llm']['ollama_host_9'] if present, else fallback to CONFIG['llm']['ollama_host']
+    - any other    -> CONFIG['llm']['ollama_host']
+    """
+    try:
+        if llm_backend == "ollama_127":
+            return CONFIG["llm"].get("ollama_host_127") or CONFIG["llm"]["ollama_host"]
+        if llm_backend == "ollama_9":
+            return CONFIG["llm"].get("ollama_host_9") or CONFIG["llm"]["ollama_host"]
+    except Exception:
+        pass
+    return CONFIG["llm"]["ollama_host"]
+
 # --- Login Management ---
 def get_username_file():
     """Get the path to the username storage file."""
