@@ -537,7 +537,8 @@ def get_user_session(session_id, tab_name=None):
             },
             
             # Shared settings (global)
-            'llm_backend': 'ollama',
+            'llm_backend': 'ollama_9',
+            'llm_backend': 'ollama_9',
             'ollama_model': CONFIG["llm"]["ollama_model"],
             'ollama_temperature': 0.7,
             'ollama_top_p': 0.9,

@@ -314,7 +314,7 @@ def render_file_completeness_check_tab(session_id):
     session = get_user_session(session_id, 'completeness')
     
     # Initialize LLM clients
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_9')
     if llm_backend in ("ollama_127","ollama_9"):
         host = resolve_ollama_host(llm_backend)
         ollama_client = OllamaClient(host=host)

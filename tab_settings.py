@@ -32,7 +32,7 @@ def load_user_settings(session_id):
         else:
             # Return default settings if file doesn't exist
             return {
-                'llm_backend': 'ollama',
+                'llm_backend': 'ollama_9',
                 'ollama_model': CONFIG['llm']['ollama_model'],
                 'openai_model': CONFIG['llm']['openai_model'],
                 'ollama_temperature': 0.7,
@@ -51,7 +51,7 @@ def load_user_settings(session_id):
         st.error(f"加载设置失败: {e}")
         # Return default settings on error
         return {
-            'llm_backend': 'ollama',
+            'llm_backend': 'ollama_9',
             'ollama_model': CONFIG['llm']['ollama_model'],
             'openai_model': CONFIG['llm']['openai_model'],
             'ollama_temperature': 0.7,
@@ -70,7 +70,7 @@ def load_user_settings(session_id):
 def save_current_settings(session_id):
     """Save all current session state settings to file."""
     current_settings = {
-        'llm_backend': st.session_state.get(f'llm_backend_{session_id}', 'ollama'),
+        'llm_backend': st.session_state.get(f'llm_backend_{session_id}', 'ollama_9'),
         'ollama_model': st.session_state.get(f'ollama_model_{session_id}', CONFIG['llm']['ollama_model']),
         'openai_model': st.session_state.get(f'openai_model_{session_id}', CONFIG['llm']['openai_model']),
         'ollama_temperature': st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
@@ -264,7 +264,7 @@ def render_settings_tab(session_id):
         }
         
         # Get current LLM choice from session state
-        current_llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+        current_llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_9')
         
         # Find the display name for current backend
         current_display_name = None

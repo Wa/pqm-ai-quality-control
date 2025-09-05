@@ -73,7 +73,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
     
     # Get LLM backend from session state (default to ollama)
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_127')
+    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_9')
     
     # Initialize LLM clients based on selected backend
     if llm_backend in ("ollama_127","ollama_9"):
