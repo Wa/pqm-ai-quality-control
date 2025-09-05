@@ -39,7 +39,7 @@ def load_user_settings(session_id):
                 'ollama_top_p': 0.9,
                 'ollama_top_k': 40,
                 'ollama_repeat_penalty': 1.1,
-                'ollama_num_ctx': 65536,
+                'ollama_num_ctx': 40001,
                 'ollama_num_thread': 4,
                 'openai_temperature': 0.7,
                 'openai_top_p': 1.0,
@@ -58,7 +58,7 @@ def load_user_settings(session_id):
             'ollama_top_p': 0.9,
             'ollama_top_k': 40,
             'ollama_repeat_penalty': 1.1,
-            'ollama_num_ctx': 65536,
+            'ollama_num_ctx': 40001,
             'ollama_num_thread': 4,
             'openai_temperature': 0.7,
             'openai_top_p': 1.0,
@@ -77,7 +77,7 @@ def save_current_settings(session_id):
         'ollama_top_p': st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
         'ollama_top_k': st.session_state.get(f'ollama_top_k_{session_id}', 40),
         'ollama_repeat_penalty': st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-        'ollama_num_ctx': st.session_state.get(f'ollama_num_ctx_{session_id}', 65536),
+        'ollama_num_ctx': st.session_state.get(f'ollama_num_ctx_{session_id}', 40001),
         'ollama_num_thread': st.session_state.get(f'ollama_num_thread_{session_id}', 4),
         'openai_temperature': st.session_state.get(f'openai_temperature_{session_id}', 0.7),
         'openai_top_p': st.session_state.get(f'openai_top_p_{session_id}', 1.0),
@@ -461,8 +461,8 @@ def render_settings_tab(session_id):
                                 break
                 except Exception:
                     dynamic_max_ctx = 8192
-                # Default to 65536; allow values beyond model-reported max (for RoPE scaling / custom builds)
-                _default_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 65536)
+                # Default to 40001; allow values beyond model-reported max (for RoPE scaling / custom builds)
+                _default_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 40001)
                 num_ctx = st.number_input(
                     "上下文窗口大小",
                     min_value=512,
@@ -596,7 +596,7 @@ def render_settings_tab(session_id):
                 st.write("**Top-p:**", st.session_state.get(f'ollama_top_p_{session_id}', 0.9))
                 st.write("**Top-k:**", st.session_state.get(f'ollama_top_k_{session_id}', 40))
                 st.write("**Repeat Penalty:**", st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1))
-                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 65536))
+                st.write("**num_ctx:**", st.session_state.get(f'ollama_num_ctx_{session_id}', 40001))
                 st.write("**num_thread:**", st.session_state.get(f'ollama_num_thread_{session_id}', 4))
 
         elif selected_backend == "openai":
