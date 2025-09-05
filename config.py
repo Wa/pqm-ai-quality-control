@@ -19,7 +19,7 @@ CONFIG = {
         "history_excel": PROJECT_ROOT / "demonstration" / "副本LL-lesson learn-历史问题规避-V9.4.xlsx"
     },
     "llm": {
-        "ollama_host": "http://10.31.60.127:11434",
+        "ollama_host": "http://10.31.60.9:11434",
         "ollama_host_127": "http://10.31.60.127:11434",
         "ollama_host_9": "http://10.31.60.9:11434",
         "ollama_model": "gpt-oss:latest",
