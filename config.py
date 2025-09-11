@@ -26,6 +26,11 @@ CONFIG = {
         "openai_base_url": "https://sg.uiuiapi.com/v1",
         "openai_api_key": "sk-dDG9UBQHLshfb8Z5FYQQXFOZAe6FtUxltMwIxg0KNCSsGKjh",
         "openai_model": "gpt-3.5-turbo"
+    },
+    # Central service endpoints/switches
+    "services": {
+        # Unstructured API endpoint (fallback if env UNSTRUCTURED_API_URL not set)
+        "unstructured_api_url": "http://10.31.60.11:8000/general/v0/general"
     }
 }
 

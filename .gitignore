@@ -109,3 +109,5 @@ celerybeat.pid
 .mypy_cache/
 .dmypy.json
 dmypy.json 
+# Ignore user enterprise uploads
+enterprise_standard_files/
