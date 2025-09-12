@@ -33,10 +33,10 @@ CONFIG = {
         "base_url": "http://10.31.60.11:3001",
         "invoke_path": "/api/v2/workflow/invoke",
         "stop_path": "/api/v2/workflow/stop",
-        "workflow_id": "",
+        "workflow_id": "31208af992c94e9fb56b759ebff2f242",
         "api_key": "",
         # Chunking default
-        "max_words": 1000,
+        "max_words": 2000,
         # Request timeout seconds
         "timeout_s": 90
     },

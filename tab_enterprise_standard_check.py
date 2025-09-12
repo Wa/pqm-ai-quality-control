@@ -483,21 +483,9 @@ def render_enterprise_standard_check_tab(session_id):
 			default_base_url = os.getenv('BISHENG_BASE_URL') or bs_cfg.get('base_url') or 'http://10.31.60.11:3001'
 			default_invoke_path = os.getenv('BISHENG_INVOKE_PATH') or bs_cfg.get('invoke_path') or '/api/v2/workflow/invoke'
 			default_stop_path = os.getenv('BISHENG_STOP_PATH') or bs_cfg.get('stop_path') or '/api/v2/workflow/stop'
-			# Fallback: try to auto-detect workflow_id from external app_v2.py if not provided
-			_ext_app_path = r"C:\\Users\\zzk_j\\Downloads\\call_bisheng_api\\app_v2.py"
-			fallback_wf = ''
-			try:
-				if not os.getenv('BISHENG_WORKFLOW_ID') and not bs_cfg.get('workflow_id') and os.path.exists(_ext_app_path):
-					with open(_ext_app_path, 'r', encoding='utf-8') as _f:
-						_src = _f.read()
-						m = re.search(r"workflow_id\s*=\s*os\.getenv\(.*?,\s*\"([0-9a-fA-F-]{16,})\"\)", _src)
-						if m:
-							fallback_wf = m.group(1)
-			except Exception:
-				pass
-			default_workflow_id = os.getenv('BISHENG_WORKFLOW_ID') or bs_cfg.get('workflow_id') or fallback_wf
+			default_workflow_id = os.getenv('BISHENG_WORKFLOW_ID') or bs_cfg.get('workflow_id') or ''
 			default_api_key = os.getenv('BISHENG_API_KEY') or bs_cfg.get('api_key') or ''
-			default_max_words = int(os.getenv('BISHENG_MAX_WORDS') or bs_cfg.get('max_words') or 1000)
+			default_max_words = int(os.getenv('BISHENG_MAX_WORDS') or bs_cfg.get('max_words') or 2000)
 			default_timeout_s = int(os.getenv('BISHENG_TIMEOUT_S') or bs_cfg.get('timeout_s') or 90)
 
 			key_prefix = f"bisheng_{session_id}_"
