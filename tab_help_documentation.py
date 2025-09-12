@@ -24,6 +24,7 @@ def render_help_documentation_tab(session_id):
         "🤖 AI智能体": "ai_agent",
         "⚙️ 设置": "settings",
         "❓ 常见问题": "faq",
+        "📚 技术文档": "technical_docs",
     }
 
     with col1:
@@ -88,6 +89,8 @@ def render_help_documentation_tab(session_id):
             render_settings_section()
         elif selected_section == "❓ 常见问题":
             render_faq_section()
+        elif selected_section == "📚 技术文档":
+            render_technical_docs_section()
 
 def render_special_symbols_check_section():
     """Render the special symbols check section."""
@@ -380,5 +383,333 @@ def render_faq_section():
     ### 📞 联系支持
     
     如果遇到其他问题，请联系周昭坤。
+    """)
+
+def render_technical_docs_section():
+    """Render the technical documentation section."""
+    st.header("📚 技术文档")
+    
+    st.markdown("""
+    ### 企业标准检查部署细节
+    
+    #### 服务架构概述
+    
+    企业标准检查功能依赖以下关键服务：
+    1. **MinerU服务** (10.31.60.127:8000) - PDF解析
+    2. **Unstructured服务** (10.31.60.11:8000) - Word/PPT解析  
+    3. **Ollama服务** (10.31.60.9:11434) - LLM推理
+    4. **PQM_AI应用** (10.31.60.127) - 主应用
+    
+    #### 服务启动与维护
+    
+    **1. MinerU服务 (10.31.60.127:8000)**
+    
+    SSH登录服务器：
+    ```bash
+    ssh -o ServerAliveInterval=130 -o ServerAliveCountMax=6 calb@10.31.60.127
+    pwd 0000
+    ```
+    
+    检查服务状态：
+    ```bash
+    sudo su
+    docker ps | grep mineru
+    ```
+    
+    启动服务（如果未运行）：
+    ```bash
+    # 下载修改后的compose.yaml到MinerU目录
+    # 原始文件：wget https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml
+    # 已修改版本（取消注释--mem-fraction-static 0.5）：从PQM_AI项目获取
+    # 将 [compose.yaml](demonstration/compose.yaml) 复制到服务器MinerU目录
+    
+    # 进入MinerU目录
+    cd /path/to/MinerU
+    
+    # 使用Docker Compose启动API服务
+    docker compose -p mineru -f compose.yaml --profile api up -d
+    ```
+    
+    重启服务：
+    ```bash
+    docker compose -p mineru -f compose.yaml --profile api restart
+    ```
+    
+    查看日志：
+    ```bash
+    docker logs mineru-api
+    ```
+    
+    停止服务：
+    ```bash
+    docker compose -p mineru -f compose.yaml --profile api down
+    ```
+    
+    **Docker镜像信息**：
+    - 镜像名：`mineru-sglang:latest`
+    - 容器名：`mineru-api`
+    - 端口映射：`0.0.0.0:8000->8000/tcp`
+    - GPU内存使用：~13.4GB/24GB (RTX 3090)
+    
+    **重要配置说明**：
+    - 使用的compose.yaml已修改：取消注释了`--mem-fraction-static 0.5`参数
+    - 原始文件：[https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml](https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml)
+    - 修改版本：[compose.yaml](demonstration/compose.yaml)
+    - 此修改解决了GPU内存不足导致的OOM（内存溢出）问题
+    
+    **2. Unstructured服务 (10.31.60.11:8000)**
+    
+    SSH登录服务器：
+    ```bash
+    ssh -o ServerAliveInterval=130 -o ServerAliveCountMax=6 file-translation@10.31.60.11
+    pwd calb147258
+    ```
+    
+    检查服务状态：
+    ```bash
+    docker ps | grep unstructured
+    ```
+    
+    启动服务（如果未运行）：
+    ```bash
+    # 拉取最新镜像
+    docker pull downloads.unstructured.io/unstructured-io/unstructured-api:latest
+    
+    # 启动API容器
+    docker run -d --name unstructured-api --restart unless-stopped \\
+      -p 8000:8000 \\
+      -e PIPELINE_CONCURRENCY_LIMIT=4 \\
+      -e ENABLE_CLEANING=1 \\
+      downloads.unstructured.io/unstructured-io/unstructured-api:latest
+    ```
+    
+    重启服务：
+    ```bash
+    docker restart unstructured-api
+    ```
+    
+    查看日志：
+    ```bash
+    docker logs unstructured-api
+    ```
+    
+    停止服务：
+    ```bash
+    docker stop unstructured-api
+    ```
+    
+    **3. Ollama服务 (10.31.60.9:11434)**
+    
+    SSH登录服务器：
+    ```bash
+    ssh -o ServerAliveInterval=130 -o ServerAliveCountMax=6 translation-service@10.31.60.9
+    pwd calb147258
+    ```
+    
+    检查服务状态：
+    ```bash
+    systemctl status ollama
+    ```
+    
+    启动服务：
+    ```bash
+    systemctl start ollama
+    ```
+    
+    重启服务：
+    ```bash
+    systemctl restart ollama
+    ```
+    
+    查看日志：
+    ```bash
+    journalctl -u ollama -f
+    ```
+    
+    #### 故障诊断与修复
+    
+    **1. 服务连通性检查**
+    
+    在PQM_AI应用服务器上执行：
+    ```bash
+    # 检查MinerU服务
+    curl -X GET http://10.31.60.127:8000/health
+    
+    # 检查Unstructured服务  
+    curl -X GET http://10.31.60.11:8000/health
+    
+    # 检查Ollama服务
+    curl -X GET http://10.31.60.9:11434/api/tags
+    ```
+    
+    **2. 常见故障及解决方案**
+    
+    **MinerU服务故障**：
+    - 症状：PDF文件解析失败，返回连接错误
+    - 检查：`docker logs mineru-api`
+    - 常见原因：GPU内存不足、容器崩溃
+    - 解决：重启容器，检查GPU内存使用情况
+    
+    **Unstructured服务故障**：
+    - 症状：Word/PPT文件解析失败
+    - 检查：`docker logs unstructured-api`
+    - 常见原因：内存不足、端口冲突
+    - 解决：重启容器，检查端口8000是否被占用
+    
+    **Ollama服务故障**：
+    - 症状：LLM调用失败，AI功能不可用
+    - 检查：`journalctl -u ollama`
+    - 常见原因：模型文件损坏、内存不足
+    - 解决：重启服务，检查可用模型
+    
+    **3. 日志位置**
+    
+    **MinerU日志**：
+    ```bash
+    # 容器日志
+    docker logs mineru-api --tail 100
+    
+    # 系统日志（如果使用systemd）
+    journalctl -u docker --since "1 hour ago"
+    ```
+    
+    **Unstructured日志**：
+    ```bash
+    # 容器日志
+    docker logs unstructured-api --tail 100
+    ```
+    
+    **Ollama日志**：
+    ```bash
+    # 服务日志
+    journalctl -u ollama --since "1 hour ago"
+    ```
+    
+    **PQM_AI应用日志**：
+    ```bash
+    # Streamlit应用日志（在应用运行终端查看）
+    # 或检查系统日志
+    journalctl --since "1 hour ago" | grep streamlit
+    ```
+    
+    #### 配置管理
+    
+    **1. 服务端点配置**
+    
+    在`config.py`中配置：
+    ```python
+    CONFIG = {
+        "services": {
+            "unstructured_api_url": "http://10.31.60.11:8000/general/v0/general",
+            "mineru_api_url": "http://10.31.60.127:8000/file_parse"
+        },
+        "llm": {
+            "ollama_host": "http://10.31.60.9:11434"
+        }
+    }
+    ```
+    
+    **2. 环境变量覆盖**
+    
+    设置环境变量可覆盖配置文件：
+    ```bash
+    export UNSTRUCTURED_API_URL="http://10.31.60.11:8000/general/v0/general"
+    export OLLAMA_HOST="http://10.31.60.9:11434"
+    ```
+    
+    #### 备份与恢复
+    
+    **1. 重要文件备份**
+    
+    ```bash
+    # 备份用户数据
+    tar -czf pqm_backup_$(date +%Y%m%d).tar.gz \\
+      generated_files/ \\
+      user_sessions/ \\
+      user_settings/ \\
+      enterprise_standard_files/
+    
+    # 备份配置文件
+    cp config.py config_backup_$(date +%Y%m%d).py
+    ```
+    
+    **2. 服务配置备份**
+    
+    ```bash
+    # 备份Docker Compose配置
+    docker compose -p mineru -f compose.yaml config > mineru_config_backup.yaml
+    ```
+    
+    #### 性能监控
+    
+    **1. 资源使用监控**
+    
+    ```bash
+    # 检查Docker容器资源使用
+    docker stats
+    
+    # 检查GPU使用情况（MinerU服务器）
+    nvidia-smi
+    
+    # 检查磁盘空间
+    df -h
+    ```
+    
+    **2. 服务健康检查脚本**
+    
+    创建健康检查脚本`health_check.sh`：
+    ```bash
+    #!/bin/bash
+    echo "=== 服务健康检查 ==="
+    
+    echo "检查MinerU服务..."
+    curl -s http://10.31.60.127:8000/health || echo "MinerU服务异常"
+    
+    echo "检查Unstructured服务..."
+    curl -s http://10.31.60.11:8000/health || echo "Unstructured服务异常"
+    
+    echo "检查Ollama服务..."
+    curl -s http://10.31.60.9:11434/api/tags || echo "Ollama服务异常"
+    
+    echo "=== 检查完成 ==="
+    ```
+    
+    #### 紧急恢复程序
+    
+    **1. 完全服务重启**
+    
+    ```bash
+    # 在10.31.60.127上
+    docker compose -p mineru -f compose.yaml --profile api restart
+    
+    # 在10.31.60.11上  
+    docker restart unstructured-api
+    
+    # 在10.31.60.9上
+    systemctl restart ollama
+    
+    # 在PQM_AI应用服务器上
+    # 重启Streamlit应用
+    ```
+    
+    **2. 服务降级方案**
+    
+    如果某个服务不可用，可以临时修改配置：
+    - 禁用PDF处理：注释掉MinerU相关代码
+    - 禁用Word/PPT处理：注释掉Unstructured相关代码
+    - 使用备用LLM：修改Ollama配置指向其他服务器
+    
+    #### 联系信息
+    
+    - **主要维护人员**：周昭坤
+    - **服务器访问**：需要相应服务器的SSH权限
+    - **紧急联系**：通过内部通讯工具联系技术团队
+    
+    #### 相关文档链接
+    
+    - [MinerU官方文档](https://opendatalab.github.io/MinerU/)
+    - [MinerU Docker部署指南](https://opendatalab.github.io/MinerU/quick_start/docker_deployment/)
+    - [Unstructured官方文档](https://docs.unstructured.io/)
+    - [Ollama官方文档](https://ollama.ai/docs)
     """)
 

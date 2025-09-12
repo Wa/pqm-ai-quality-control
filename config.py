@@ -27,6 +27,19 @@ CONFIG = {
         "openai_api_key": "sk-dDG9UBQHLshfb8Z5FYQQXFOZAe6FtUxltMwIxg0KNCSsGKjh",
         "openai_model": "gpt-3.5-turbo"
     },
+    "bisheng": {
+        # Bisheng workflow service defaults; can be overridden by environment variables
+        # BISHENG_BASE_URL, BISHENG_INVOKE_PATH, BISHENG_STOP_PATH, BISHENG_WORKFLOW_ID, BISHENG_API_KEY
+        "base_url": "http://10.31.60.11:3001",
+        "invoke_path": "/api/v2/workflow/invoke",
+        "stop_path": "/api/v2/workflow/stop",
+        "workflow_id": "",
+        "api_key": "",
+        # Chunking default
+        "max_words": 1000,
+        # Request timeout seconds
+        "timeout_s": 90
+    },
     # Central service endpoints/switches
     "services": {
         # Unstructured API endpoint (fallback if env UNSTRUCTURED_API_URL not set)
