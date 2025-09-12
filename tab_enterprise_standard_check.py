@@ -2,6 +2,8 @@ import streamlit as st
 import os
 import io
 import zipfile
+import json
+import re
 import requests
 from util import ensure_session_dirs, handle_file_upload
 from config import CONFIG
@@ -475,6 +477,59 @@ def render_enterprise_standard_check_tab(session_id):
 		# No persistent placeholder; results are shown inline above
 
 	with col_info:
+		# Bisheng configuration UI
+		with st.expander("Bisheng 配置", expanded=False):
+			bs_cfg = CONFIG.get('bisheng', {})
+			default_base_url = os.getenv('BISHENG_BASE_URL') or bs_cfg.get('base_url') or 'http://10.31.60.11:3001'
+			default_invoke_path = os.getenv('BISHENG_INVOKE_PATH') or bs_cfg.get('invoke_path') or '/api/v2/workflow/invoke'
+			default_stop_path = os.getenv('BISHENG_STOP_PATH') or bs_cfg.get('stop_path') or '/api/v2/workflow/stop'
+			# Fallback: try to auto-detect workflow_id from external app_v2.py if not provided
+			_ext_app_path = r"C:\\Users\\zzk_j\\Downloads\\call_bisheng_api\\app_v2.py"
+			fallback_wf = ''
+			try:
+				if not os.getenv('BISHENG_WORKFLOW_ID') and not bs_cfg.get('workflow_id') and os.path.exists(_ext_app_path):
+					with open(_ext_app_path, 'r', encoding='utf-8') as _f:
+						_src = _f.read()
+						m = re.search(r"workflow_id\s*=\s*os\.getenv\(.*?,\s*\"([0-9a-fA-F-]{16,})\"\)", _src)
+						if m:
+							fallback_wf = m.group(1)
+			except Exception:
+				pass
+			default_workflow_id = os.getenv('BISHENG_WORKFLOW_ID') or bs_cfg.get('workflow_id') or fallback_wf
+			default_api_key = os.getenv('BISHENG_API_KEY') or bs_cfg.get('api_key') or ''
+			default_max_words = int(os.getenv('BISHENG_MAX_WORDS') or bs_cfg.get('max_words') or 1000)
+			default_timeout_s = int(os.getenv('BISHENG_TIMEOUT_S') or bs_cfg.get('timeout_s') or 90)
+
+			key_prefix = f"bisheng_{session_id}_"
+			base_url_val = st.text_input("Base URL", value=st.session_state.get(key_prefix + 'base_url', default_base_url), key=key_prefix + 'base_url_input')
+			invoke_path_val = st.text_input("Invoke Path", value=st.session_state.get(key_prefix + 'invoke_path', default_invoke_path), key=key_prefix + 'invoke_path_input')
+			stop_path_val = st.text_input("Stop Path", value=st.session_state.get(key_prefix + 'stop_path', default_stop_path), key=key_prefix + 'stop_path_input')
+			workflow_id_val = st.text_input("Workflow ID", value=st.session_state.get(key_prefix + 'workflow_id', default_workflow_id), key=key_prefix + 'workflow_id_input')
+			api_key_val = st.text_input("API Key", type="password", value=st.session_state.get(key_prefix + 'api_key', default_api_key), key=key_prefix + 'api_key_input')
+			col_mw, col_to = st.columns(2)
+			with col_mw:
+				max_words_val = st.number_input("Max words per chunk", min_value=200, max_value=2000, value=st.session_state.get(key_prefix + 'max_words', default_max_words), step=50, key=key_prefix + 'max_words_input')
+			with col_to:
+				timeout_s_val = st.number_input("Timeout (s)", min_value=10, max_value=300, value=st.session_state.get(key_prefix + 'timeout_s', default_timeout_s), step=5, key=key_prefix + 'timeout_s_input')
+			if st.button("保存 Bisheng 配置", key=key_prefix + 'save'):
+				st.session_state[key_prefix + 'base_url'] = base_url_val.strip()
+				st.session_state[key_prefix + 'invoke_path'] = invoke_path_val.strip()
+				st.session_state[key_prefix + 'stop_path'] = stop_path_val.strip()
+				st.session_state[key_prefix + 'workflow_id'] = workflow_id_val.strip()
+				st.session_state[key_prefix + 'api_key'] = api_key_val.strip()
+				st.session_state[key_prefix + 'max_words'] = int(max_words_val)
+				st.session_state[key_prefix + 'timeout_s'] = int(timeout_s_val)
+				st.success("已保存。")
+
+			st.caption(f"当前配置：base_url={base_url_val or default_base_url}, workflow_id={(workflow_id_val or default_workflow_id) or '(未设置)'}")
+			if st.button("测试连接", key=key_prefix + 'test'):
+				try:
+					payload = {"workflow_id": (workflow_id_val or default_workflow_id or '').strip() or "test", "inputs": {"user_question": "ping"}}
+					import requests as _rq
+					resp = _rq.post((base_url_val or default_base_url).rstrip('/') + (invoke_path_val or default_invoke_path), headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=10)
+					st.success(f"连接正常，HTTP {resp.status_code}")
+				except Exception as e:
+					st.error(f"连接失败：{e}")
 		# File manager utilities (mirroring completeness tab behavior)
 		def get_file_list(folder):
 			if not folder or not os.path.exists(folder):
