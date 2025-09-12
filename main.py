@@ -36,7 +36,7 @@ if username:
     HELP = "📖 帮助文档"
     ADMIN = "🛡️ 网站管理"
 
-    tab_labels = [HOME, SPECIAL, PARAMETERS, ELEMENTS, COMPLETE, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
+    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
     if is_admin(username):
         tab_labels.insert(8, ADMIN)
 
@@ -45,14 +45,14 @@ if username:
 
     with tabs[idx[HOME]]:
         render_home_tab(session_id)
+    with tabs[idx[COMPLETE]]:
+        render_file_completeness_check_tab(session_id)
     with tabs[idx[SPECIAL]]:
         render_special_symbols_check_tab(session_id)
     with tabs[idx[PARAMETERS]]:
         render_parameters_check_tab(session_id)
     with tabs[idx[ELEMENTS]]:
         render_file_elements_check_tab(session_id)
-    with tabs[idx[COMPLETE]]:
-        render_file_completeness_check_tab(session_id)
     with tabs[idx[ENTERPRISE]]:
         render_enterprise_standard_check_tab(session_id)
     with tabs[idx[HISTORY]]:

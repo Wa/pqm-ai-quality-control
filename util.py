@@ -114,6 +114,23 @@ def ensure_session_dirs(base_dirs, session_id):
         # Fail-safe: do not break callers if path operations fail
         pass
 
+    # Ensure history issues avoidance directories exist under project root:
+    # ./PQM_AI/history_issues_avoidance_files/issue_lists/<username>
+    # ./PQM_AI/history_issues_avoidance_files/target_files/<username>
+    try:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        history_root = os.path.join(project_root, "history_issues_avoidance_files")
+        issue_lists_dir = os.path.join(history_root, "issue_lists", str(session_id))
+        target_files_dir = os.path.join(history_root, "target_files", str(session_id))
+        os.makedirs(issue_lists_dir, exist_ok=True)
+        os.makedirs(target_files_dir, exist_ok=True)
+        # Expose convenience keys regardless of input base_dirs
+        session_dirs.setdefault("history_issue_lists", issue_lists_dir)
+        session_dirs.setdefault("history_target_files", target_files_dir)
+    except Exception:
+        # Fail-safe: do not break callers if path operations fail
+        pass
+
     return session_dirs
 
 # --- File Upload Utility ---

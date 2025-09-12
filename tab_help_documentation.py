@@ -15,10 +15,10 @@ def render_help_documentation_tab(session_id):
 
     # Define section mappings (label -> key)
     section_mappings = {
+        "📁 文件齐套性检查": "file_completeness_check",
         "🔍 特殊特性符号检查": "special_symbols_check",
         "📊 设计制程检查": "parameters_check",
         "✅ 文件要素检查": "file_elements_check",
-        "📁 文件齐套性检查": "file_completeness_check",
         "🏢 企业标准检查": "enterprise_standard_check",
         "📋 历史问题规避": "history_issues_avoidance",
         "🤖 AI智能体": "ai_agent",
@@ -48,14 +48,14 @@ def render_help_documentation_tab(session_id):
 
         st.markdown("### 目录")
 
-        # Current selected section in session_state (default to 🔍 特殊特性符号检查)
+        # Current selected section in session_state (default to 📁 文件齐套性检查)
         selected_section = st.session_state.get(
-            f"help_section_active_{session_id}", "🔍 特殊特性符号检查"
+            f"help_section_active_{session_id}", "📁 文件齐套性检查"
         )
         # Backward compatibility: if an old value without icon is stored, reset to default
         valid_labels = set(section_mappings.keys())
         if selected_section not in valid_labels:
-            selected_section = "🔍 特殊特性符号检查"
+            selected_section = "📁 文件齐套性检查"
             st.session_state[f"help_section_active_{session_id}"] = selected_section
 
         # Render a vertical list of buttons
