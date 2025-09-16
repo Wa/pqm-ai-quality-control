@@ -325,7 +325,9 @@ def render_history_issues_avoidance_tab(session_id):
             if st.button("演示", key=f"history_demo_button_{session_id}"):
                 # Copy demonstration file to issue_lists directory
                 try:
-                    demo_file_path = r"C:\Users\zzk_j\Downloads\PQM_AI\demonstration\副本LL-lesson learn-历史问题规避-V9.4.xlsx"
+                    # Locate demonstration root (same convention as other tabs)
+                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_file_path = os.path.join(str(demo_base_dir), "副本LL-lesson learn-历史问题规避-V9.4.xlsx")
                     if os.path.exists(demo_file_path):
                         dest_path = os.path.join(issue_lists_dir, "副本LL-lesson learn-历史问题规避-V9.4.xlsx")
                         shutil.copy2(demo_file_path, dest_path)

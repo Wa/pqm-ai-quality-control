@@ -73,14 +73,14 @@ def render_help_documentation_tab(session_id):
 
     with col2:
         # Display content based on selection
-        if selected_section == "🔍 特殊特性符号检查":
+        if selected_section == "📁 文件齐套性检查":
+            render_file_completeness_check_section()
+        elif selected_section == "🔍 特殊特性符号检查":
             render_special_symbols_check_section()
         elif selected_section == "📊 设计制程检查":
             render_parameters_check_section()
         elif selected_section == "✅ 文件要素检查":
             render_file_elements_check_section()
-        elif selected_section == "📁 文件齐套性检查":
-            render_file_completeness_check_section()
         elif selected_section == "📋 历史问题规避":
             render_history_issues_avoidance_section()
         elif selected_section == "🤖 AI智能体":
