@@ -532,7 +532,7 @@ def render_special_symbols_check_tab(session_id):
     with st.container(key="special_symbols_root"):
         st.markdown("""
         <style>
-        .st-key-special_symbols_root [data-testid="stChatInput"] { display: none; }
+        [data-testid="stChatInput"] { display: none; }
         </style>
         """, unsafe_allow_html=True)
     
