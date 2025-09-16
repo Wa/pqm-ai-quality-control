@@ -111,3 +111,4 @@ celerybeat.pid
 dmypy.json 
 # Ignore user enterprise uploads
 enterprise_standard_files/
+history_issues_avoidance_files/
