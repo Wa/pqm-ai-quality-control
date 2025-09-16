@@ -4,6 +4,7 @@ import io
 import zipfile
 import json
 import re
+import time
 import requests
 from util import ensure_session_dirs, handle_file_upload
 from config import CONFIG
@@ -12,7 +13,22 @@ from bisheng_client import (
 	call_workflow_invoke,
 	aggregate_enterprise_checks,
 	split_to_chunks,
+	stop_workflow,
 )
+
+
+# --- Bisheng fixed settings (edit here if endpoints or workflow change) ---
+# Base URL of Bisheng server
+BISHENG_BASE_URL = "http://10.31.60.11:3001"
+# Invoke and Stop API paths
+BISHENG_INVOKE_PATH = "/api/v2/workflow/invoke"
+BISHENG_STOP_PATH = "/api/v2/workflow/stop"
+# Default workflow id and API key (if your server requires one)
+BISHENG_WORKFLOW_ID = "31208af992c94e9fb56b759ebff2f242"
+BISHENG_API_KEY = ""
+# Chunking and request timeout
+BISHENG_MAX_WORDS = 2000
+BISHENG_TIMEOUT_S = 90
 
 
 def _list_pdfs(folder: str):
@@ -272,6 +288,7 @@ def render_enterprise_standard_check_tab(session_id):
 
 	st.subheader("🏢 企业标准检查")
 
+	# No CSS width overrides; rely on Streamlit columns like special symbols tab
 	# Ensure enterprise directories and a generated output root exist
 	base_dirs = {
 		"generated": str(CONFIG["directories"]["generated_files"]),
@@ -303,8 +320,8 @@ def render_enterprise_standard_check_tab(session_id):
 				handle_file_upload(files_exam, examined_dir)
 				st.success(f"已上传 {len(files_exam)} 个待检查文件")
 
-		# Start and Demo buttons
-		btn_col1, btn_col2 = st.columns([1, 1])
+		# Start / Stop / Demo buttons
+		btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
 		with btn_col1:
 			if st.button("开始", key=f"enterprise_start_button_{session_id}"):
 				# Process PDFs (MinerU) and Word/PPT (Unstructured) into plain text
@@ -323,7 +340,23 @@ def render_enterprise_standard_check_tab(session_id):
 						st.success("处理完成。")
 					else:
 						st.info("未生成任何文本文件，请确认已上传 PDF、Word/PPT 或 Excel。")
-					# If we have any txt, continue with Bisheng pipeline
+					# If we have any txt, switch to running phase and rerun so streaming renders in main column
+					try:
+						std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
+						exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
+						if not exam_txt_files:
+							st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
+						else:
+							st.session_state[f"enterprise_running_{session_id}"] = True
+							st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
+							st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
+							st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
+							st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
+							st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
+							st.rerun()
+					except Exception as e:
+						st.error(f"企业标准比对流程异常：{e}")
+					# Fallback legacy flow below (will be skipped due to rerun)
 					try:
 						std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
 						exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
@@ -366,55 +399,77 @@ def render_enterprise_standard_check_tab(session_id):
 								os.makedirs(initial_dir, exist_ok=True)
 								for idx_file, name in enumerate(exam_txt_files, start=1):
 									src_path = os.path.join(examined_txt_dir, name)
-									with st.expander(f"📄 正在比对 {idx_file}/{len(exam_txt_files)}：{name}", expanded=False):
-										# Read text
-										try:
-											with open(src_path, 'r', encoding='utf-8') as f:
-												doc_text = f.read()
-										except Exception as e:
-											st.error(f"读取失败：{e}")
-											continue
-										if not doc_text.strip():
-											st.info("文件为空，跳过。")
-											continue
-										chunks = split_to_chunks(doc_text, int(max_words))
-										prompt_prefix = (
-											"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-											"列出符合与不符合点，并引用原文证据（简短摘录）。\n"
-										)
-										full_out_text = ""
-										for i, piece in enumerate(chunks, start=1):
-											st.write(f"分块 {i}/{len(chunks)} …")
-											placeholder = st.empty()
-											try:
-												gen = call_workflow_invoke(
-													base_url=base_url,
-													invoke_path=invoke_path,
-													workflow_id=workflow_id,
-													user_question=f"{prompt_prefix}{piece}",
-													api_key=api_key or None,
-													timeout_s=int(timeout_s),
-													standard_file_urls=std_urls,
-													session_id=bisheng_session_id,
-												)
-												chunk_text = ""
-												new_sid = None
-												for partial, sid in gen:
-													chunk_text = partial
-													if sid and not new_sid:
-														new_sid = sid
-													placeholder.write(chunk_text)
-												if new_sid:
-													bisheng_session_id = new_sid
-												full_out_text += ("\n\n" if full_out_text else "") + (chunk_text or "")
-											except requests.HTTPError as e:
-												try:
-													err = e.response.json()
-													placeholder.error(json.dumps(err, ensure_ascii=False))
-												except Exception:
-													placeholder.error(str(e))
-											except Exception as e:
-												placeholder.error(f"调用失败：{e}")
+									# File header
+									st.markdown(f"**📄 正在比对 {idx_file}/{len(exam_txt_files)}：{name}**")
+									# Read text
+									try:
+										with open(src_path, 'r', encoding='utf-8') as f:
+											doc_text = f.read()
+									except Exception as e:
+										st.error(f"读取失败：{e}")
+										continue
+									if not doc_text.strip():
+										st.info("文件为空，跳过。")
+										continue
+									chunks = split_to_chunks(doc_text, int(max_words))
+									prompt_prefix = (
+										"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
+										"列出符合与不符合点，并引用原文证据（简短摘录）。\n"
+									)
+									full_out_text = ""
+									for i, piece in enumerate(chunks, start=1):
+										col_prompt, col_response = st.columns([1, 1])
+										prompt_text = f"{prompt_prefix}{piece}"
+										with col_prompt:
+											st.subheader(f"分块 {i}/{len(chunks)} - 提示词")
+											prompt_container = st.container(height=400)
+											with prompt_container:
+												with st.chat_message("user"):
+													prompt_placeholder = st.empty()
+													# Simulate streaming prompt by gradually revealing text (no delay)
+													words = prompt_text.split()
+													streamed = ""
+													for j in range(0, len(words), 30):
+														chunk_words = words[j:j+30]
+														streamed += " ".join(chunk_words) + " "
+														prompt_placeholder.text(streamed.strip())
+											st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{i}")
+										with col_response:
+											st.subheader(f"分块 {i}/{len(chunks)} - AI回复")
+											response_container = st.container(height=400)
+											with response_container:
+												with st.chat_message("assistant"):
+													response_placeholder = st.empty()
+													try:
+														gen = call_workflow_invoke(
+															base_url=base_url,
+															invoke_path=invoke_path,
+															workflow_id=workflow_id,
+															user_question=prompt_text,
+															api_key=api_key or None,
+															timeout_s=int(timeout_s),
+															standard_file_urls=std_urls,
+															session_id=bisheng_session_id,
+														)
+														chunk_text = ""
+														new_sid = None
+														for partial, sid in gen:
+															chunk_text = partial
+															if sid and not new_sid:
+																new_sid = sid
+															response_placeholder.write(chunk_text)
+															if new_sid:
+																bisheng_session_id = new_sid
+															full_out_text += ("\n\n" if full_out_text else "") + (chunk_text or "")
+													except requests.HTTPError as e:
+														try:
+															err = e.response.json()
+															response_placeholder.error(json.dumps(err, ensure_ascii=False))
+														except Exception:
+															response_placeholder.error(str(e))
+													except Exception as e:
+														response_placeholder.error(f"调用失败：{e}")
+											st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
 										# Persist per-file combined output
 										try:
 											name_no_ext = os.path.splitext(name)[0]
@@ -445,6 +500,27 @@ def render_enterprise_standard_check_tab(session_id):
 									st.error(f"汇总失败：{e}")
 					except Exception as e:
 						st.error(f"企业标准比对流程异常：{e}")
+		with btn_col_stop:
+			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
+				try:
+					# Load current bisheng session id if any
+					bs_key = f"bisheng_session_{session_id}"
+					bisheng_sid = st.session_state.get(bs_key)
+					bs_cfg = CONFIG.get('bisheng', {})
+					base_url = (st.session_state.get(f"bisheng_{session_id}_base_url")
+								or os.getenv('BISHENG_BASE_URL') or bs_cfg.get('base_url') or 'http://10.31.60.11:3001')
+					stop_path = (st.session_state.get(f"bisheng_{session_id}_stop_path")
+								or os.getenv('BISHENG_STOP_PATH') or bs_cfg.get('stop_path') or '/api/v2/workflow/stop')
+					api_key = (st.session_state.get(f"bisheng_{session_id}_api_key")
+								or os.getenv('BISHENG_API_KEY') or bs_cfg.get('api_key') or '')
+					if not bisheng_sid:
+						st.info("当前无活动会话可停止。")
+					else:
+						res = stop_workflow(base_url, stop_path, bisheng_sid, api_key or None)
+						st.success(f"已请求停止，响应：{res}")
+				except Exception as e:
+					st.error(f"停止失败：{e}")
+
 		with btn_col2:
 			if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
 				# Copy demonstration files into the user's enterprise folders (no processing here)
@@ -474,50 +550,134 @@ def render_enterprise_standard_check_tab(session_id):
 				# Keep demo workflow isolated: no processing; show placeholder notice
 				st.info("演示功能建设中（This demo workflow is under construction）")
 
-		# No persistent placeholder; results are shown inline above
+		# Render streaming phase in main column after rerun (mirrors special_symbols pattern)
+		if st.session_state.get(f"enterprise_running_{session_id}"):
+			st.markdown("**企业标准比对（Bisheng）**")
+			# Retrieve context saved before rerun
+			std_txt_files = st.session_state.get(f"enterprise_std_txt_files_{session_id}") or []
+			exam_txt_files = st.session_state.get(f"enterprise_exam_txt_files_{session_id}") or []
+			enterprise_out = st.session_state.get(f"enterprise_out_root_{session_id}") or enterprise_out_root
+			std_txt_dir = st.session_state.get(f"enterprise_standards_txt_dir_{session_id}") or standards_txt_dir
+			exam_txt_dir = st.session_state.get(f"enterprise_examined_txt_dir_{session_id}") or examined_txt_dir
+
+			# Upload standards once (optional)
+			std_urls = []
+			if std_txt_files:
+				with st.status("上传企业标准到 Bisheng 知识库…", expanded=False) as status:
+					try:
+						std_urls = upload_standard_files(BISHENG_BASE_URL, BISHENG_API_KEY or None, std_txt_dir)
+						status.update(label=f"已上传 {len(std_urls)} 个标准文件", state="complete")
+					except Exception as e:
+						status.update(label=f"标准上传失败：{e}", state="error")
+
+			# Iterate examined texts
+			exam_txt_files.sort(key=lambda x: x.lower())
+			bisheng_session_id = st.session_state.get(f"bisheng_session_{session_id}")
+			initial_dir = os.path.join(enterprise_out, 'initial_results')
+			os.makedirs(initial_dir, exist_ok=True)
+			for idx_file, name in enumerate(exam_txt_files, start=1):
+				src_path = os.path.join(exam_txt_dir, name)
+				st.markdown(f"**📄 正在比对 {idx_file}/{len(exam_txt_files)}：{name}**")
+				try:
+					with open(src_path, 'r', encoding='utf-8') as f:
+						doc_text = f.read()
+				except Exception as e:
+					st.error(f"读取失败：{e}")
+					continue
+				if not doc_text.strip():
+					st.info("文件为空，跳过。")
+					continue
+				chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
+				prompt_prefix = (
+					"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
+					"列出符合与不符合点，并引用原文证据（简短摘录）。\n"
+				)
+				full_out_text = ""
+				for i, piece in enumerate(chunks, start=1):
+					col_prompt, col_response = st.columns([1, 1])
+					prompt_text = f"{prompt_prefix}{piece}"
+					with col_prompt:
+						st.subheader(f"分块 {i}/{len(chunks)} - 提示词")
+						prompt_container = st.container(height=400)
+						with prompt_container:
+							with st.chat_message("user"):
+								prompt_placeholder = st.empty()
+								words = prompt_text.split()
+								streamed = ""
+								for j in range(0, len(words), 30):
+									chunk_words = words[j:j+30]
+									streamed += " ".join(chunk_words) + " "
+									prompt_placeholder.text(streamed.strip())
+						st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{i}")
+					with col_response:
+						st.subheader(f"分块 {i}/{len(chunks)} - AI回复")
+						response_container = st.container(height=400)
+						with response_container:
+							with st.chat_message("assistant"):
+								response_placeholder = st.empty()
+								try:
+									gen = call_workflow_invoke(
+										base_url=BISHENG_BASE_URL,
+										invoke_path=BISHENG_INVOKE_PATH,
+										workflow_id=BISHENG_WORKFLOW_ID,
+										user_question=prompt_text,
+										api_key=BISHENG_API_KEY or None,
+										timeout_s=int(BISHENG_TIMEOUT_S),
+										standard_file_urls=std_urls,
+										session_id=bisheng_session_id,
+									)
+									chunk_text = ""
+									new_sid = None
+									for partial, sid in gen:
+										chunk_text = partial
+										if sid and not new_sid:
+											new_sid = sid
+										response_placeholder.write(chunk_text)
+										if new_sid:
+											bisheng_session_id = new_sid
+											st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
+									full_out_text += ("\n\n" if full_out_text else "") + (chunk_text or "")
+								except requests.HTTPError as e:
+									try:
+										err = e.response.json()
+										response_placeholder.error(json.dumps(err, ensure_ascii=False))
+									except Exception:
+										response_placeholder.error(str(e))
+									except Exception as e:
+										response_placeholder.error(f"调用失败：{e}")
+					st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
+				# Persist per-file combined output
+				try:
+					name_no_ext = os.path.splitext(name)[0]
+					out_path = os.path.join(initial_dir, f"response_{name_no_ext}.txt")
+					with open(out_path, 'w', encoding='utf-8') as outf:
+						outf.write(full_out_text)
+					st.success(f"已保存结果：{os.path.basename(out_path)}")
+				except Exception as e:
+					st.error(f"保存结果失败：{e}")
+
+			# Aggregate and reset running flag
+			try:
+				final_path = aggregate_enterprise_checks(enterprise_out)
+				if final_path and os.path.isfile(final_path):
+					st.success(f"已生成汇总报告：{os.path.basename(final_path)}")
+					with open(final_path, 'r', encoding='utf-8') as f:
+						final_text = f.read()
+					st.download_button(
+						label="下载汇总报告",
+						data=final_text,
+						file_name=os.path.basename(final_path),
+						mime='text/plain',
+						key=f"download_enterprise_report_{session_id}",
+					)
+				st.session_state[f"enterprise_running_{session_id}"] = False
+			except Exception as e:
+				st.error(f"汇总失败：{e}")
+
+		# Rendering of Bisheng streaming moved out of button column below
 
 	with col_info:
-		# Bisheng configuration UI
-		with st.expander("Bisheng 配置", expanded=False):
-			bs_cfg = CONFIG.get('bisheng', {})
-			default_base_url = os.getenv('BISHENG_BASE_URL') or bs_cfg.get('base_url') or 'http://10.31.60.11:3001'
-			default_invoke_path = os.getenv('BISHENG_INVOKE_PATH') or bs_cfg.get('invoke_path') or '/api/v2/workflow/invoke'
-			default_stop_path = os.getenv('BISHENG_STOP_PATH') or bs_cfg.get('stop_path') or '/api/v2/workflow/stop'
-			default_workflow_id = os.getenv('BISHENG_WORKFLOW_ID') or bs_cfg.get('workflow_id') or ''
-			default_api_key = os.getenv('BISHENG_API_KEY') or bs_cfg.get('api_key') or ''
-			default_max_words = int(os.getenv('BISHENG_MAX_WORDS') or bs_cfg.get('max_words') or 2000)
-			default_timeout_s = int(os.getenv('BISHENG_TIMEOUT_S') or bs_cfg.get('timeout_s') or 90)
-
-			key_prefix = f"bisheng_{session_id}_"
-			base_url_val = st.text_input("Base URL", value=st.session_state.get(key_prefix + 'base_url', default_base_url), key=key_prefix + 'base_url_input')
-			invoke_path_val = st.text_input("Invoke Path", value=st.session_state.get(key_prefix + 'invoke_path', default_invoke_path), key=key_prefix + 'invoke_path_input')
-			stop_path_val = st.text_input("Stop Path", value=st.session_state.get(key_prefix + 'stop_path', default_stop_path), key=key_prefix + 'stop_path_input')
-			workflow_id_val = st.text_input("Workflow ID", value=st.session_state.get(key_prefix + 'workflow_id', default_workflow_id), key=key_prefix + 'workflow_id_input')
-			api_key_val = st.text_input("API Key", type="password", value=st.session_state.get(key_prefix + 'api_key', default_api_key), key=key_prefix + 'api_key_input')
-			col_mw, col_to = st.columns(2)
-			with col_mw:
-				max_words_val = st.number_input("Max words per chunk", min_value=200, max_value=2000, value=st.session_state.get(key_prefix + 'max_words', default_max_words), step=50, key=key_prefix + 'max_words_input')
-			with col_to:
-				timeout_s_val = st.number_input("Timeout (s)", min_value=10, max_value=300, value=st.session_state.get(key_prefix + 'timeout_s', default_timeout_s), step=5, key=key_prefix + 'timeout_s_input')
-			if st.button("保存 Bisheng 配置", key=key_prefix + 'save'):
-				st.session_state[key_prefix + 'base_url'] = base_url_val.strip()
-				st.session_state[key_prefix + 'invoke_path'] = invoke_path_val.strip()
-				st.session_state[key_prefix + 'stop_path'] = stop_path_val.strip()
-				st.session_state[key_prefix + 'workflow_id'] = workflow_id_val.strip()
-				st.session_state[key_prefix + 'api_key'] = api_key_val.strip()
-				st.session_state[key_prefix + 'max_words'] = int(max_words_val)
-				st.session_state[key_prefix + 'timeout_s'] = int(timeout_s_val)
-				st.success("已保存。")
-
-			st.caption(f"当前配置：base_url={base_url_val or default_base_url}, workflow_id={(workflow_id_val or default_workflow_id) or '(未设置)'}")
-			if st.button("测试连接", key=key_prefix + 'test'):
-				try:
-					payload = {"workflow_id": (workflow_id_val or default_workflow_id or '').strip() or "test", "inputs": {"user_question": "ping"}}
-					import requests as _rq
-					resp = _rq.post((base_url_val or default_base_url).rstrip('/') + (invoke_path_val or default_invoke_path), headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=10)
-					st.success(f"连接正常，HTTP {resp.status_code}")
-				except Exception as e:
-					st.error(f"连接失败：{e}")
+		# Right column intentionally limited to file manager and utilities only
 		# File manager utilities (mirroring completeness tab behavior)
 		def get_file_list(folder):
 			if not folder or not os.path.exists(folder):

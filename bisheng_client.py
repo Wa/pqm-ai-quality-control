@@ -387,3 +387,14 @@ def aggregate_enterprise_checks(out_root: str) -> Optional[str]:
     return out_path
 
 
+def stop_workflow(base_url: str, stop_path: str, session_id: str, api_key: Optional[str], timeout_s: int = 10) -> Dict:
+    url = base_url.rstrip("/") + stop_path
+    payload = {"session_id": session_id}
+    resp = _Http.session.post(url, headers=_headers(api_key), data=json.dumps(payload), timeout=timeout_s)
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw": resp.text}
+
+
