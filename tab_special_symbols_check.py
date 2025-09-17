@@ -188,6 +188,9 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
             
             with prompt_container:
                 # Use chat message structure for prompt display
+                # Note: Render prompts with st.text() to avoid Markdown parsing artifacts
+                # (e.g., unintended strikethrough from '*'/'_'); render responses with
+                # st.write() to keep formatting where it is appropriate.
                 with st.chat_message("user"):
                     prompt_placeholder = st.empty()
                     
