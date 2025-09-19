@@ -18,8 +18,8 @@ def render_ai_agent_tab(session_id):
         st.markdown(
             """
             <style>
-            # .st-key-ai_agent_root [data-testid=\"stChatInput\"] { display: flex; }
-            [data-testid=\"stChatInput\"] { display: flex; }
+            .st-key-ai_agent_root [data-testid=\"stChatInput\"] { display: flex; }
+            # [data-testid=\"stChatInput\"] { display: flex; }
             </style>
             """,
             unsafe_allow_html=True,

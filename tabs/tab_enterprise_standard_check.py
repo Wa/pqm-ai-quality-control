@@ -102,7 +102,6 @@ def _process_pdf_folder(input_dir: str, output_dir: str, progress_area):
 	"""Process all PDFs in input_dir via MinerU and write .txts into output_dir."""
 	pdf_paths = _list_pdfs(input_dir)
 	if not pdf_paths:
-		progress_area.info("（无PDF文件可处理）")
 		return []
 	created = []
 	for pdf_path in pdf_paths:
@@ -119,7 +118,6 @@ def _process_pdf_folder(input_dir: str, output_dir: str, progress_area):
 			ok = _zip_to_txts(zip_bytes, out_txt)
 			if ok:
 				created.append(out_txt)
-				progress_area.success(f"已生成: {os.path.basename(out_txt)}")
 			else:
 				progress_area.warning(f"未发现可用的 .md 内容，跳过: {os.path.basename(pdf_path)}")
 		except Exception as e:
@@ -201,7 +199,6 @@ def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area):
 	"""Process .doc/.docx/.ppt/.pptx via Unstructured API and write .txts."""
 	paths = _list_word_ppt(input_dir)
 	if not paths:
-		progress_area.info("（无Word/PPT文件可处理）")
 		return []
 	created = []
 	for p in paths:
@@ -217,7 +214,6 @@ def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area):
 			ok = _unstructured_partition_to_txt(p, out_txt)
 			if ok:
 				created.append(out_txt)
-				progress_area.success(f"已生成: {os.path.basename(out_txt)}")
 			else:
 				progress_area.warning(f"未能从文件中生成文本，跳过: {os.path.basename(p)}")
 		except Exception as e:
@@ -254,7 +250,6 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area):
 	"""
 	paths = _list_excels(input_dir)
 	if not paths:
-		progress_area.info("（无Excel文件可处理）")
 		return []
 	created = []
 	import pandas as pd
@@ -274,7 +269,6 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area):
 				# Write CSV content into .txt
 				df.to_csv(out_txt, index=False, encoding='utf-8')
 				created.append(out_txt)
-				progress_area.success(f"已生成: {os.path.basename(out_txt)}")
 		except Exception as e:
 			progress_area.error(f"失败: {orig_name} → {e}")
 	return created
@@ -325,21 +319,17 @@ def render_enterprise_standard_check_tab(session_id):
 		with btn_col1:
 			if st.button("开始", key=f"enterprise_start_button_{session_id}"):
 				# Process PDFs (MinerU) and Word/PPT (Unstructured) into plain text
-				st.info("开始处理文件：PDF 使用 MinerU，Word/PPT 使用 Unstructured…")
 				area = st.container()
 				with area:
-					st.markdown("**企业标准文件 → 文本**")
+					st.markdown("**阅读企业标准文件中，10分钟左右，请等待...**")
 					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st)
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st)
 					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st)
-					st.markdown("**待检查文件 → 文本**")
+					st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
 					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st)
 					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st)
 					created_exam_xls = _process_excel_folder(examined_dir, examined_txt_dir, st)
-					if any([created_std_pdf, created_std_wp, created_std_xls, created_exam_pdf, created_exam_wp, created_exam_xls]):
-						st.success("处理完成。")
-					else:
-						st.info("未生成任何文本文件，请确认已上传 PDF、Word/PPT 或 Excel。")
+
 					# If we have any txt, switch to running phase and rerun so streaming renders in main column
 					try:
 						std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
@@ -356,7 +346,7 @@ def render_enterprise_standard_check_tab(session_id):
 							st.rerun()
 					except Exception as e:
 						st.error(f"企业标准比对流程异常：{e}")
-
+					
 		with btn_col_stop:
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
 				try:
@@ -409,7 +399,6 @@ def render_enterprise_standard_check_tab(session_id):
 
 		# Render streaming phase in main column after rerun (mirrors special_symbols pattern)
 		if st.session_state.get(f"enterprise_running_{session_id}"):
-			st.markdown("**企业标准比对（Bisheng）**")
 			# Retrieve context saved before rerun
 			std_txt_files = st.session_state.get(f"enterprise_std_txt_files_{session_id}") or []
 			exam_txt_files = st.session_state.get(f"enterprise_exam_txt_files_{session_id}") or []
@@ -434,7 +423,7 @@ def render_enterprise_standard_check_tab(session_id):
 			os.makedirs(initial_dir, exist_ok=True)
 			for idx_file, name in enumerate(exam_txt_files, start=1):
 				src_path = os.path.join(exam_txt_dir, name)
-				st.markdown(f"**📄 正在比对 {idx_file}/{len(exam_txt_files)}：{name}**")
+				st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(exam_txt_files)}个：{name}**")
 				try:
 					with open(src_path, 'r', encoding='utf-8') as f:
 						doc_text = f.read()
@@ -454,7 +443,7 @@ def render_enterprise_standard_check_tab(session_id):
 					col_prompt, col_response = st.columns([1, 1])
 					prompt_text = f"{prompt_prefix}{piece}"
 					with col_prompt:
-						st.subheader(f"分块 {i}/{len(chunks)} - 提示词")
+						st.markdown(f"提示词（第{i}部分，共{len(chunks)}部分）")
 						prompt_container = st.container(height=400)
 						with prompt_container:
 							with st.chat_message("user"):
@@ -467,7 +456,7 @@ def render_enterprise_standard_check_tab(session_id):
 									prompt_placeholder.text(streamed.strip())
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{i}")
 					with col_response:
-						st.subheader(f"分块 {i}/{len(chunks)} - AI回复")
+						st.markdown(f"AI比对结果（第{i}部分，共{len(chunks)}部分）")
 						response_container = st.container(height=400)
 						with response_container:
 							with st.chat_message("assistant"):
@@ -553,7 +542,6 @@ def render_enterprise_standard_check_tab(session_id):
 					out_path = os.path.join(initial_dir, f"response_{name_no_ext}.txt")
 					with open(out_path, 'w', encoding='utf-8') as outf:
 						outf.write(full_out_text)
-					st.success(f"已保存结果：{os.path.basename(out_path)}")
 				except Exception as e:
 					st.error(f"保存结果失败：{e}")
 

@@ -22,7 +22,7 @@ def render_file_upload_section(session_dirs, session_id):
             handle_file_upload(cp_files, session_dirs["cp"])
 
     with col_target:
-        target_files = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"target_uploader_{session_id}")
+        target_files = st.file_uploader("点击上传基准源文件", type=None, accept_multiple_files=True, key=f"target_uploader_{session_id}")
         if target_files:
             handle_file_upload(target_files, session_dirs["target"])
 
@@ -58,7 +58,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
     # Get target files
     target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
     if not target_files_list:
-        st.warning("请先上传待检查文件")
+        st.warning("请先上传基准源文件")
         return
     
     target_file_path = os.path.join(target_session_dir, target_files_list[0])
@@ -539,9 +539,6 @@ def render_special_symbols_check_tab(session_id):
         </style>
         """, unsafe_allow_html=True)
     
-    # Page subheader
-    st.subheader("🔍 特殊特性符号检查")
-    
     # Base directories for each upload box - using centralized config
     BASE_DIRS = {
         "cp": str(CONFIG["directories"]["cp_files"]),
@@ -596,7 +593,7 @@ def render_special_symbols_check_tab(session_id):
                         except Exception as e:
                             st.error(f"清空失败: {e}")
             with col_clear_target:
-                if st.button("🗑️ 清空待检查文件", key=f"clear_target_files_{session_id}"):
+                if st.button("🗑️ 清空基准源文件", key=f"clear_target_files_{session_id}"):
                     if backend_available:
                         try:
                             client = get_backend_client()
@@ -606,7 +603,7 @@ def render_special_symbols_check_tab(session_id):
                                 del_res = client.delete_file(session_id, os.path.join(target_session_dir, fi["name"]))
                                 if del_res.get("status") == "success":
                                     deleted += 1
-                            st.success(f"已清空待检查文件（{deleted} 个）")
+                            st.success(f"已清空基准源文件（{deleted} 个）")
                         except Exception as e:
                             st.error(f"清空失败: {e}")
                     else:
@@ -615,7 +612,7 @@ def render_special_symbols_check_tab(session_id):
                                 file_path = os.path.join(target_session_dir, file)
                                 if os.path.isfile(file_path):
                                     os.remove(file_path)
-                            st.success("已清空待检查文件")
+                            st.success("已清空基准源文件")
                         except Exception as e:
                             st.error(f"清空失败: {e}")
             with col_clear_graph:
@@ -644,7 +641,7 @@ def render_special_symbols_check_tab(session_id):
         else:
             st.info("🔄 分析进行中，请等待完成后再清空文件")
             st.button("🗑️ 清空控制计划文件", key=f"clear_cp_files_disabled_{session_id}", disabled=True)
-            st.button("🗑️ 清空待检查文件", key=f"clear_target_files_disabled_{session_id}", disabled=True)
+            st.button("🗑️ 清空基准源文件", key=f"clear_target_files_disabled_{session_id}", disabled=True)
             st.button("🗑️ 清空图纸文件", key=f"clear_graph_files_disabled_{session_id}", disabled=True)
 
         # --- File Manager Module ---
@@ -735,7 +732,7 @@ def render_special_symbols_check_tab(session_id):
             return truncated_name + ext
 
         # File Manager Tabs
-        tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "待检查文件", "图纸文件"])
+        tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "基准源文件", "图纸文件"])
         
         with tab_cp:
             cp_files_list = get_file_list(cp_session_dir)
@@ -833,7 +830,7 @@ def render_special_symbols_check_tab(session_id):
             # Upload new files directly in this tab
             st.markdown("---")
             st.markdown("**上传新文件:**")
-            new_target_files = st.file_uploader("选择待检查文件", type=None, accept_multiple_files=True, key=f"target_uploader_tab_{session_id}")
+            new_target_files = st.file_uploader("选择基准源文件", type=None, accept_multiple_files=True, key=f"target_uploader_tab_{session_id}")
             if new_target_files:
                 handle_file_upload(new_target_files, target_session_dir)
 
@@ -891,6 +888,16 @@ def render_special_symbols_check_tab(session_id):
 
     # Now render the MAIN column containing uploads, demo/start, and streaming analysis
     with col_main:
+
+        # Page subheader
+        st.subheader("🔍 特殊特性符号检查")
+        st.markdown(
+            "上传控制计划和基准源文件后点击开始，AI会比对二者中特殊特性符号不一致的地方，并输出结果。  \n"
+            "如果你上传的是控制计划和图纸文件，AI会比对CP和图纸中符号不一致的地方。  \n"
+            "以此类推，具体见帮助文档。  \n"
+            "审核时间取决于文件数量和长度，一般在10分钟到一个小时之间。。  \n"
+            )
+
         # Get structured user session
         session = get_user_session(session_id, 'special_symbols')
 
@@ -1010,6 +1017,6 @@ def render_special_symbols_check_tab(session_id):
                     session['analysis_completed'] = True
                 else:
                     # Files exist but process wasn't explicitly started
-                    st.info("检测到待检查文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
+                    st.info("检测到基准源文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
             else:
-                st.warning("请先上传待检查文件")
+                st.warning("请先上传基准源文件")
