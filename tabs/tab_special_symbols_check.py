@@ -435,7 +435,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                     with st.chat_message("user"):
                         ph_left = st.empty()
                         ph_left.text(json_conversion_prompt)
-                st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_prompt_{timestamp}_{session_id}")
+                    st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_prompt_{timestamp}_{session_id}")
             
             with col_json_right:
                 # 右侧流式显示 LLM 回复（无标题）
@@ -478,7 +478,7 @@ def run_analysis_workflow(session_id, session_dirs, prompt_generator):
                                 delta = chunk.choices[0].delta.content or ""
                                 json_response_text += delta
                                 ph_right.write(json_response_text)
-                st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_response_{timestamp}_{session_id}")
+                    st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_response_{timestamp}_{session_id}")
             
             # 解析 JSON 并导出为 Excel，显示在页面
             parsed_json = None
