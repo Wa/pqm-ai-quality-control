@@ -225,6 +225,19 @@ def export_completeness_results(session_id, stage_responses, generated_session_d
             try:
                 df_preview = pd.read_excel(filepath)
                 st.dataframe(df_preview, use_container_width=True)
+                # Provide a download button for the exported Excel file
+                try:
+                    with open(filepath, "rb") as f:
+                        file_bytes = f.read()
+                    st.download_button(
+                        label="⬇️ 下载Excel结果",
+                        data=file_bytes,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_completeness_{session_id}"
+                    )
+                except Exception as e:
+                    st.warning(f"无法提供下载按钮: {e}")
             except Exception as e:
                 st.warning(f"无法预览导出的Excel文件: {e}")
             return filepath

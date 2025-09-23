@@ -97,8 +97,107 @@ def _zip_to_txts(zip_bytes: bytes, target_txt_path: str) -> bool:
 	except zipfile.BadZipFile:
 		return False
 
+def _insert_source_markers(text: str, source_label: str, line_interval: int = 80) -> str:
+	"""Insert unobtrusive source markers so small retrieved fragments retain provenance.
 
-def _process_pdf_folder(input_dir: str, output_dir: str, progress_area):
+	Strategy:
+	- Add a file-level header at top: 【来源文件: <name>】
+	- If Markdown headings (#/##) are present, add a marker right after each H1/H2.
+	- Otherwise, add a marker every N non-empty lines (default 80).
+
+	Idempotent: if a marker containing this source_label already exists, return original text.
+	"""
+	marker = f"【来源文件: {source_label}】"
+	if source_label and marker in text:
+		return text
+	lines = text.splitlines()
+	has_md_heading = any(re.match(r'^\s{0,3}#{1,2}\s+\S', ln) for ln in lines[:500])
+
+	annotated_lines = []
+	# Always place a header at the very top
+	annotated_lines.append(marker)
+	annotated_lines.append("")
+
+	if has_md_heading:
+		for ln in lines:
+			annotated_lines.append(ln)
+			if re.match(r'^\s{0,3}#{1,2}\s+\S', ln):
+				annotated_lines.append(marker)
+	else:
+		non_empty_count = 0
+		for ln in lines:
+			annotated_lines.append(ln)
+			if ln.strip():
+				non_empty_count += 1
+				if non_empty_count % max(10, int(line_interval)) == 0:
+					annotated_lines.append(marker)
+
+	return "\n".join(annotated_lines)
+
+
+def _annotate_txt_file_inplace(file_path: str, source_label: str, line_interval: int = 80) -> bool:
+	"""Open a .txt file and inject source markers in-place. Returns True if updated."""
+	try:
+		with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+			original = f.read()
+		annotated = _insert_source_markers(original, source_label, line_interval=line_interval)
+		if annotated == original:
+			return False
+		with open(file_path, 'w', encoding='utf-8') as f:
+			f.write(annotated)
+		return True
+	except Exception:
+		return False
+
+
+ 
+
+
+def _merge_and_cleanup_standards(standards_txt_dir: str, progress_area) -> str:
+	"""Concatenate all individual standard .txt files into enterprise_standards.txt,
+	then delete the individual files. Returns the path to the merged file.
+
+	- Excludes an existing enterprise_standards.txt from the inputs
+	- Sorts inputs by filename for deterministic order
+	- Adds a single blank line between files to avoid accidental line joins
+	- Idempotent: if no inputs and merged exists, keep existing
+	"""
+	if not standards_txt_dir or not os.path.isdir(standards_txt_dir):
+		return ""
+	merged_name = "enterprise_standards.txt"
+	merged_path = os.path.join(standards_txt_dir, merged_name)
+	# Collect candidates excluding the merged file itself
+	inputs = [
+		f for f in os.listdir(standards_txt_dir)
+		if f.lower().endswith('.txt') and f != merged_name
+	]
+	if not inputs:
+		# Nothing to merge
+		return merged_path if os.path.exists(merged_path) else (open(merged_path, 'a', encoding='utf-8').close() or merged_path)
+	inputs.sort(key=lambda x: x.lower())
+	with open(merged_path, 'w', encoding='utf-8') as out_f:
+		first = True
+		for name in inputs:
+			src_path = os.path.join(standards_txt_dir, name)
+			try:
+				with open(src_path, 'r', encoding='utf-8', errors='ignore') as in_f:
+					content = in_f.read()
+				if not first:
+					out_f.write("\n\n")
+				first = False
+				out_f.write(content)
+			except Exception as e:
+				progress_area.warning(f"合并失败（跳过）: {name} → {e}")
+	# Do not compact HTML/Markdown; preserve original markup for unambiguous structure
+	# Delete inputs after successful write
+	for name in inputs:
+		try:
+			os.remove(os.path.join(standards_txt_dir, name))
+		except Exception as e:
+			progress_area.warning(f"删除失败（保留原文件）: {name} → {e}")
+	return merged_path
+
+def _process_pdf_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
 	"""Process all PDFs in input_dir via MinerU and write .txts into output_dir."""
 	pdf_paths = _list_pdfs(input_dir)
 	if not pdf_paths:
@@ -117,6 +216,9 @@ def _process_pdf_folder(input_dir: str, output_dir: str, progress_area):
 			zip_bytes = _mineru_parse_pdf(pdf_path)
 			ok = _zip_to_txts(zip_bytes, out_txt)
 			if ok:
+				# Inject source markers so retrieved snippets carry provenance
+				if annotate_sources:
+					_annotate_txt_file_inplace(out_txt, orig_name)
 				created.append(out_txt)
 			else:
 				progress_area.warning(f"未发现可用的 .md 内容，跳过: {os.path.basename(pdf_path)}")
@@ -195,7 +297,7 @@ def _unstructured_partition_to_txt(file_path: str, target_txt_path: str) -> bool
 		return False
 
 
-def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area):
+def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
 	"""Process .doc/.docx/.ppt/.pptx via Unstructured API and write .txts."""
 	paths = _list_word_ppt(input_dir)
 	if not paths:
@@ -213,6 +315,9 @@ def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area):
 			progress_area.write(f"解析(Word/PPT): {os.path.basename(p)} …")
 			ok = _unstructured_partition_to_txt(p, out_txt)
 			if ok:
+				# Inject source markers
+				if annotate_sources:
+					_annotate_txt_file_inplace(out_txt, orig_name)
 				created.append(out_txt)
 			else:
 				progress_area.warning(f"未能从文件中生成文本，跳过: {os.path.basename(p)}")
@@ -241,7 +346,7 @@ def _sanitize_sheet_name(name: str) -> str:
 	return '_'.join(name.strip().split())[:80] or 'Sheet'
 
 
-def _process_excel_folder(input_dir: str, output_dir: str, progress_area):
+def _process_excel_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
 	"""Convert each Excel sheet to CSV text and save as <file>_SHEET_<sheet>.txt.
 
 	Note: We intentionally save CSV content with a .txt extension for uniform LLM
@@ -268,6 +373,9 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area):
 				df = xls.parse(sheet)
 				# Write CSV content into .txt
 				df.to_csv(out_txt, index=False, encoding='utf-8')
+				# Inject source markers including sheet context
+				if annotate_sources:
+					_annotate_txt_file_inplace(out_txt, f"{orig_name} / {sheet}")
 				created.append(out_txt)
 		except Exception as e:
 			progress_area.error(f"失败: {orig_name} → {e}")
@@ -322,30 +430,32 @@ def render_enterprise_standard_check_tab(session_id):
 				area = st.container()
 				with area:
 					st.markdown("**阅读企业标准文件中，10分钟左右，请等待...**")
-					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st)
-					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st)
-					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st)
+					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
+					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
+					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
+					# Merge all standard .txt files into a single enterprise_standards.txt and remove the individual ones
+					_merge_and_cleanup_standards(standards_txt_dir, st)
 					st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
-					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st)
-					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st)
-					created_exam_xls = _process_excel_folder(examined_dir, examined_txt_dir, st)
+					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
+					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
+					created_exam_xls = _process_excel_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 
-					# If we have any txt, switch to running phase and rerun so streaming renders in main column
-					try:
-						std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
-						exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
-						if not exam_txt_files:
-							st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
-						else:
-							st.session_state[f"enterprise_running_{session_id}"] = True
-							st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
-							st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
-							st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
-							st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
-							st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
-							st.rerun()
-					except Exception as e:
-						st.error(f"企业标准比对流程异常：{e}")
+					# # If we have any txt, switch to running phase and rerun so streaming renders in main column
+					# try:
+					# 	std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
+					# 	exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
+					# 	if not exam_txt_files:
+					# 		st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
+					# 	else:
+					# 		st.session_state[f"enterprise_running_{session_id}"] = True
+					# 		st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
+					# 		st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
+					# 		st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
+					# 		st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
+					# 		st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
+					# 		st.rerun()
+					# except Exception as e:
+					# 	st.error(f"企业标准比对流程异常：{e}")
 					
 		with btn_col_stop:
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
@@ -436,7 +546,8 @@ def render_enterprise_standard_check_tab(session_id):
 				chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
 				prompt_prefix = (
 					"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-					"列出符合与不符合点，并引用原文证据（简短摘录）。\n"
+					"列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
+					"输出的内容要言简意赅，列出不一致的点即可，最后不需要总结。\n"
 				)
 				full_out_text = ""
 				for i, piece in enumerate(chunks, start=1):

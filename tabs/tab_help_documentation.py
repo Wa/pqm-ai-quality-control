@@ -90,7 +90,7 @@ def render_help_documentation_tab(session_id):
         elif selected_section == "❓ 常见问题":
             render_faq_section()
         elif selected_section == "📚 技术文档":
-            render_technical_docs_section()
+            render_technical_docs_section(session_id)
 
 def render_special_symbols_check_section():
     """Render the special symbols check section."""
@@ -386,7 +386,7 @@ def render_faq_section():
     如果遇到其他问题，请联系周昭坤。
     """)
 
-def render_technical_docs_section():
+def render_technical_docs_section(session_id):
     """Render the technical documentation section."""
     st.header("📚 技术文档")
     
@@ -454,8 +454,26 @@ def render_technical_docs_section():
     
     **重要配置说明**：
     - 使用的compose.yaml已修改：取消注释了`--mem-fraction-static 0.5`参数
-    - 原始文件：[https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml](https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml)
-    - 修改版本：[compose.yaml](demonstration/compose.yaml)
+    """)
+
+    try:
+        compose_path = (Path(__file__).resolve().parent.parent / "demonstration" / "compose.yaml")
+        if compose_path.exists():
+            with compose_path.open("rb") as f:
+                compose_bytes = f.read()
+            st.download_button(
+                label="⬇️ 下载修改版 compose.yaml",
+                data=compose_bytes,
+                file_name="compose.yaml",
+                mime="application/x-yaml"
+                )
+        else:
+            st.warning(f"未找到compose.yaml：{compose_path}")
+    except Exception as e:
+        st.warning(f"无法提供compose.yaml下载：{e}")
+    st.text("原始文件：https://gcore.jsdelivr.net/gh/opendatalab/MinerU@master/docker/compose.yaml")
+
+    st.markdown("""
     - 此修改解决了GPU内存不足导致的OOM（内存溢出）问题
     
     **2. Unstructured服务 (10.31.60.11:8000)**
@@ -713,4 +731,6 @@ def render_technical_docs_section():
     - [Unstructured官方文档](https://docs.unstructured.io/)
     - [Ollama官方文档](https://ollama.ai/docs)
     """)
+
+
 
