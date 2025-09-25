@@ -9,11 +9,13 @@ import requests
 from util import ensure_session_dirs, handle_file_upload
 from config import CONFIG
 from bisheng_client import (
-	upload_standard_files,
 	call_workflow_invoke,
 	aggregate_enterprise_checks,
 	split_to_chunks,
 	stop_workflow,
+	find_knowledge_id_by_name,
+	create_knowledge,
+	kb_sync_folder,
 )
 
 
@@ -29,6 +31,10 @@ BISHENG_API_KEY = ""
 # Chunking and request timeout
 BISHENG_MAX_WORDS = 2000
 BISHENG_TIMEOUT_S = 90
+
+# Knowledge base settings for enterprise standards
+KB_NAME = "enterprise_standard_check"
+KB_MODEL_ID = 7  # from existing 'empty' KB on your instance
 
 
 def _list_pdfs(folder: str):
@@ -434,28 +440,28 @@ def render_enterprise_standard_check_tab(session_id):
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					# Merge all standard .txt files into a single enterprise_standards.txt and remove the individual ones
-					_merge_and_cleanup_standards(standards_txt_dir, st)
+					# _merge_and_cleanup_standards(standards_txt_dir, st)
 					st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
 					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 					created_exam_xls = _process_excel_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 
-					# # If we have any txt, switch to running phase and rerun so streaming renders in main column
-					# try:
-					# 	std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
-					# 	exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
-					# 	if not exam_txt_files:
-					# 		st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
-					# 	else:
-					# 		st.session_state[f"enterprise_running_{session_id}"] = True
-					# 		st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
-					# 		st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
-					# 		st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
-					# 		st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
-					# 		st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
-					# 		st.rerun()
-					# except Exception as e:
-					# 	st.error(f"企业标准比对流程异常：{e}")
+					# If we have any txt, switch to running phase and rerun so streaming renders in main column
+					try:
+						std_txt_files = [f for f in os.listdir(standards_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(standards_txt_dir) else []
+						exam_txt_files = [f for f in os.listdir(examined_txt_dir) if f.lower().endswith('.txt')] if os.path.isdir(examined_txt_dir) else []
+						if not exam_txt_files:
+							st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
+						else:
+							st.session_state[f"enterprise_running_{session_id}"] = True
+							st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
+							st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
+							st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
+							st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
+							st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
+							st.rerun()
+					except Exception as e:
+						st.error(f"企业标准比对流程异常：{e}")
 					
 		with btn_col_stop:
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
@@ -517,14 +523,30 @@ def render_enterprise_standard_check_tab(session_id):
 			exam_txt_dir = st.session_state.get(f"enterprise_examined_txt_dir_{session_id}") or examined_txt_dir
 
 			# Upload standards once (optional)
-			std_urls = []
+			# std_urls = []  # deprecated: we now sync to knowledge base
 			if std_txt_files:
-				with st.status("上传企业标准到 Bisheng 知识库…", expanded=False) as status:
+				with st.status("Sync standards to KB...", expanded=False) as status:
 					try:
-						std_urls = upload_standard_files(BISHENG_BASE_URL, BISHENG_API_KEY or None, std_txt_dir)
-						status.update(label=f"已上传 {len(std_urls)} 个标准文件", state="complete")
+						kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, KB_NAME)
+						if not kid:
+							kid = create_knowledge(BISHENG_BASE_URL, BISHENG_API_KEY or None, KB_NAME, model=str(KB_MODEL_ID))
+						if kid:
+							res = kb_sync_folder(
+								base_url=BISHENG_BASE_URL,
+								api_key=BISHENG_API_KEY or None,
+								knowledge_id=int(kid),
+								folder_path=std_txt_dir,
+								clear_first=False,
+								chunk_size=1000,
+								chunk_overlap=0,
+								separators=["\n\n", "\n"],
+								separator_rule=["after", "after"],
+							)
+							status.update(label=f"KB sync: uploaded {len(res.get('uploaded', []))}, deleted {len(res.get('deleted', []))}, skipped {len(res.get('skipped', []))}", state="complete")
+						else:
+							status.update(label="KB create/lookup failed (check server auth)", state="error")
 					except Exception as e:
-						status.update(label=f"标准上传失败：{e}", state="error")
+						status.update(label=f"KB sync failed: {e}", state="error")
 
 			# Iterate examined texts
 			exam_txt_files.sort(key=lambda x: x.lower())
@@ -546,8 +568,8 @@ def render_enterprise_standard_check_tab(session_id):
 				chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
 				prompt_prefix = (
 					"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-					"列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
-					"输出的内容要言简意赅，列出不一致的点即可，最后不需要总结。\n"
+					"以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
+					"输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
 				)
 				full_out_text = ""
 				for i, piece in enumerate(chunks, start=1):
@@ -580,7 +602,6 @@ def render_enterprise_standard_check_tab(session_id):
 										user_question=prompt_text,
 										api_key=BISHENG_API_KEY or None,
 										timeout_s=int(BISHENG_TIMEOUT_S),
-										standard_file_urls=std_urls,
 										session_id=bisheng_session_id,
 									)
 									chunk_text = ""
@@ -604,7 +625,6 @@ def render_enterprise_standard_check_tab(session_id):
 											user_question=prompt_text,
 											api_key=BISHENG_API_KEY or None,
 											timeout_s=max(int(BISHENG_TIMEOUT_S) * 2, int(BISHENG_TIMEOUT_S) + 90),
-											standard_file_urls=std_urls,
 											session_id=bisheng_session_id,
 										)
 										chunk_text = ""

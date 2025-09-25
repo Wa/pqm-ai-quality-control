@@ -1,3 +1,4 @@
+# ascii-touch: test write path
 import io
 import json
 import os
@@ -38,6 +39,200 @@ def _headers_upload(api_key: Optional[str]) -> Dict[str, str]:
         heads["Authorization"] = f"Bearer {api_key}"
     return heads
 
+
+# ---------------------------
+# Knowledge Base (Filelib) APIs
+# ---------------------------
+
+def get_knowledge_list(base_url: str, api_key: Optional[str], name: Optional[str] = None, timeout_s: int = 15) -> List[dict]:
+    """Return list of knowledge bases. Optional filter by name."""
+    url = base_url.rstrip('/') + "/api/v2/filelib/"
+    params: Dict[str, object] = {}
+    if name:
+        params["name"] = name
+    try:
+        resp = _Http.session.get(url, headers=_headers(api_key), params=params, timeout=timeout_s)
+        resp.raise_for_status()
+        data = resp.json()
+        items = ((data.get("data") or {}).get("data") or [])
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def find_knowledge_id_by_name(base_url: str, api_key: Optional[str], kb_name: str, timeout_s: int = 15) -> Optional[int]:
+    """Find knowledge_id by exact or case-insensitive match."""
+    items = get_knowledge_list(base_url, api_key, name=kb_name, timeout_s=timeout_s)
+    for it in items:
+        if str(it.get("name")) == kb_name:
+            try:
+                return int(it.get("id"))
+            except Exception:
+                pass
+    for it in items:
+        if str(it.get("name", "")).lower() == kb_name.lower():
+            try:
+                return int(it.get("id"))
+            except Exception:
+                pass
+    items = get_knowledge_list(base_url, api_key, timeout_s=timeout_s)
+    for it in items:
+        if str(it.get("name", "")).lower() == kb_name.lower():
+            try:
+                return int(it.get("id"))
+            except Exception:
+                pass
+    return None
+
+
+def create_knowledge(base_url: str, api_key: Optional[str], name: str, model: str = "11", description: str = "", timeout_s: int = 20) -> Optional[int]:
+    """Create a knowledge base. Returns knowledge_id on success."""
+    url = base_url.rstrip('/') + "/api/v2/filelib/"
+    payload = {"name": name, "model": model}
+    if description:
+        payload["description"] = description
+    try:
+        resp = _Http.session.post(url, headers=_headers(api_key), data=json.dumps(payload), timeout=timeout_s)
+        resp.raise_for_status()
+        data = resp.json()
+        kid = (data.get("data") or {}).get("id")
+        return int(kid) if kid is not None else None
+    except Exception:
+        return None
+
+
+def kb_get_filelist(base_url: str, api_key: Optional[str], knowledge_id: int, timeout_s: int = 30) -> List[dict]:
+    url = base_url.rstrip('/') + "/api/v2/filelib/file/list"
+    params = {"knowledge_id": knowledge_id, "page_size": 2000, "page_num": 1}
+    try:
+        resp = _Http.session.get(url, headers=_headers(api_key), params=params, timeout=timeout_s)
+        resp.raise_for_status()
+        data = resp.json()
+        items = ((data.get("data") or {}).get("data") or [])
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def kb_delete_file(base_url: str, api_key: Optional[str], file_id: int, timeout_s: int = 30) -> bool:
+    url = base_url.rstrip('/') + f"/api/v2/filelib/file/{file_id}"
+    try:
+        resp = _Http.session.delete(url, headers=_headers(api_key), timeout=timeout_s)
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def kb_clear_files(base_url: str, api_key: Optional[str], knowledge_id: int, timeout_s: int = 60) -> bool:
+    url = base_url.rstrip('/') + f"/api/v2/filelib/clear/{knowledge_id}"
+    try:
+        resp = _Http.session.delete(url, headers=_headers(api_key), timeout=timeout_s)
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def kb_upload_file(
+    base_url: str,
+    api_key: Optional[str],
+    knowledge_id: int,
+    file_path: str,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 0,
+    separators: Optional[List[str]] = None,
+    separator_rule: Optional[List[str]] = None,
+    timeout_s: int = 120,
+) -> Optional[dict]:
+    if not os.path.isfile(file_path):
+        return None
+    url = base_url.rstrip('/') + f"/api/v2/filelib/file/{knowledge_id}"
+    if separators is None:
+        separators = ["\n\n", "\n"]
+    if separator_rule is None:
+        separator_rule = ["after", "after"]
+
+    data_list: List[Tuple[str, str]] = [("chunk_size", str(chunk_size)), ("chunk_overlap", str(chunk_overlap))]
+    for s in separators:
+        data_list.append(("separator", s))
+    for r in separator_rule:
+        data_list.append(("separator_rule", r))
+
+    try:
+        with open(file_path, "rb") as f:
+            files = {"file": (os.path.basename(file_path), f)}
+            resp = _Http.session.post(url, headers=_headers_upload(api_key), data=data_list, files=files, timeout=timeout_s)
+            resp.raise_for_status()
+            if resp.headers.get("Content-Type", "").lower().startswith("application/json"):
+                return resp.json().get("data") or {}
+            return {}
+    except Exception:
+        return None
+
+
+def kb_sync_folder(
+    base_url: str,
+    api_key: Optional[str],
+    knowledge_id: int,
+    folder_path: str,
+    clear_first: bool = False,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 0,
+    separators: Optional[List[str]] = None,
+    separator_rule: Optional[List[str]] = None,
+) -> Dict[str, List[str]]:
+    uploaded: List[str] = []
+    deleted: List[str] = []
+    skipped: List[str] = []
+
+    if not folder_path or not os.path.isdir(folder_path):
+        return {"uploaded": uploaded, "deleted": deleted, "skipped": skipped}
+
+    local_names: List[str] = []
+    for name in sorted(os.listdir(folder_path)):
+        path = os.path.join(folder_path, name)
+        if os.path.isfile(path):
+            local_names.append(name)
+
+    existing_items = kb_get_filelist(base_url, api_key, knowledge_id)
+    existing_by_name = {str(it.get("file_name")): it for it in existing_items}
+
+    if clear_first:
+        kb_clear_files(base_url, api_key, knowledge_id)
+        existing_by_name = {}
+
+    local_set = set(local_names)
+    for fname, item in list(existing_by_name.items()):
+        if fname not in local_set:
+            fid = item.get("id")
+            try:
+                if fid is not None and kb_delete_file(base_url, api_key, int(fid)):
+                    deleted.append(fname)
+            except Exception:
+                pass
+
+    for name in local_names:
+        if name in existing_by_name:
+            skipped.append(name)
+            continue
+        path = os.path.join(folder_path, name)
+        info = kb_upload_file(
+            base_url=base_url,
+            api_key=api_key,
+            knowledge_id=knowledge_id,
+            file_path=path,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+            separator_rule=separator_rule,
+        )
+        if info is not None:
+            uploaded.append(name)
+        else:
+            skipped.append(name)
+
+    return {"uploaded": uploaded, "deleted": deleted, "skipped": skipped}
 
 def _extract_text_from_json(obj) -> str:
     if not obj:
