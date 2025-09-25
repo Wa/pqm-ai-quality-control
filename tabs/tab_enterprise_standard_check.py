@@ -464,6 +464,7 @@ def render_enterprise_standard_check_tab(session_id):
 						st.error(f"企业标准比对流程异常：{e}")
 					
 		with btn_col_stop:
+			st.session_state[f"enterprise_running_{session_id}"] = False
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
 				try:
 					# Load current bisheng session id if any
@@ -570,6 +571,7 @@ def render_enterprise_standard_check_tab(session_id):
 					"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
 					"以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
 					"输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
+					"由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
 				)
 				full_out_text = ""
 				for i, piece in enumerate(chunks, start=1):
