@@ -462,11 +462,7 @@ def call_workflow_invoke(
                     delta = container.get("message") or container.get("text") or ""
                 delta = _coerce_to_text(delta)
                 if delta:
-                    cur = "".join(buf)
-                    if delta.startswith(cur):
-                        buf[:] = [delta]          # 覆盖为服务端累积文本
-                    else:
-                        buf.append(delta)          # 仅在返回增量时追加
+                    buf.append(delta)
                     yield ("".join(buf), new_session_id)
             if not saw_input:
                 break

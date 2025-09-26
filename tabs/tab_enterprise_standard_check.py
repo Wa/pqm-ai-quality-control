@@ -451,13 +451,15 @@ def render_enterprise_standard_check_tab(session_id):
 						# Entire folders copied under enterprise_out_root
 						(os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
 						(os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
+						# New: copy final_results for demo summary
+						(os.path.join(demo_enterprise, "final_results"), os.path.join(enterprise_out_root, "final_results")),
 					]
 					files_copied = 0
 					for src, dst in pairs:
 						if not os.path.exists(src):
 							continue
-						# If source is a directory that we want to mirror (prompt_text_chunks / llm responses)
-						if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses")):
+					# If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results)
+						if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results")):
 							os.makedirs(os.path.dirname(dst), exist_ok=True)
 							# Copy whole directory tree into enterprise_out_root subfolder
 							shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -472,12 +474,13 @@ def render_enterprise_standard_check_tab(session_id):
 								os.makedirs(dst, exist_ok=True)
 								shutil.copy2(src_path, dst_path)
 								files_copied += 1
+					# Trigger demo streaming phase
 					st.session_state[f"enterprise_demo_{session_id}"] = True
-					st.success(f"已复制演示文件：{files_copied} 个")
+					st.success(f"已复制演示文件：{files_copied} 个，开始演示…")
 				except Exception as e:
 					st.error(f"演示文件复制失败: {e}")
-				# Keep demo workflow isolated: no processing; show placeholder notice
-				st.info("演示功能建设中（This demo workflow is under construction）")
+				# Immediately rerun to render the demo streaming phase in main column
+				st.rerun()
 
 		# Render streaming phase in main column after rerun (mirrors special_symbols pattern)
 		if st.session_state.get(f"enterprise_running_{session_id}"):
@@ -661,6 +664,99 @@ def render_enterprise_standard_check_tab(session_id):
 			except Exception as e:
 				st.error(f"汇总失败：{e}")
 
+		# Demo streaming phase (reads from prepared prompt/response chunks; no LLM calls)
+		if st.session_state.get(f"enterprise_demo_{session_id}"):
+			# Directories prepared by demo button copy
+			prompt_dir = os.path.join(enterprise_out_root, 'prompt_text_chunks')
+			resp_dir = os.path.join(enterprise_out_root, 'llm responses')
+			final_dir = os.path.join(enterprise_out_root, 'final_results')
+			# Collect prompt chunk files
+			prompt_files = []
+			try:
+				if os.path.isdir(prompt_dir):
+					for f in os.listdir(prompt_dir):
+						if f.lower().endswith('.txt'):
+							prompt_files.append(f)
+			except Exception:
+				prompt_files = []
+			prompt_files.sort(key=lambda x: x.lower())
+			# Render each prompt/response pair in UI
+			for fname in prompt_files:
+				m = re.match(r"^(?P<base>.+)_pt(?P<idx>\d+)\.txt$", fname)
+				if not m:
+					continue
+				base = m.group('base')
+				idx = m.group('idx')
+				prompt_path = os.path.join(prompt_dir, fname)
+				resp_name = f"response_{base}_pt{idx}.txt"
+				resp_path = os.path.join(resp_dir, resp_name)
+				# Read prompt content
+				try:
+					with open(prompt_path, 'r', encoding='utf-8') as f:
+						prompt_text = f.read()
+				except Exception:
+					prompt_text = ""
+				# Read response content (optional)
+				resp_text = None
+				if os.path.isfile(resp_path):
+					try:
+						with open(resp_path, 'r', encoding='utf-8') as f:
+							resp_text = f.read()
+					except Exception:
+						resp_text = None
+				col_prompt, col_response = st.columns([1, 1])
+				with col_prompt:
+					st.markdown(f"提示词（{base} - 第{idx}部分）")
+					prompt_container = st.container(height=400)
+					with prompt_container:
+						with st.chat_message("user"):
+							prompt_placeholder = st.empty()
+							words = (prompt_text or "").split()
+							streamed = ""
+							for j in range(0, len(words), 30):
+								chunk_words = words[j:j+30]
+								streamed += " ".join(chunk_words) + " "
+								prompt_placeholder.text(streamed.strip())
+								time.sleep(0.05)
+						st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_prompt_{session_id}_{base}_{idx}")
+				with col_response:
+					st.markdown(f"示例比对结果（{base} - 第{idx}部分）")
+					response_container = st.container(height=400)
+					with response_container:
+						with st.chat_message("assistant"):
+							resp_placeholder = st.empty()
+							if resp_text is None:
+								resp_placeholder.info("未找到对应示例结果。")
+							else:
+								words_r = resp_text.split()
+								streamed_r = ""
+								for j in range(0, len(words_r), 30):
+									chunk_words = words_r[j:j+30]
+									streamed_r += " ".join(chunk_words) + " "
+									resp_placeholder.write(streamed_r.strip())
+									time.sleep(0.05)
+							st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_resp_{session_id}_{base}_{idx}")
+			# Final report (hardcoded path per requirement)
+			try:
+				final_path = os.path.join(final_dir, "企业标准检查汇总_20250926_124757.txt")
+				if os.path.isfile(final_path):
+					st.success(f"已生成汇总报告：{os.path.basename(final_path)}")
+					with open(final_path, 'r', encoding='utf-8') as f:
+						final_text = f.read()
+					st.download_button(
+						label="下载汇总报告",
+						data=final_text,
+						file_name=os.path.basename(final_path),
+						mime='text/plain',
+						key=f"download_enterprise_report_{session_id}",
+					)
+				else:
+					st.info("未找到演示汇总报告文件。")
+			except Exception as e:
+				st.error(f"读取演示汇总报告失败：{e}")
+			# End of demo streaming pass; reset the flag
+			st.session_state[f"enterprise_demo_{session_id}"] = False
+			
 		# Rendering of Bisheng streaming moved out of button column below
 
 	with col_info:
