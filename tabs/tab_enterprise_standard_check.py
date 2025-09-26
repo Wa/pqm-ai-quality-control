@@ -155,54 +155,6 @@ def _annotate_txt_file_inplace(file_path: str, source_label: str, line_interval:
 	except Exception:
 		return False
 
-
- 
-
-
-def _merge_and_cleanup_standards(standards_txt_dir: str, progress_area) -> str:
-	"""Concatenate all individual standard .txt files into enterprise_standards.txt,
-	then delete the individual files. Returns the path to the merged file.
-
-	- Excludes an existing enterprise_standards.txt from the inputs
-	- Sorts inputs by filename for deterministic order
-	- Adds a single blank line between files to avoid accidental line joins
-	- Idempotent: if no inputs and merged exists, keep existing
-	"""
-	if not standards_txt_dir or not os.path.isdir(standards_txt_dir):
-		return ""
-	merged_name = "enterprise_standards.txt"
-	merged_path = os.path.join(standards_txt_dir, merged_name)
-	# Collect candidates excluding the merged file itself
-	inputs = [
-		f for f in os.listdir(standards_txt_dir)
-		if f.lower().endswith('.txt') and f != merged_name
-	]
-	if not inputs:
-		# Nothing to merge
-		return merged_path if os.path.exists(merged_path) else (open(merged_path, 'a', encoding='utf-8').close() or merged_path)
-	inputs.sort(key=lambda x: x.lower())
-	with open(merged_path, 'w', encoding='utf-8') as out_f:
-		first = True
-		for name in inputs:
-			src_path = os.path.join(standards_txt_dir, name)
-			try:
-				with open(src_path, 'r', encoding='utf-8', errors='ignore') as in_f:
-					content = in_f.read()
-				if not first:
-					out_f.write("\n\n")
-				first = False
-				out_f.write(content)
-			except Exception as e:
-				progress_area.warning(f"合并失败（跳过）: {name} → {e}")
-	# Do not compact HTML/Markdown; preserve original markup for unambiguous structure
-	# Delete inputs after successful write
-	for name in inputs:
-		try:
-			os.remove(os.path.join(standards_txt_dir, name))
-		except Exception as e:
-			progress_area.warning(f"删除失败（保留原文件）: {name} → {e}")
-	return merged_path
-
 def _process_pdf_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
 	"""Process all PDFs in input_dir via MinerU and write .txts into output_dir."""
 	pdf_paths = _list_pdfs(input_dir)
@@ -439,8 +391,6 @@ def render_enterprise_standard_check_tab(session_id):
 					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
-					# Merge all standard .txt files into a single enterprise_standards.txt and remove the individual ones
-					# _merge_and_cleanup_standards(standards_txt_dir, st)
 					st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
 					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
@@ -464,7 +414,7 @@ def render_enterprise_standard_check_tab(session_id):
 						st.error(f"企业标准比对流程异常：{e}")
 					
 		with btn_col_stop:
-			st.session_state[f"enterprise_running_{session_id}"] = False
+			# st.session_state[f"enterprise_running_{session_id}"] = False
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
 				try:
 					# Load current bisheng session id if any
@@ -497,16 +447,31 @@ def render_enterprise_standard_check_tab(session_id):
 					pairs = [
 						(os.path.join(demo_enterprise, "standards"), standards_dir),
 						(os.path.join(demo_enterprise, "examined_files"), examined_dir),
+						# New: copy demonstration prompt/response chunks into session enterprise output
+						# Entire folders copied under enterprise_out_root
+						(os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
+						(os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
 					]
 					files_copied = 0
 					for src, dst in pairs:
-						if os.path.exists(src):
-							for name in os.listdir(src):
-								src_path = os.path.join(src, name)
-								dst_path = os.path.join(dst, name)
-								if os.path.isfile(src_path):
-									shutil.copy2(src_path, dst_path)
-									files_copied += 1
+						if not os.path.exists(src):
+							continue
+						# If source is a directory that we want to mirror (prompt_text_chunks / llm responses)
+						if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses")):
+							os.makedirs(os.path.dirname(dst), exist_ok=True)
+							# Copy whole directory tree into enterprise_out_root subfolder
+							shutil.copytree(src, dst, dirs_exist_ok=True)
+							for root, _, files in os.walk(src):
+								files_copied += len([f for f in files if os.path.isfile(os.path.join(root, f))])
+							continue
+						# Otherwise treat as file list copy (standards / examined_files)
+						for name in os.listdir(src):
+							src_path = os.path.join(src, name)
+							dst_path = os.path.join(dst, name)
+							if os.path.isfile(src_path):
+								os.makedirs(dst, exist_ok=True)
+								shutil.copy2(src_path, dst_path)
+								files_copied += 1
 					st.session_state[f"enterprise_demo_{session_id}"] = True
 					st.success(f"已复制演示文件：{files_copied} 个")
 				except Exception as e:
