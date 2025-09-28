@@ -340,6 +340,56 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area, annota
 	return created
 
 
+def _cleanup_orphan_txts(source_dir: str, output_dir: str, progress_area=None) -> int:
+	"""Delete .txt files in output_dir that do not correspond to files currently in source_dir.
+
+	Rules:
+	- For PDF/Word/PPT sources: keep exact name match "<orig_name>.txt" where <orig_name> includes the extension
+	  (e.g., foo.pdf -> foo.pdf.txt, bar.docx -> bar.docx.txt).
+	- For Excel sources: keep any file starting with "<orig_name>_SHEET_" (multiple per workbook).
+	"""
+	try:
+		if not os.path.isdir(output_dir):
+			return 0
+		# Build allowlists from current source files
+		keep_exact = set()
+		keep_prefixes = []
+		try:
+			for fname in os.listdir(source_dir or "."):
+				spath = os.path.join(source_dir, fname)
+				if not os.path.isfile(spath):
+					continue
+				ext = os.path.splitext(fname)[1].lower()
+				if ext in {'.pdf', '.doc', '.docx', '.ppt', '.pptx'}:
+					keep_exact.add((fname + '.txt').lower())
+				elif ext in {'.xls', '.xlsx', '.xlsm'}:
+					keep_prefixes.append((fname + '_SHEET_').lower())
+		except Exception:
+			# If source_dir not accessible, do not delete anything
+			return 0
+
+		deleted_count = 0
+		for oname in os.listdir(output_dir):
+			opath = os.path.join(output_dir, oname)
+			if not os.path.isfile(opath):
+				continue
+			name_lower = oname.lower()
+			if not name_lower.endswith('.txt'):
+				continue
+			keep = name_lower in keep_exact or any(name_lower.startswith(pfx) for pfx in keep_prefixes)
+			if not keep:
+				try:
+					os.remove(opath)
+					deleted_count += 1
+					if progress_area is not None:
+						progress_area.info(f"清理无关文本: {oname}")
+				except Exception:
+					pass
+		return deleted_count
+	except Exception:
+		return 0
+
+
 def render_enterprise_standard_check_tab(session_id):
 	# Handle None session_id (user not logged in)
 	if session_id is None:
@@ -387,6 +437,14 @@ def render_enterprise_standard_check_tab(session_id):
 				# Process PDFs (MinerU) and Word/PPT (Unstructured) into plain text
 				area = st.container()
 				with area:
+					# Step 0: Clean orphan .txt files that don't correspond to current uploads
+					try:
+						removed_std = _cleanup_orphan_txts(standards_dir, standards_txt_dir, st)
+						removed_exam = _cleanup_orphan_txts(examined_dir, examined_txt_dir, st)
+						if removed_std or removed_exam:
+							st.info(f"已清理无关文本 {removed_std + removed_exam} 个")
+					except Exception:
+						pass
 					st.markdown("**阅读企业标准文件中，10分钟左右，请等待...**")
 					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
