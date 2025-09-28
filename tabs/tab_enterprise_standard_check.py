@@ -445,6 +445,23 @@ def render_enterprise_standard_check_tab(session_id):
 							st.info(f"已清理无关文本 {removed_std + removed_exam} 个")
 					except Exception:
 						pass
+					# Step 0b: Clear previous run results so current run writes fresh outputs
+					try:
+						initial_dir = os.path.join(enterprise_out_root, 'initial_results')
+						os.makedirs(initial_dir, exist_ok=True)
+						cleared = 0
+						for fname in os.listdir(initial_dir):
+							fpath = os.path.join(initial_dir, fname)
+							if os.path.isfile(fpath):
+								try:
+									os.remove(fpath)
+									cleared += 1
+								except Exception:
+									pass
+						if cleared:
+							st.info(f"已清空上次运行结果 {cleared} 个文件")
+					except Exception:
+						pass
 					st.markdown("**阅读企业标准文件中，10分钟左右，请等待...**")
 					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
