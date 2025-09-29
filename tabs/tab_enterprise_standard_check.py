@@ -6,11 +6,11 @@ import json
 import re
 import time
 import requests
-from util import ensure_session_dirs, handle_file_upload
+from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
 from config import CONFIG
+from ollama import Client as OllamaClient
 from bisheng_client import (
 	call_workflow_invoke,
-	aggregate_enterprise_checks,
 	split_to_chunks,
 	stop_workflow,
 	find_knowledge_id_by_name,
@@ -718,26 +718,268 @@ def render_enterprise_standard_check_tab(session_id):
 					out_path = os.path.join(initial_dir, f"response_{name_no_ext}.txt")
 					with open(out_path, 'w', encoding='utf-8') as outf:
 						outf.write(full_out_text)
+					# Immediately produce chunked prompted_response_*_ptN.txt files
+					try:
+						original_name = name_no_ext
+						prompt_lines = [
+							"你是一个严谨的结构化信息抽取助手。以下内容来自一个基于 RAG 的大语言模型 (RAG-LLM) 系统，",
+							"用于将若干技术文件与企业标准进行逐条比对，输出发现的不符合项及其理由。本文件对应的原始技术文件名称为：",
+							f"{original_name}。",
+							"\n请将随后的全文内容转换为 JSON 数组（list of objects），每个对象包含如下五个键：",
+							f"- 技术文件名：\"{original_name}\"",
+							"- 技术文件内容：与该条不一致点相关的技术文件条目或段落名称/编号/摘要",
+							"- 企业标准：被对比的企业标准条款名称/编号/摘要",
+							"- 不一致之处：不符合或存在差异的具体点，尽量具体明确",
+							"- 理由：判断不一致的依据与简要解释（保持客观、可追溯）",
+							"\n要求：",
+							"1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本），键名使用上述中文；",
+							"2) 若内容包含多处对比，按条目拆分为多条 JSON 对象；",
+							"3) 若某处信息缺失，请以空字符串 \"\" 占位，不要编造；",
+							"4) 尽量保留可用于追溯定位的原文线索（如编号、标题、页码等）于相应字段中。",
+							"\n下面是需要转换为 JSON 的原始比对输出：\n\n",
+						]
+						instr = "".join(prompt_lines)
+						# Split content by every 20 occurrences of "<think>" markers
+						text = full_out_text or ""
+						think_indices = []
+						needle = "<think>"
+						start = 0
+						while True:
+							pos = text.find(needle, start)
+							if pos == -1:
+								break
+							think_indices.append(pos)
+							start = pos + len(needle)
+						boundaries = []
+						if think_indices:
+							for i, _ in enumerate(think_indices, start=1):
+								if i % 20 == 0:
+									# next part starts at next <think>, if any
+									next_pos = think_indices[i] if i < len(think_indices) else None
+									if next_pos is not None:
+										boundaries.append(next_pos)
+						parts = []
+						prev = 0
+						for b in boundaries:
+							parts.append(text[prev:b])
+							prev = b
+						parts.append(text[prev:])
+						# Write each part to prompted_response_<name>_ptN.txt after removing <think> blocks
+						for idx_part, part in enumerate(parts, start=1):
+							cleaned_part = re.sub(r"<think>[\s\S]*?</think>", "", part)
+							prompted_path = os.path.join(initial_dir, f"prompted_response_{name_no_ext}_pt{idx_part}.txt")
+							with open(prompted_path, 'w', encoding='utf-8') as pf:
+								pf.write(instr)
+								pf.write(cleaned_part)
+					except Exception:
+						pass
+
+					# For each prompted_response_* part, call Ollama LLM and display side-by-side
+					try:
+						# Discover all parts for current file
+						part_files = []
+						try:
+							for fn in os.listdir(initial_dir):
+								if fn.startswith(f"prompted_response_{name_no_ext}_pt") and fn.endswith('.txt'):
+									part_files.append(fn)
+						except Exception:
+							part_files = []
+						part_files.sort(key=lambda x: x.lower())
+						total_parts = len(part_files)
+						# Prepare LLM client (Ollama on 10.31.60.9 by default)
+						host = resolve_ollama_host("ollama_9")
+						ollama_client = OllamaClient(host=host)
+						model = CONFIG["llm"].get("ollama_model")
+						temperature = 0.7
+						top_p = 0.9
+						top_k = 40
+						repeat_penalty = 1.1
+						num_ctx = 40001
+						num_thread = 4
+						for part_idx, pfname in enumerate(part_files, start=1):
+							p_path = os.path.join(initial_dir, pfname)
+							try:
+								with open(p_path, 'r', encoding='utf-8') as fpr:
+									prompt_text_all = fpr.read()
+							except Exception:
+								prompt_text_all = ""
+							# Two-column display for this prompt-response pair
+							col_prompt2, col_resp2 = st.columns([1, 1])
+							with col_prompt2:
+								st.markdown(f"生成汇总表格提示词（第{part_idx}部分，共{total_parts}部分）")
+								prompt_container2 = st.container(height=400)
+								with prompt_container2:
+									with st.chat_message("user"):
+										ph2 = st.empty()
+										# Stream display the prompt text in chunks of words
+										words = (prompt_text_all or "").split()
+										streamed2 = ""
+										for idxw in range(0, len(words), 30):
+											chunk_words = words[idxw:idxw+30]
+											streamed2 += " ".join(chunk_words) + " "
+											ph2.text(streamed2.strip())
+									st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompted_prompt_{session_id}_{pfname}")
+							with col_resp2:
+								st.markdown(f"生成汇总表格结果（第{part_idx}部分，共{total_parts}部分）")
+								resp_container2 = st.container(height=400)
+								with resp_container2:
+									with st.chat_message("assistant"):
+										ph_resp2 = st.empty()
+										response_text = ""
+										for chunk in ollama_client.chat(
+											model=model,
+											messages=[{"role": "user", "content": prompt_text_all}],
+											stream=True,
+											options={
+												"temperature": temperature,
+												"top_p": top_p,
+												"top_k": top_k,
+												"repeat_penalty": repeat_penalty,
+												"num_ctx": num_ctx,
+												"num_thread": num_thread
+											}
+										):
+											new_text = chunk['message']['content']
+											response_text += new_text
+											ph_resp2.write(response_text)
+										# Save LLM response to json_<original>_ptN.txt
+										try:
+											# Map prompted_response_X_ptN.txt -> json_X_ptN.txt
+											base = pfname[len("prompted_response_"):]
+											json_name = f"json_{base}"
+											json_path = os.path.join(initial_dir, json_name)
+											with open(json_path, 'w', encoding='utf-8') as jf:
+												jf.write(response_text)
+										except Exception:
+											pass
+					except Exception:
+						pass
 				except Exception as e:
 					st.error(f"保存结果失败：{e}")
 
-			# Aggregate and reset running flag
+			# End of current run; clear running flag (no final aggregation here)
 			try:
-				final_path = aggregate_enterprise_checks(enterprise_out)
-				if final_path and os.path.isfile(final_path):
-					st.success(f"已生成汇总报告：{os.path.basename(final_path)}")
-					with open(final_path, 'r', encoding='utf-8') as f:
-						final_text = f.read()
-					st.download_button(
-						label="下载汇总报告",
-						data=final_text,
-						file_name=os.path.basename(final_path),
-						mime='text/plain',
-						key=f"download_enterprise_report_{session_id}",
-					)
 				st.session_state[f"enterprise_running_{session_id}"] = False
 			except Exception as e:
-				st.error(f"汇总失败：{e}")
+				st.error(f"流程收尾失败：{e}")
+
+			# After LLM step: aggregate json_*_ptN.txt into CSV and XLSX in final_results
+			try:
+				final_dir = os.path.join(enterprise_out, 'final_results')
+				os.makedirs(final_dir, exist_ok=True)
+				# Collect json_*.txt under initial_results
+				json_files = []
+				try:
+					for fn in os.listdir(initial_dir):
+						if fn.startswith('json_') and fn.lower().endswith('.txt'):
+							json_files.append(os.path.join(initial_dir, fn))
+				except Exception:
+					json_files = []
+				# Build rows
+				columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由", "source_file"]
+				rows = []
+				import csv
+				import pandas as pd
+				def _strip_code_fences(s: str) -> str:
+					s = (s or "").strip()
+					if s.startswith("```") and s.endswith("```"):
+						s = s[3:-3].strip()
+						if s.lower().startswith("json"):
+							s = s[4:].strip()
+					return s
+				def _extract_json_text(text: str) -> str:
+					s = (text or "").strip().lstrip("\ufeff")
+					s = _strip_code_fences(s)
+					# try direct
+					try:
+						json.loads(s)
+						return s
+					except Exception:
+						pass
+					# try array
+					try:
+						start = s.find("[")
+						end = s.rfind("]")
+						if start != -1 and end != -1 and end > start:
+							candidate = s[start:end+1]
+							try:
+								json.loads(candidate)
+								return candidate
+							except Exception:
+								merged = re.sub(r"\]\s*,?\s*\[", ",", candidate)
+								json.loads(merged)
+								return merged
+					except Exception:
+						pass
+					# try object
+					try:
+						start = s.find("{")
+						end = s.rfind("}")
+						if start != -1 and end != -1 and end > start:
+							candidate = s[start:end+1]
+							json.loads(candidate)
+							return candidate
+					except Exception:
+						pass
+					return s
+				for jf in json_files:
+					try:
+						with open(jf, 'r', encoding='utf-8') as f:
+							text = f.read()
+					except Exception:
+						text = ""
+					js = _extract_json_text(text)
+					try:
+						parsed = json.loads(js)
+					except Exception:
+						parsed = None
+					items = []
+					if isinstance(parsed, list):
+						items = [x for x in parsed if isinstance(x, dict)]
+					elif isinstance(parsed, dict):
+						vals = list(parsed.values())
+						for v in vals:
+							if isinstance(v, list) and all(isinstance(i, dict) for i in v):
+								items = v
+								break
+						if not items:
+							items = [parsed]
+					for obj in items:
+						row = [
+							str(obj.get("技术文件名", "")),
+							str(obj.get("技术文件内容", "")),
+							str(obj.get("企业标准", "")),
+							str(obj.get("不一致之处", "")),
+							str(obj.get("理由", "")),
+							os.path.basename(jf),
+						]
+						rows.append(row)
+				# Write CSV
+				from datetime import datetime as _dt
+				ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+				csv_path = os.path.join(final_dir, f"enterprise_standard_json_rows_{ts}.csv")
+				with open(csv_path, 'w', encoding='utf-8-sig', newline='') as cf:
+					writer = csv.writer(cf)
+					writer.writerow(columns)
+					for r in rows:
+						writer.writerow(r)
+				# Write XLSX
+				xlsx_path = os.path.join(final_dir, f"enterprise_standard_json_rows_{ts}.xlsx")
+				try:
+					df = pd.DataFrame(rows, columns=columns)
+					df.to_excel(xlsx_path, index=False, engine='openpyxl')
+				except Exception:
+					pass
+				# Offer downloads
+				try:
+					with open(csv_path, 'rb') as fcsv:
+						st.download_button(label="下载CSV结果", data=fcsv.read(), file_name=os.path.basename(csv_path), mime='text/csv', key=f"download_csv_{session_id}")
+					with open(xlsx_path, 'rb') as fxlsx:
+						st.download_button(label="下载Excel结果", data=fxlsx.read(), file_name=os.path.basename(xlsx_path), mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f"download_xlsx_{session_id}")
+				except Exception:
+					pass
+			except Exception as e:
+				st.error(f"汇总导出失败：{e}")
 
 		# Demo streaming phase (reads from prepared prompt/response chunks; no LLM calls)
 		if st.session_state.get(f"enterprise_demo_{session_id}"):
@@ -792,7 +1034,7 @@ def render_enterprise_standard_check_tab(session_id):
 								chunk_words = words[j:j+30]
 								streamed += " ".join(chunk_words) + " "
 								prompt_placeholder.text(streamed.strip())
-								time.sleep(0.05)
+								time.sleep(0.1)
 						st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_prompt_{session_id}_{base}_{idx}")
 				with col_response:
 					st.markdown(f"示例比对结果（{base} - 第{idx}部分）")
@@ -809,7 +1051,7 @@ def render_enterprise_standard_check_tab(session_id):
 									chunk_words = words_r[j:j+30]
 									streamed_r += " ".join(chunk_words) + " "
 									resp_placeholder.write(streamed_r.strip())
-									time.sleep(0.05)
+									time.sleep(0.1)
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_resp_{session_id}_{base}_{idx}")
 			# Final report (hardcoded path per requirement)
 			try:
