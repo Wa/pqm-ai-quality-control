@@ -528,13 +528,15 @@ def render_enterprise_standard_check_tab(session_id):
 						(os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
 						# New: copy final_results for demo summary
 						(os.path.join(demo_enterprise, "final_results"), os.path.join(enterprise_out_root, "final_results")),
+						# New: copy pre-made prompted responses and json outputs for demo
+						(os.path.join(demo_enterprise, "prompted_llm responses_and_json"), os.path.join(enterprise_out_root, "prompted_llm responses_and_json")),
 					]
 					files_copied = 0
 					for src, dst in pairs:
 						if not os.path.exists(src):
 							continue
-					# If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results)
-						if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results")):
+					# If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
+						if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results") or src.endswith("prompted_llm responses_and_json")):
 							os.makedirs(os.path.dirname(dst), exist_ok=True)
 							# Copy whole directory tree into enterprise_out_root subfolder
 							shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -876,7 +878,7 @@ def render_enterprise_standard_check_tab(session_id):
 				except Exception:
 					json_files = []
 				# Build rows
-				columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由", "source_file"]
+				columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由"]
 				rows = []
 				import csv
 				import pandas as pd
@@ -944,14 +946,20 @@ def render_enterprise_standard_check_tab(session_id):
 								break
 						if not items:
 							items = [parsed]
+					# Derive original source filename from json_*.txt → strip 'json_' and trailing _ptN.txt
+					base_name = os.path.basename(jf)
+					orig_name = base_name[5:] if base_name.startswith('json_') else base_name
+					try:
+						orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
+					except Exception:
+						pass
 					for obj in items:
 						row = [
-							str(obj.get("技术文件名", "")),
+							orig_name,
 							str(obj.get("技术文件内容", "")),
 							str(obj.get("企业标准", "")),
 							str(obj.get("不一致之处", "")),
 							str(obj.get("理由", "")),
-							os.path.basename(jf),
 						]
 						rows.append(row)
 				# Write CSV
@@ -987,6 +995,7 @@ def render_enterprise_standard_check_tab(session_id):
 			prompt_dir = os.path.join(enterprise_out_root, 'prompt_text_chunks')
 			resp_dir = os.path.join(enterprise_out_root, 'llm responses')
 			final_dir = os.path.join(enterprise_out_root, 'final_results')
+			prompted_and_json_dir = os.path.join(enterprise_out_root, 'prompted_llm responses_and_json')
 			# Collect prompt chunk files
 			prompt_files = []
 			try:
@@ -996,9 +1005,17 @@ def render_enterprise_standard_check_tab(session_id):
 							prompt_files.append(f)
 			except Exception:
 				prompt_files = []
-			prompt_files.sort(key=lambda x: x.lower())
-			# Render each prompt/response pair in UI
-			for fname in prompt_files:
+			# Natural sort by base name and numeric part index
+			_prompt_entries = []
+			for _f in prompt_files:
+				_m = re.match(r"^(?P<base>.+)_pt(?P<idx>\d+)\.txt$", _f)
+				if _m:
+					_prompt_entries.append((_m.group('base').lower(), int(_m.group('idx')), _f))
+				else:
+					_prompt_entries.append(("", 0, _f))
+			_prompt_entries.sort(key=lambda t: (t[0], t[1]))
+			# Render each prompt/response pair in UI (original demo)
+			for _, _, fname in _prompt_entries:
 				m = re.match(r"^(?P<base>.+)_pt(?P<idx>\d+)\.txt$", fname)
 				if not m:
 					continue
@@ -1053,26 +1070,93 @@ def render_enterprise_standard_check_tab(session_id):
 									resp_placeholder.write(streamed_r.strip())
 									time.sleep(0.1)
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_resp_{session_id}_{base}_{idx}")
-			# Final report (hardcoded path per requirement)
-			try:
-				final_path = os.path.join(final_dir, "企业标准检查汇总_20250926_124757.txt")
-				if os.path.isfile(final_path):
-					st.success(f"已生成汇总报告：{os.path.basename(final_path)}")
-					with open(final_path, 'r', encoding='utf-8') as f:
-						final_text = f.read()
-					st.download_button(
-						label="下载汇总报告",
-						data=final_text,
-						file_name=os.path.basename(final_path),
-						mime='text/plain',
-						key=f"download_enterprise_report_{session_id}",
-					)
-				else:
-					st.info("未找到演示汇总报告文件。")
-			except Exception as e:
-				st.error(f"读取演示汇总报告失败：{e}")
+			# (Removed hardcoded final report section for demo)
 			# End of demo streaming pass; reset the flag
-			st.session_state[f"enterprise_demo_{session_id}"] = False
+				st.session_state[f"enterprise_demo_{session_id}"] = False
+
+			# New demo rendering: prompted_response_* and corresponding json_* from pre-made folder
+			try:
+				if os.path.isdir(prompted_and_json_dir):
+					# Find prompted_response_*.txt files and for each, display prompt and its json_ response
+					demo_parts = [f for f in os.listdir(prompted_and_json_dir) if f.startswith('prompted_response_') and f.lower().endswith('.txt')]
+					# Natural sort by extracted name and numeric part index
+					_entries = []
+					for _pf in demo_parts:
+						_m = re.match(r"^prompted_response_(?P<name>.+)_pt(?P<idx>\d+)\.txt$", _pf)
+						if _m:
+							_entries.append((_m.group('name').lower(), int(_m.group('idx')), _pf))
+						else:
+							_entries.append(("", 0, _pf))
+					_entries.sort(key=lambda t: (t[0], t[1]))
+					total_parts = len(_entries)
+					for idx, (_, _, pf) in enumerate(_entries, start=1):
+						p_path = os.path.join(prompted_and_json_dir, pf)
+						# Map to json_<name>.txt in same folder
+						json_name = f"json_{pf[len('prompted_response_'):] }"
+						j_path = os.path.join(prompted_and_json_dir, json_name)
+						# Read prompt
+						try:
+							with open(p_path, 'r', encoding='utf-8') as f:
+								ptext = f.read()
+						except Exception:
+							ptext = ""
+						# Read json response (text form)
+						try:
+							with open(j_path, 'r', encoding='utf-8') as f:
+								jtext = f.read()
+						except Exception:
+							jtext = ""
+						# Two column display
+						col_lp, col_lr = st.columns([1, 1])
+						with col_lp:
+							st.markdown(f"生成汇总表格提示词（第{idx}部分，共{total_parts}部分）")
+							pc = st.container(height=400)
+							with pc:
+								with st.chat_message("user"):
+									ph = st.empty()
+									# Stream-like rendering of prompt
+									words = (ptext or "").split()
+									acc = ""
+									for k in range(0, len(words), 30):
+										acc += " ".join(words[k:k+30]) + " "
+										ph.text(acc.strip())
+							st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_prompted_prompt_{session_id}_{idx}")
+						with col_lr:
+							st.markdown(f"生成汇总表格结果（第{idx}部分，共{total_parts}部分）")
+							rc = st.container(height=400)
+							with rc:
+								with st.chat_message("assistant"):
+									ph2 = st.empty()
+									acc2 = ""
+									words2 = (jtext or "").split()
+									for k in range(0, len(words2), 30):
+										acc2 += " ".join(words2[k:k+30]) + " "
+										ph2.write(acc2.strip())
+							st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_prompted_resp_{session_id}_{idx}")
+			except Exception:
+				pass
+
+			# Add demo download buttons for CSV/XLSX in final_results
+			try:
+				if os.path.isdir(final_dir):
+					csv_files = [f for f in os.listdir(final_dir) if f.lower().endswith('.csv')]
+					xlsx_files = [f for f in os.listdir(final_dir) if f.lower().endswith('.xlsx')]
+					def _latest(path_list):
+						if not path_list:
+							return None
+						paths = [os.path.join(final_dir, f) for f in path_list]
+						paths.sort(key=lambda p: os.path.getmtime(p))
+						return paths[-1]
+					latest_csv = _latest(csv_files)
+					latest_xlsx = _latest(xlsx_files)
+					if latest_csv:
+						with open(latest_csv, 'rb') as fcsv:
+							st.download_button(label="下载CSV结果(演示)", data=fcsv.read(), file_name=os.path.basename(latest_csv), mime='text/csv', key=f"demo_download_csv_{session_id}")
+					if latest_xlsx:
+						with open(latest_xlsx, 'rb') as fxlsx:
+							st.download_button(label="下载Excel结果(演示)", data=fxlsx.read(), file_name=os.path.basename(latest_xlsx), mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f"demo_download_xlsx_{session_id}")
+			except Exception:
+				pass
 			
 		# Rendering of Bisheng streaming moved out of button column below
 
