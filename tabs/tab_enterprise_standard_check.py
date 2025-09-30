@@ -19,6 +19,7 @@ from bisheng_client import (
 )
 
 
+# 
 # --- Bisheng fixed settings (edit here if endpoints or workflow change) ---
 # Base URL of Bisheng server
 BISHENG_BASE_URL = "http://10.31.60.11:3001"
@@ -424,11 +425,15 @@ def render_enterprise_standard_check_tab(session_id):
 			if files_std:
 				handle_file_upload(files_std, standards_dir)
 				st.success(f"已上传 {len(files_std)} 个企业标准文件")
+				# Hint UI to focus 企业标准文件 tab after upload
+				st.session_state[f"enterprise_default_tab_{session_id}"] = "企业标准文件"
 		with col_exam:
 			files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"enterprise_exam_{session_id}")
 			if files_exam:
 				handle_file_upload(files_exam, examined_dir)
 				st.success(f"已上传 {len(files_exam)} 个待检查文件")
+				# Hint UI to focus 企业标准文件 tab after upload
+				st.session_state[f"enterprise_default_tab_{session_id}"] = "企业标准文件"
 
 		# Start / Stop / Demo buttons
 		btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
@@ -965,14 +970,14 @@ def render_enterprise_standard_check_tab(session_id):
 				# Write CSV
 				from datetime import datetime as _dt
 				ts = _dt.now().strftime('%Y%m%d_%H%M%S')
-				csv_path = os.path.join(final_dir, f"enterprise_standard_json_rows_{ts}.csv")
+				csv_path = os.path.join(final_dir, f"企标检查结果_{ts}.csv")
 				with open(csv_path, 'w', encoding='utf-8-sig', newline='') as cf:
 					writer = csv.writer(cf)
 					writer.writerow(columns)
 					for r in rows:
 						writer.writerow(r)
 				# Write XLSX
-				xlsx_path = os.path.join(final_dir, f"enterprise_standard_json_rows_{ts}.xlsx")
+				xlsx_path = os.path.join(final_dir, f"企标检查结果_{ts}.xlsx")
 				try:
 					df = pd.DataFrame(rows, columns=columns)
 					df.to_excel(xlsx_path, index=False, engine='openpyxl')
@@ -1205,7 +1210,7 @@ def render_enterprise_standard_check_tab(session_id):
 			return truncated_name + ext
 
 		# Clear buttons
-		col_clear1, col_clear2 = st.columns(2)
+		col_clear1, col_clear2, col_clear3 = st.columns(3)
 		with col_clear1:
 			if st.button("🗑️ 清空企业标准文件", key=f"clear_enterprise_std_{session_id}"):
 				try:
@@ -1226,9 +1231,41 @@ def render_enterprise_standard_check_tab(session_id):
 					st.success("已清空待检查文件")
 				except Exception as e:
 					st.error(f"清空失败: {e}")
+		with col_clear3:
+			if st.button("🗑️ 清空分析结果", key=f"clear_enterprise_results_{session_id}"):
+				try:
+					final_dir_path = os.path.join(enterprise_out_root, 'final_results')
+					deleted_count = 0
+					if os.path.isdir(final_dir_path):
+						for fname in os.listdir(final_dir_path):
+							fpath = os.path.join(final_dir_path, fname)
+							if os.path.isfile(fpath):
+								os.remove(fpath)
+								deleted_count += 1
+					st.success(f"已清空分析结果（{deleted_count} 个文件）")
+				except Exception as e:
+					st.error(f"清空失败: {e}")
 
-		# File lists in tabs
-		tab_std, tab_exam = st.tabs(["企业标准文件", "待检查文件"])
+		# File lists in tabs with default selection by phase (Streamlit 1.50+)
+		final_dir_for_tabs = os.path.join(enterprise_out_root, 'final_results')
+		_has_results = False
+		try:
+			if os.path.isdir(final_dir_for_tabs):
+				for _f in os.listdir(final_dir_for_tabs):
+					if os.path.isfile(os.path.join(final_dir_for_tabs, _f)):
+						_has_results = True
+						break
+		except Exception:
+			_has_results = False
+		_recent_hint = st.session_state.get(f"enterprise_default_tab_{session_id}")
+		_default_tab = _recent_hint or ("分析结果" if _has_results else "企业标准文件")
+		tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"], default=_default_tab)
+		# One-shot hint: clear after applying so later phases can switch to 分析结果
+		if _recent_hint:
+			try:
+				del st.session_state[f"enterprise_default_tab_{session_id}"]
+			except Exception:
+				pass
 		with tab_std:
 			std_files = get_file_list(standards_dir)
 			if std_files:
@@ -1272,5 +1309,44 @@ def render_enterprise_standard_check_tab(session_id):
 									st.error(f"删除失败: {e}")
 			else:
 				st.write("（未上传）")
+
+		with tab_results:
+			# List files under generated/<session>/enterprise_standard_check/final_results
+			final_dir = os.path.join(enterprise_out_root, 'final_results')
+			if os.path.isdir(final_dir):
+				final_files = get_file_list(final_dir)
+				if final_files:
+					for file_info in final_files:
+						display_name = truncate_filename(file_info['name'])
+						with st.expander(f"📄 {display_name}", expanded=False):
+							col_i, col_a = st.columns([4, 1])
+							with col_i:
+								st.write(f"**文件名:** {file_info['name']}")
+								st.write(f"**大小:** {format_file_size(file_info['size'])}")
+								st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+							with col_a:
+								try:
+									with open(file_info['path'], 'rb') as _fbin:
+										_data = _fbin.read()
+									st.download_button(
+										label="⬇️ 下载",
+										data=_data,
+										file_name=file_info['name'],
+										mime='application/octet-stream',
+										key=f"dl_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+									)
+								except Exception as e:
+									st.error(f"下载失败: {e}")
+								delete_key = f"del_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+								if st.button("🗑️ 删除", key=delete_key):
+									try:
+										os.remove(file_info['path'])
+										st.success(f"已删除: {file_info['name']}")
+									except Exception as e:
+										st.error(f"删除失败: {e}")
+				else:
+					st.write("（暂无分析结果）")
+			else:
+				st.write("（暂无分析结果目录）")
 
 
