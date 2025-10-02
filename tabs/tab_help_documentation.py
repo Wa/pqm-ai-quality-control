@@ -81,6 +81,8 @@ def render_help_documentation_tab(session_id):
             render_parameters_check_section()
         elif selected_section == "✅ 文件要素检查":
             render_file_elements_check_section()
+        elif selected_section == "🏢 企业标准检查":
+            render_enterprise_standard_check_section()
         elif selected_section == "📋 历史问题规避":
             render_history_issues_avoidance_section()
         elif selected_section == "🤖 AI智能体":
@@ -127,6 +129,52 @@ def render_special_symbols_check_section():
     
     如需支持更多格式，请联系：周昭坤。
     """)
+
+def render_enterprise_standard_check_section():
+    """Render the enterprise standard check help section."""
+    st.header("🏢 企业标准检查")
+
+    st.markdown(
+        """
+        企业标准检查用于将“待检查文件”与“企业标准文件”逐条对照，自动识别不一致项并形成可下载的汇总结果。
+
+        ### 使用流程
+
+        1. 登录并进入本功能页，确认当前用户会话。
+        2. 上传文件：
+           - 企业标准文件（支持：PDF、Word/PPT、Excel、文本类）
+           - 待检查文件（支持：PDF、Word/PPT、Excel、文本类）
+        3. 点击【开始】：
+           - 系统会清理旧结果，仅处理新增文件；
+           - PDF 走 MinerU 解析；Word/PPT 走 Unstructured；Excel 逐表转文本；纯文本类（csv/tsv/md/txt/json/yaml/yml/log/ini/cfg/rst）直接复制为 .txt；
+           - 生成的 .txt 分别输出到 `standards_txt` / `examined_txt`；
+           - 对“待检查文本”进行分片，比对结果以流式方式展示。
+        4. 结构化与导出：
+           - 自动生成带中文 JSON 指令的 `prompted_response_*_ptN.txt`；
+           - 调用内网 Ollama 进行结构化抽取，产出 `json_*_ptN.txt`；
+           - 汇总导出 `CSV/XLSX`（列：技术文件名、技术文件内容、企业标准、不一致之处、理由），并提供下载按钮；
+           - 另可生成“企标检查分析过程_yyyymmdd_hhmmss.docx”，包含各文件全部提示词与回复过程（含简易表格清洗与标题层级）。
+        5. 【演示】模式：
+           - 复制预制样例（含 prompted/json/final_results），直接展示流式内容与下载按钮，无需实时计算。
+        
+        ### 右侧文件/结果面板
+        - 企业标准文件、待检查文件：可查看/删除已上传文件。
+        - 分析结果：列出 `final_results` 下的 CSV/XLSX/Word 等文件，支持逐个下载或删除。
+
+        ### 注意事项
+        - 未被支持或未解析成功的上传文件，将不会生成对应的 `.txt`，不会进入比对。
+        - 若“待检查文本”未生成任何 `.txt`，系统会提示跳过此次比对。
+        - 文本同步和清理逻辑：已存在且非空的输出文本跳过；不在上传清单内的孤立文本文件会被清理。
+
+        ### 支持的文件类型（核心）
+        - PDF（MinerU）
+        - Word/PPT（Unstructured）
+        - Excel（逐表转文本）
+        - 纯文本类：csv/tsv/md/txt/json/yaml/yml/log/ini/cfg/rst（直接文本化）
+
+        如需扩展更多格式（例如 .odt、.html/.xml、.zip 解包递归处理等），请联系：周昭坤。
+        """
+    )
 
 def render_parameters_check_section():
     """Render the parameters check section."""

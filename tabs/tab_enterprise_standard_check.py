@@ -341,6 +341,125 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area, annota
 	return created
 
 
+def _process_textlike_folder(input_dir: str, output_dir: str, progress_area):
+	"""Copy text-like files (csv, tsv, md, txt, json, yaml, yml, log, ini, cfg, rst)
+	to output_dir with .txt extension. Skip if the target exists and is non-empty.
+	"""
+	try:
+		if not os.path.isdir(input_dir):
+			return []
+		exts = {
+			'.txt', '.md', '.csv', '.tsv', '.json', '.yaml', '.yml', '.log', '.ini', '.cfg', '.rst'
+		}
+		os.makedirs(output_dir, exist_ok=True)
+		written = []
+		for name in os.listdir(input_dir):
+			spath = os.path.join(input_dir, name)
+			if not os.path.isfile(spath):
+				continue
+			ext = os.path.splitext(name)[1].lower()
+			if ext not in exts:
+				continue
+			base = os.path.splitext(name)[0]
+			dst = os.path.join(output_dir, f"{base}.txt")
+			try:
+				if os.path.exists(dst) and os.path.getsize(dst) > 0:
+					progress_area.info(f"已存在（跳过）: {os.path.basename(dst)}")
+					continue
+				with open(spath, 'r', encoding='utf-8', errors='ignore') as fr:
+					content = fr.read()
+				with open(dst, 'w', encoding='utf-8') as fw:
+					fw.write(content)
+				written.append(dst)
+			except Exception as e:
+				progress_area.warning(f"复制失败: {name} → {e}")
+		return written
+	except Exception:
+		return []
+
+
+def _process_archives(input_dir: str, output_dir: str, progress_area) -> int:
+	"""Extract archives (.zip, optionally .7z/.rar if libs available) and process their contents
+	into text outputs under output_dir. Returns number of archives processed.
+
+	Strategy:
+	- For each archive in input_dir, extract into a temp folder under output_dir.
+	- For each extracted subfolder, run the existing processors on that folder:
+	  PDFs → MinerU; Word/PPT → Unstructured; Excel → CSV→.txt; text-like → copy.
+	- Clean up extracted temp if possible.
+	"""
+	try:
+		if not os.path.isdir(input_dir):
+			return 0
+		import shutil
+		import tempfile
+		processed = 0
+		# Optional handlers
+		try:
+			import py7zr  # type: ignore
+		except Exception:
+			py7zr = None  # type: ignore
+		try:
+			import rarfile  # type: ignore
+		except Exception:
+			rarfile = None  # type: ignore
+
+		for name in os.listdir(input_dir):
+			spath = os.path.join(input_dir, name)
+			if not os.path.isfile(spath):
+				continue
+			ext = os.path.splitext(name)[1].lower()
+			if ext not in {'.zip', '.7z', '.rar'}:
+				continue
+			# Create temp extraction root
+			tmp_root = tempfile.mkdtemp(prefix="extract_", dir=output_dir)
+			ok = False
+			try:
+				if ext == '.zip':
+					try:
+						with zipfile.ZipFile(spath) as zf:
+							zf.extractall(tmp_root)
+						ok = True
+					except Exception as e:
+						progress_area.warning(f"解压失败: {name} → {e}")
+				elif ext == '.7z' and py7zr is not None:
+					try:
+						with py7zr.SevenZipFile(spath, mode='r') as z:
+							z.extractall(path=tmp_root)
+						ok = True
+					except Exception as e:
+						progress_area.warning(f"解压7z失败: {name} → {e}")
+				elif ext == '.rar' and rarfile is not None:
+					try:
+						rf = rarfile.RarFile(spath)
+						rf.extractall(tmp_root)
+						rf.close()
+						ok = True
+					except Exception as e:
+						progress_area.warning(f"解压rar失败: {name} → {e}")
+				else:
+					# Unsupported archive (missing libs)
+					progress_area.info(f"跳过未支持的压缩包: {name}")
+
+				if ok:
+					# Walk extracted tree and process each folder with existing processors
+					for root, dirs, files in os.walk(tmp_root):
+						# Run per-folder handlers (they skip existing outputs)
+						_process_pdf_folder(root, output_dir, progress_area, annotate_sources=True)
+						_process_word_ppt_folder(root, output_dir, progress_area, annotate_sources=True)
+						_process_excel_folder(root, output_dir, progress_area, annotate_sources=True)
+						_process_textlike_folder(root, output_dir, progress_area)
+					processed += 1
+			finally:
+				# Cleanup temp extraction root
+				try:
+					shutil.rmtree(tmp_root, ignore_errors=True)
+				except Exception:
+					pass
+		return processed
+	except Exception:
+		return 0
+
 def _cleanup_orphan_txts(source_dir: str, output_dir: str, progress_area=None) -> int:
 	"""Delete .txt files in output_dir that do not correspond to files currently in source_dir.
 
@@ -425,15 +544,11 @@ def render_enterprise_standard_check_tab(session_id):
 			if files_std:
 				handle_file_upload(files_std, standards_dir)
 				st.success(f"已上传 {len(files_std)} 个企业标准文件")
-				# Hint UI to focus 企业标准文件 tab after upload
-				st.session_state[f"enterprise_default_tab_{session_id}"] = "企业标准文件"
 		with col_exam:
 			files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"enterprise_exam_{session_id}")
 			if files_exam:
 				handle_file_upload(files_exam, examined_dir)
 				st.success(f"已上传 {len(files_exam)} 个待检查文件")
-				# Hint UI to focus 企业标准文件 tab after upload
-				st.session_state[f"enterprise_default_tab_{session_id}"] = "企业标准文件"
 
 		# Start / Stop / Demo buttons
 		btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
@@ -471,10 +586,18 @@ def render_enterprise_standard_check_tab(session_id):
 					created_std_pdf = _process_pdf_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_wp = _process_word_ppt_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
 					created_std_xls = _process_excel_folder(standards_dir, standards_txt_dir, st, annotate_sources=True)
+					# New: copy text-like files directly to standards_txt
+					created_std_text = _process_textlike_folder(standards_dir, standards_txt_dir, st)
+					# New: extract archives and process recursively
+					_ = _process_archives(standards_dir, standards_txt_dir, st)
 					st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
 					created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 					created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
 					created_exam_xls = _process_excel_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
+					# New: copy text-like files directly to examined_txt
+					created_exam_text = _process_textlike_folder(examined_dir, examined_txt_dir, st)
+					# New: extract archives and process recursively
+					_ = _process_archives(examined_dir, examined_txt_dir, st)
 
 					# If we have any txt, switch to running phase and rerun so streaming renders in main column
 					try:
@@ -624,9 +747,11 @@ def render_enterprise_standard_check_tab(session_id):
 					"由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
 				)
 				full_out_text = ""
+				prompt_texts = []
 				for i, piece in enumerate(chunks, start=1):
 					col_prompt, col_response = st.columns([1, 1])
 					prompt_text = f"{prompt_prefix}{piece}"
+					prompt_texts.append(prompt_text)
 					with col_prompt:
 						st.markdown(f"提示词（第{i}部分，共{len(chunks)}部分）")
 						prompt_container = st.container(height=400)
@@ -722,6 +847,19 @@ def render_enterprise_standard_check_tab(session_id):
 				# Persist per-file combined output
 				try:
 					name_no_ext = os.path.splitext(name)[0]
+					# Also persist all prompt parts as a single file: prompt_{name_no_ext}.txt
+					try:
+						total_parts = len(prompt_texts)
+						prompt_out_lines = []
+						for idx_p, ptxt in enumerate(prompt_texts, start=1):
+							prompt_out_lines.append(f"提示词（第{idx_p}部分，共{total_parts}部分）：")
+							prompt_out_lines.append(ptxt)
+						prompt_out_text = "\n".join(prompt_out_lines)
+						prompt_out_path = os.path.join(initial_dir, f"prompt_{name_no_ext}.txt")
+						with open(prompt_out_path, 'w', encoding='utf-8') as pf:
+							pf.write(prompt_out_text)
+					except Exception:
+						pass
 					out_path = os.path.join(initial_dir, f"response_{name_no_ext}.txt")
 					with open(out_path, 'w', encoding='utf-8') as outf:
 						outf.write(full_out_text)
@@ -991,6 +1129,98 @@ def render_enterprise_standard_check_tab(session_id):
 						st.download_button(label="下载Excel结果", data=fxlsx.read(), file_name=os.path.basename(xlsx_path), mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f"download_xlsx_{session_id}")
 				except Exception:
 					pass
+				# Build Word document of analysis process from prompt_*.txt and response_*.txt
+				try:
+					try:
+						from docx import Document
+					except Exception:
+						Document = None
+					if Document is not None:
+						# Pair prompt_/response_ files by base name
+						pairs = []
+						prompt_files = [f for f in os.listdir(initial_dir) if f.startswith('prompt_') and f.lower().endswith('.txt')]
+						for pf in prompt_files:
+							base = pf[len('prompt_'):-4]
+							rf = os.path.join(initial_dir, f"response_{base}.txt")
+							if os.path.isfile(rf):
+								pairs.append((os.path.join(initial_dir, pf), rf, base))
+						pairs.sort(key=lambda x: x[2].lower())
+						if pairs:
+							doc = Document()
+							# Set default fonts to 宋体 where possible
+							try:
+								styles = doc.styles
+								styles['Normal'].font.name = '宋体'
+								# Heading styles
+								styles['Heading 1'].font.name = '宋体'
+								styles['Heading 2'].font.name = '宋体'
+							except Exception:
+								pass
+							# Main title
+							doc.add_heading("企标检查全部分析过程", level=0)
+							# Simple TOC section (static list)
+							doc.add_heading("目录", level=1)
+							for _, _, base in pairs:
+								p = doc.add_paragraph()
+								p.add_run(f"{base}")
+							for p_path, r_path, base in pairs:
+								doc.add_heading(f"以下是《{base}》根据企业标准检查的分析过程：", level=1)
+								# Insert prompt content (mark each 提示词... 行为标题2)
+								try:
+									with open(p_path, 'r', encoding='utf-8') as f:
+										ptext = f.read()
+								except Exception:
+									ptext = ""
+								def _to_plain_table(txt: str) -> str:
+									# Very simple HTML table conversion: extract <tr> rows and <td>/<th> cells
+									try:
+										import re as _re
+										rows = []
+										for m in _re.finditer(r"<tr[\s\S]*?>([\s\S]*?)</tr>", txt, flags=_re.IGNORECASE):
+											row_html = m.group(1)
+											cells = _re.findall(r"<(?:td|th)[^>]*>([\s\S]*?)</(?:td|th)>", row_html, flags=_re.IGNORECASE)
+											cells_clean = [ _re.sub(r"<[^>]+>", "", c).strip() for c in cells ]
+											if cells_clean:
+												rows.append("\t".join(cells_clean))
+										if rows:
+											return "\n".join(rows)
+										# Fallback: strip tags
+										return _re.sub(r"<[^>]+>", " ", txt)
+									except Exception:
+										return txt
+								for para in (ptext or "").splitlines():
+									line = para.strip()
+									if not line:
+										continue
+									if re.match(r"^提示词（第\d+部分，共\d+部分）：", line):
+										doc.add_heading(line, level=2)
+									else:
+										doc.add_paragraph(_to_plain_table(line))
+								# Insert response content
+								try:
+									with open(r_path, 'r', encoding='utf-8') as f:
+										rtext = f.read()
+								except Exception:
+									rtext = ""
+								for para in (rtext or "").splitlines():
+									line = para.strip()
+									if not line:
+										continue
+									doc.add_paragraph(_to_plain_table(line))
+							from datetime import datetime as _dt
+							ts_doc = _dt.now().strftime('%Y%m%d_%H%M%S')
+							doc_path = os.path.join(final_dir, f"企标检查分析过程_{ts_doc}.docx")
+							doc.save(doc_path)
+							# Optional download button
+							try:
+								with open(doc_path, 'rb') as fdoc:
+									st.download_button(label="下载分析过程Word", data=fdoc.read(), file_name=os.path.basename(doc_path), mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document', key=f"download_docx_{session_id}")
+							except Exception:
+								pass
+					else:
+						st.info("未安装 python-docx，暂无法生成Word文档。请安装 python-docx 后重试。")
+				except Exception as e:
+					st.error(f"生成分析过程Word失败：{e}")
 			except Exception as e:
 				st.error(f"汇总导出失败：{e}")
 
@@ -1246,26 +1476,8 @@ def render_enterprise_standard_check_tab(session_id):
 				except Exception as e:
 					st.error(f"清空失败: {e}")
 
-		# File lists in tabs with default selection by phase (Streamlit 1.50+)
-		final_dir_for_tabs = os.path.join(enterprise_out_root, 'final_results')
-		_has_results = False
-		try:
-			if os.path.isdir(final_dir_for_tabs):
-				for _f in os.listdir(final_dir_for_tabs):
-					if os.path.isfile(os.path.join(final_dir_for_tabs, _f)):
-						_has_results = True
-						break
-		except Exception:
-			_has_results = False
-		_recent_hint = st.session_state.get(f"enterprise_default_tab_{session_id}")
-		_default_tab = _recent_hint or ("分析结果" if _has_results else "企业标准文件")
-		tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"], default=_default_tab)
-		# One-shot hint: clear after applying so later phases can switch to 分析结果
-		if _recent_hint:
-			try:
-				del st.session_state[f"enterprise_default_tab_{session_id}"]
-			except Exception:
-				pass
+		# File lists in tabs (fixed order)
+		tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"])
 		with tab_std:
 			std_files = get_file_list(standards_dir)
 			if std_files:
