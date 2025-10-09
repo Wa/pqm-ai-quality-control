@@ -10,12 +10,14 @@ from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
 from config import CONFIG
 from ollama import Client as OllamaClient
 from bisheng_client import (
-	call_workflow_invoke,
-	split_to_chunks,
-	stop_workflow,
-	find_knowledge_id_by_name,
-	create_knowledge,
-	kb_sync_folder,
+    call_workflow_invoke,
+    call_flow_process,
+    parse_flow_answer,
+    split_to_chunks,
+    stop_workflow,
+    find_knowledge_id_by_name,
+    create_knowledge,
+    kb_sync_folder,
 )
 
 
@@ -23,19 +25,26 @@ from bisheng_client import (
 # --- Bisheng fixed settings (edit here if endpoints or workflow change) ---
 # Base URL of Bisheng server
 BISHENG_BASE_URL = "http://10.31.60.11:3001"
-# Invoke and Stop API paths
+# Invoke and Stop API paths (workflow kept for other tabs; Flow uses /api/v1/process)
 BISHENG_INVOKE_PATH = "/api/v2/workflow/invoke"
 BISHENG_STOP_PATH = "/api/v2/workflow/stop"
 # Default workflow id and API key (if your server requires one)
 BISHENG_WORKFLOW_ID = "31208af992c94e9fb56b759ebff2f242"
+# Flow settings: set to your Flow id and node ids per exported JSON
+BISHENG_FLOW_ID = "0bbd56f359454b4ea67ca85f4460e969"  # 知识库问答【增强版】-1dae2
+FLOW_INPUT_NODE_ID = "RetrievalQA-f0f31"
+FLOW_MILVUS_NODE_ID = "Milvus-cyR5W"
+FLOW_ES_NODE_ID = "ElasticKeywordsSearch-1c80e"
 BISHENG_API_KEY = ""
 # Chunking and request timeout
 BISHENG_MAX_WORDS = 2000
 BISHENG_TIMEOUT_S = 90
 
-# Knowledge base settings for enterprise standards
-KB_NAME = "enterprise_standard_check"
-KB_MODEL_ID = 7  # from existing 'empty' KB on your instance
+# Knowledge base settings
+# Model ID used when creating a new KB; keep consistent with server defaults
+KB_MODEL_ID = 7
+# Short slug for this tab; used to synthesize per-user KB names
+TAB_SLUG = "enterprise"
 
 
 def _list_pdfs(folder: str):
@@ -697,13 +706,13 @@ def render_enterprise_standard_check_tab(session_id):
 			exam_txt_dir = st.session_state.get(f"enterprise_examined_txt_dir_{session_id}") or examined_txt_dir
 
 			# Upload standards once (optional)
-			# std_urls = []  # deprecated: we now sync to knowledge base
 			if std_txt_files:
 				with st.status("Sync standards to KB...", expanded=False) as status:
 					try:
-						kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, KB_NAME)
+						kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+						kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
 						if not kid:
-							kid = create_knowledge(BISHENG_BASE_URL, BISHENG_API_KEY or None, KB_NAME, model=str(KB_MODEL_ID))
+							kid = create_knowledge(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn, model=str(KB_MODEL_ID))
 						if kid:
 							res = kb_sync_folder(
 								base_url=BISHENG_BASE_URL,
@@ -772,77 +781,30 @@ def render_enterprise_standard_check_tab(session_id):
 							with st.chat_message("assistant"):
 								response_placeholder = st.empty()
 								try:
-									gen = call_workflow_invoke(
+									# Determine per-user KB name and call Flow with tweaks for per-run KB binding
+									kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+									kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
+									res = call_flow_process(
 										base_url=BISHENG_BASE_URL,
-										invoke_path=BISHENG_INVOKE_PATH,
-										workflow_id=BISHENG_WORKFLOW_ID,
-										user_question=prompt_text,
+										flow_id=BISHENG_FLOW_ID,
+										question=prompt_text,
+										kb_id=kid,
+										input_node_id=FLOW_INPUT_NODE_ID,
 										api_key=BISHENG_API_KEY or None,
-										timeout_s=int(BISHENG_TIMEOUT_S),
 										session_id=bisheng_session_id,
-									)
-									chunk_text = ""
-									new_sid = None
-									for partial, sid in gen:
-										chunk_text = partial
-										if sid and not new_sid:
-											new_sid = sid
-										response_placeholder.write(chunk_text)
-										if new_sid:
-											bisheng_session_id = new_sid
-											st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
-									full_out_text += ("\n\n" if full_out_text else "") + (chunk_text or "")
-								except (requests.Timeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout):
-									# Retry once with extended timeout
-									try:
-										gen = call_workflow_invoke(
-											base_url=BISHENG_BASE_URL,
-											invoke_path=BISHENG_INVOKE_PATH,
-											workflow_id=BISHENG_WORKFLOW_ID,
-											user_question=prompt_text,
-											api_key=BISHENG_API_KEY or None,
-											timeout_s=max(int(BISHENG_TIMEOUT_S) * 2, int(BISHENG_TIMEOUT_S) + 90),
-											session_id=bisheng_session_id,
+										history_count=10,
+										extra_tweaks=None,
+										milvus_node_id=FLOW_MILVUS_NODE_ID,
+										es_node_id=FLOW_ES_NODE_ID,
 										)
-										chunk_text = ""
-										new_sid = None
-										for partial, sid in gen:
-											chunk_text = partial
-											if sid and not new_sid:
-												new_sid = sid
-											response_placeholder.write(chunk_text)
-											if new_sid:
-												bisheng_session_id = new_sid
-												st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
-										full_out_text += ("\n\n" if full_out_text else "") + (chunk_text or "")
-									except requests.HTTPError as e:
-										try:
-											err = e.response.json()
-											response_placeholder.error(json.dumps(err, ensure_ascii=False))
-										except Exception:
-											response_placeholder.error(str(e))
-									except Exception:
-										# Connectivity probe
-										try:
-											ping_payload = {
-												"workflow_id": (BISHENG_WORKFLOW_ID or "").strip() or "test",
-												"inputs": {"user_question": "ping"},
-											}
-											headers = {"Content-Type": "application/json"}
-											if (BISHENG_API_KEY or "").strip():
-												headers["Authorization"] = f"Bearer {BISHENG_API_KEY}"
-											requests.post(BISHENG_BASE_URL.rstrip('/') + BISHENG_INVOKE_PATH, headers=headers, data=json.dumps(ping_payload), timeout=10)
-											response_placeholder.error("请求两次超时（已重试）。服务器可达，但未返回流式数据。")
-										except Exception as ping_exc:
-											response_placeholder.error(f"请求两次超时（已重试），且连接测试失败: {ping_exc}")
-									except requests.HTTPError as e:
-										try:
-											err = e.response.json()
-											response_placeholder.error(json.dumps(err, ensure_ascii=False))
-										except Exception:
-											response_placeholder.error(str(e))
-										except Exception as e:
-											response_placeholder.error(f"调用失败：{e}")
+									ans_text, new_sid = parse_flow_answer(res)
+									if new_sid:
+										bisheng_session_id = new_sid
+										st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
+									response_placeholder.write(ans_text or "")
+									full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
+								except Exception as e:
+									response_placeholder.error(f"调用失败：{e}")
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
 				# Persist per-file combined output
 				try:

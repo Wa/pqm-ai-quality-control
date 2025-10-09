@@ -495,6 +495,77 @@ def call_workflow_invoke(
         raise requests.Timeout(f"Invoke timed out twice; connectivity check failed: {ping_exc}") from last_exc
 
 
+def call_flow_process(
+    base_url: str,
+    flow_id: str,
+    question: str,
+    kb_id: Optional[int],
+    input_node_id: str,
+    api_key: Optional[str],
+    session_id: Optional[str] = None,
+    history_count: int = 10,
+    extra_tweaks: Optional[Dict[str, Dict[str, object]]] = None,
+    milvus_node_id: str = "Milvus-cyR5W",
+    es_node_id: str = "ElasticKeywordsSearch-1c80e",
+) -> Dict:
+    """Call Flow /api/v1/process with per-request KB selection via tweaks.
+
+    The Flow should contain Milvus and ElasticKeywordsSearch nodes. We set their
+    collection_id to the given kb_id so both vector and keyword retrievers point
+    to the selected KB. Returns the parsed JSON response (or a dict with 'raw').
+    """
+    url = base_url.rstrip('/') + f"/api/v1/process/{flow_id}"
+    payload: Dict[str, object] = {
+        "inputs": {"query": question, "id": input_node_id},
+        "history_count": history_count,
+    }
+    if session_id:
+        payload["session_id"] = session_id
+    tweaks: Dict[str, Dict[str, object]] = {}
+    if extra_tweaks:
+        tweaks.update(extra_tweaks)
+    if kb_id is not None:
+        milvus_tw = tweaks.get(milvus_node_id, {}).copy()
+        es_tw = tweaks.get(es_node_id, {}).copy()
+        milvus_tw["collection_id"] = str(kb_id)
+        es_tw["collection_id"] = str(kb_id)
+        tweaks[milvus_node_id] = milvus_tw
+        tweaks[es_node_id] = es_tw
+    if tweaks:
+        payload["tweaks"] = tweaks
+
+    try:
+        resp = _Http.session.post(url, headers=_headers(api_key), data=json.dumps(payload), timeout=60)
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except Exception:
+            return {"raw": resp.text}
+    except Exception as exc:
+        # Surface HTTP errors to caller; wrap others
+        try:
+            raise
+        except Exception:
+            return {"error": str(exc)}
+
+
+def parse_flow_answer(response: Dict) -> Tuple[str, Optional[str]]:
+    """Extract human-readable answer text and session_id from Flow response."""
+    data = response.get("data") if isinstance(response, dict) else None
+    container = data or response or {}
+    result = container.get("result") if isinstance(container, dict) else None
+    answer_val = None
+    if isinstance(result, dict):
+        answer_val = result.get("answer") or result.get("result")
+    if answer_val is None and isinstance(container, dict):
+        answer_val = container.get("answer") or container.get("result")
+    answer = _coerce_to_text(answer_val or "")
+    sess = None
+    if isinstance(container, dict):
+        sess = container.get("session_id")
+    return answer, sess
+
+
 def split_to_chunks(text: str, max_units: int) -> List[str]:
     def measure_units(s: str) -> int:
         cjk = len(re.findall(r"[\u4E00-\u9FFF]", s))
