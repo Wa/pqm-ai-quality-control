@@ -47,6 +47,55 @@ KB_MODEL_ID = 7
 TAB_SLUG = "enterprise"
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rudimentary token estimate: Chinese chars + latin-word count.
+
+    Good enough for correlation studies without server-side tokenizers.
+    """
+    try:
+        cjk = len(re.findall(r"[\u4E00-\u9FFF]", text or ""))
+        latin_words = len(re.findall(r"[A-Za-z0-9_]+", text or ""))
+        return cjk + latin_words
+    except Exception:
+        return max(1, len(text or "") // 2)
+
+
+def _get_metrics_path(base_out_dir: str, session_id: str) -> str:
+	# 每次运行生成一次时间戳文件名并缓存在 session_state
+	metrics_dir = os.path.join(base_out_dir, "metrics")
+	os.makedirs(metrics_dir, exist_ok=True)
+	key = f"metrics_file_{session_id}"
+	fname = st.session_state.get(key)
+	if not fname:
+		from datetime import datetime as _dt
+		ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+		fname = f"llm_calls_{ts}.csv"
+		st.session_state[key] = fname
+	return os.path.join(metrics_dir, fname)
+
+def _log_llm_metrics(base_out_dir: str, session_id: str, row: dict):
+	try:
+		import csv
+		path = _get_metrics_path(base_out_dir, session_id)
+		exists = os.path.exists(path)
+		headers = [
+			"ts","engine","model","session_id","file","part","phase",
+			"prompt_chars","prompt_tokens","output_chars","output_tokens",
+			"duration_ms","success","error"
+		]
+		with open(path, 'a', encoding='utf-8-sig', newline='') as f:
+			w = csv.writer(f)
+			if not exists:
+				w.writerow(headers)
+			w.writerow([
+				row.get("ts"), row.get("engine"), row.get("model"), row.get("session_id"),
+				row.get("file"), row.get("part"), row.get("phase"),
+				row.get("prompt_chars"), row.get("prompt_tokens"), row.get("output_chars"),
+				row.get("output_tokens"), row.get("duration_ms"), row.get("success"), row.get("error")
+			])
+	except Exception:
+		pass
+
 def _list_pdfs(folder: str):
 	"""Return absolute paths for all PDF files in a folder (non-recursive)."""
 	try:
@@ -736,6 +785,31 @@ def render_enterprise_standard_check_tab(session_id):
 			bisheng_session_id = st.session_state.get(f"bisheng_session_{session_id}")
 			initial_dir = os.path.join(enterprise_out, 'initial_results')
 			os.makedirs(initial_dir, exist_ok=True)
+			# 预热步骤：在并发开始前，串行对 Bisheng Flow 发起一次极短请求，促使检索/LLM 初始化与缓存
+			# 说明：首次请求常见的冷启动（模型加载、连接池、检索索引唤醒）会导致首批并发请求失败率上升；
+			# 通过一次轻量的预热，可以显著降低“第一批全挂”的概率。返回内容无需使用。
+			try:
+				if not st.session_state.get(f"enterprise_warmup_done_{session_id}"):
+					warmup_prompt = "预热：请简短回复 'gotcha' 即可。"
+					_ = call_flow_process(
+						base_url=BISHENG_BASE_URL,
+						flow_id=BISHENG_FLOW_ID,
+						question=warmup_prompt,
+						kb_id=None,
+						input_node_id=FLOW_INPUT_NODE_ID,
+						api_key=BISHENG_API_KEY or None,
+						session_id=None,
+						history_count=0,
+						extra_tweaks={"CombineDocsChain-520ca": {"token_max": 2000}},
+						milvus_node_id=FLOW_MILVUS_NODE_ID,
+						es_node_id=FLOW_ES_NODE_ID,
+						timeout_s=60,
+						max_retries=0,
+						# clear_cache=True,
+					)
+					st.session_state[f"enterprise_warmup_done_{session_id}"] = True
+			except Exception:
+				pass
 			for idx_file, name in enumerate(exam_txt_files, start=1):
 				src_path = os.path.join(exam_txt_dir, name)
 				st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(exam_txt_files)}个：{name}**")
@@ -784,6 +858,7 @@ def render_enterprise_standard_check_tab(session_id):
 									# Determine per-user KB name and call Flow with tweaks for per-run KB binding
 									kb_name_dyn = f"{session_id}_{TAB_SLUG}"
 									kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
+									start_ts = time.time()
 									res = call_flow_process(
 										base_url=BISHENG_BASE_URL,
 										flow_id=BISHENG_FLOW_ID,
@@ -792,12 +867,40 @@ def render_enterprise_standard_check_tab(session_id):
 										input_node_id=FLOW_INPUT_NODE_ID,
 										api_key=BISHENG_API_KEY or None,
 										session_id=bisheng_session_id,
-										history_count=10,
+										history_count=0,
 										extra_tweaks=None,
 										milvus_node_id=FLOW_MILVUS_NODE_ID,
 										es_node_id=FLOW_ES_NODE_ID,
+										timeout_s=180,        # 新增
+										max_retries=2,        # 新增
+										# clear_cache=True,
 										)
 									ans_text, new_sid = parse_flow_answer(res)
+									dur_ms = int((time.time() - start_ts) * 1000)
+									try:
+										from datetime import datetime as _dt
+										_log_llm_metrics(
+											enterprise_out,
+											session_id,
+											{
+												"ts": _dt.now().isoformat(timespec="seconds"),
+												"engine": "bisheng",
+												"model": "qwen3",
+												"session_id": bisheng_session_id or "",
+												"file": name,
+												"part": i,
+												"phase": "compare",
+												"prompt_chars": len(prompt_text or ""),
+												"prompt_tokens": _estimate_tokens(prompt_text or ""),
+												"output_chars": len(ans_text or ""),
+												"output_tokens": _estimate_tokens(ans_text or ""),
+												"duration_ms": dur_ms,
+												"success": 1 if (ans_text or "").strip() else 0,
+												"error": res.get("error") if isinstance(res, dict) else "",
+											},
+										)
+									except Exception:
+										pass
 									if new_sid:
 										bisheng_session_id = new_sid
 										st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
@@ -848,6 +951,9 @@ def render_enterprise_standard_check_tab(session_id):
 						instr = "".join(prompt_lines)
 						# Split content by every 20 occurrences of "<think>" markers
 						text = full_out_text or ""
+						# 更稳健的切分：同时限制每段最多包含的 <think> 数量与最大字符数，避免单段过大
+						max_thinks_per_part = 20
+						max_chars_per_part = 8000
 						think_indices = []
 						needle = "<think>"
 						start = 0
@@ -858,13 +964,14 @@ def render_enterprise_standard_check_tab(session_id):
 							think_indices.append(pos)
 							start = pos + len(needle)
 						boundaries = []
-						if think_indices:
-							for i, _ in enumerate(think_indices, start=1):
-								if i % 20 == 0:
-									# next part starts at next <think>, if any
-									next_pos = think_indices[i] if i < len(think_indices) else None
-									if next_pos is not None:
-										boundaries.append(next_pos)
+						prev = 0
+						count_since_prev = 0
+						for pos in think_indices:
+							count_since_prev += 1
+							if count_since_prev >= max_thinks_per_part or (pos - prev) >= max_chars_per_part:
+								boundaries.append(pos)
+								prev = pos
+								count_since_prev = 0
 						parts = []
 						prev = 0
 						for b in boundaries:
@@ -933,22 +1040,53 @@ def render_enterprise_standard_check_tab(session_id):
 									with st.chat_message("assistant"):
 										ph_resp2 = st.empty()
 										response_text = ""
-										for chunk in ollama_client.chat(
-											model=model,
-											messages=[{"role": "user", "content": prompt_text_all}],
-											stream=True,
-											options={
-												"temperature": temperature,
-												"top_p": top_p,
-												"top_k": top_k,
-												"repeat_penalty": repeat_penalty,
-												"num_ctx": num_ctx,
-												"num_thread": num_thread
-											}
-										):
-											new_text = chunk['message']['content']
-											response_text += new_text
-											ph_resp2.write(response_text)
+										start_ts = time.time()
+										last_stats = None
+										error_msg = ""
+										chunks_seen = 0
+										try:
+											for chunk in ollama_client.chat(
+												model=model,
+												messages=[{"role": "user", "content": prompt_text_all}],
+												stream=True,
+												options={ "temperature": temperature, "top_p": top_p, "top_k": top_k,
+												          "repeat_penalty": repeat_penalty, "num_ctx": num_ctx, "num_thread": num_thread }
+											):
+												chunks_seen += 1
+												new_text = chunk.get('message', {}).get('content', '')
+												response_text += new_text
+												ph_resp2.write(response_text)
+												# 某些引擎会在最后一个分块里返回统计信息
+												last_stats = chunk.get('eval_info') or chunk.get('stats') or last_stats
+										except Exception as e:
+											error_msg = str(e)[:300]
+										finally:
+											from datetime import datetime as _dt
+											dur_ms = int((time.time() - start_ts) * 1000)
+											prompt_tokens = (last_stats or {}).get('prompt_eval_count')
+											output_tokens = (last_stats or {}).get('eval_count')
+											if not error_msg and chunks_seen == 0:
+												error_msg = "no_stream_chunks"
+											_log_llm_metrics(
+												enterprise_out, session_id,
+												{
+													"ts": _dt.now().isoformat(timespec="seconds"),
+													"engine": "ollama",
+													"model": model,
+													"session_id": "",
+													"file": name_no_ext,
+													"part": part_idx,
+													"phase": "summarize",
+													"prompt_chars": len(prompt_text_all or ""),
+													"prompt_tokens": prompt_tokens if isinstance(prompt_tokens, int) else _estimate_tokens(prompt_text_all or ""),
+													"output_chars": len(response_text or ""),
+													"output_tokens": output_tokens if isinstance(output_tokens, int) else _estimate_tokens(response_text or ""),
+													"duration_ms": dur_ms,
+													"success": 1 if (response_text or "").strip() else 0,
+													"error": "error_msg"
+												}
+											)
+
 										# Save LLM response to json_<original>_ptN.txt
 										try:
 											# Map prompted_response_X_ptN.txt -> json_X_ptN.txt

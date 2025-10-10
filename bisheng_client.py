@@ -466,7 +466,9 @@ def call_workflow_invoke(
                     yield ("".join(buf), new_session_id)
             if not saw_input:
                 break
-        yield ("".join(buf), new_session_id)
+        if not buf:
+            yield ("".join(buf), new_session_id)
+
 
     last_exc: Optional[Exception] = None
     attempts = [int(timeout_s), max(int(timeout_s) * 2, int(timeout_s) + 90)]
@@ -507,13 +509,10 @@ def call_flow_process(
     extra_tweaks: Optional[Dict[str, Dict[str, object]]] = None,
     milvus_node_id: str = "Milvus-cyR5W",
     es_node_id: str = "ElasticKeywordsSearch-1c80e",
+    timeout_s: int = 120,                # 新增：可配置超时
+    max_retries: int = 2,                # 新增：超时重试次数
+    clear_cache: bool = False,           # 新增：禁用历史缓存
 ) -> Dict:
-    """Call Flow /api/v1/process with per-request KB selection via tweaks.
-
-    The Flow should contain Milvus and ElasticKeywordsSearch nodes. We set their
-    collection_id to the given kb_id so both vector and keyword retrievers point
-    to the selected KB. Returns the parsed JSON response (or a dict with 'raw').
-    """
     url = base_url.rstrip('/') + f"/api/v1/process/{flow_id}"
     payload: Dict[str, object] = {
         "inputs": {"query": question, "id": input_node_id},
@@ -521,6 +520,8 @@ def call_flow_process(
     }
     if session_id:
         payload["session_id"] = session_id
+    if clear_cache:
+        payload["clear_cache"] = True
     tweaks: Dict[str, Dict[str, object]] = {}
     if extra_tweaks:
         tweaks.update(extra_tweaks)
@@ -534,19 +535,24 @@ def call_flow_process(
     if tweaks:
         payload["tweaks"] = tweaks
 
-    try:
-        resp = _Http.session.post(url, headers=_headers(api_key), data=json.dumps(payload), timeout=60)
-        resp.raise_for_status()
+    import time as _t, requests
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
         try:
-            return resp.json()
-        except Exception:
-            return {"raw": resp.text}
-    except Exception as exc:
-        # Surface HTTP errors to caller; wrap others
-        try:
-            raise
-        except Exception:
-            return {"error": str(exc)}
+            resp = _Http.session.post(url, headers=_headers(api_key), data=json.dumps(payload), timeout=timeout_s)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception:
+                return {"raw": resp.text}
+        except (requests.Timeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+            last_exc = e
+            if attempt < max_retries:
+                _t.sleep(1.5 * (attempt + 1))  # 退避
+                continue
+            return {"error": f"timeout after {attempt+1} tries: {e}"}
+        except Exception as e:
+            return {"error": str(e)}
 
 
 def parse_flow_answer(response: Dict) -> Tuple[str, Optional[str]]:
