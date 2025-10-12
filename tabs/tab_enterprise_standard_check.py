@@ -591,8 +591,177 @@ def render_enterprise_standard_check_tab(session_id):
 	os.makedirs(standards_txt_dir, exist_ok=True)
 	os.makedirs(examined_txt_dir, exist_ok=True)
 
-	# Layout similar to 文件齐套性检查: left main content, right file manager
+	# Layout: right column for info, left for main content
 	col_main, col_info = st.columns([2, 1])
+
+	with col_info:
+		# Right column intentionally limited to file manager and utilities only
+		# File manager utilities (mirroring completeness tab behavior)
+		def get_file_list(folder):
+			if not folder or not os.path.exists(folder):
+				return []
+			files = []
+			for f in os.listdir(folder):
+				file_path = os.path.join(folder, f)
+				if os.path.isfile(file_path):
+					stat = os.stat(file_path)
+					files.append({
+						'name': f,
+						'size': stat.st_size,
+						'modified': stat.st_mtime,
+						'path': file_path
+					})
+			# Sort by name then modified time for stability
+			return sorted(files, key=lambda x: (x['name'].lower(), x['modified']))
+
+		def format_file_size(size_bytes):
+			if size_bytes == 0:
+				return "0 B"
+			size_names = ["B", "KB", "MB", "GB"]
+			i = 0
+			while size_bytes >= 1024 and i < len(size_names) - 1:
+				size_bytes /= 1024.0
+				i += 1
+			return f"{size_bytes:.1f} {size_names[i]}"
+
+		def format_timestamp(timestamp):
+			from datetime import datetime
+			return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
+
+		def truncate_filename(filename, max_length=40):
+			if len(filename) <= max_length:
+				return filename
+			name, ext = os.path.splitext(filename)
+			available_length = max_length - len(ext) - 3
+			if available_length <= 0:
+				return filename[:max_length-3] + "..."
+			truncated_name = name[:available_length] + "..."
+			return truncated_name + ext
+
+		# Clear buttons
+		col_clear1, col_clear2, col_clear3 = st.columns(3)
+		with col_clear1:
+			if st.button("🗑️ 清空企业标准文件", key=f"clear_enterprise_std_{session_id}"):
+				try:
+					for file in os.listdir(standards_dir):
+						file_path = os.path.join(standards_dir, file)
+						if os.path.isfile(file_path):
+							os.remove(file_path)
+					st.success("已清空企业标准文件")
+				except Exception as e:
+					st.error(f"清空失败: {e}")
+		with col_clear2:
+			if st.button("🗑️ 清空待检查文件", key=f"clear_enterprise_exam_{session_id}"):
+				try:
+					for file in os.listdir(examined_dir):
+						file_path = os.path.join(examined_dir, file)
+						if os.path.isfile(file_path):
+							os.remove(file_path)
+					st.success("已清空待检查文件")
+				except Exception as e:
+					st.error(f"清空失败: {e}")
+		with col_clear3:
+			if st.button("🗑️ 清空分析结果", key=f"clear_enterprise_results_{session_id}"):
+				try:
+					final_dir_path = os.path.join(enterprise_out_root, 'final_results')
+					deleted_count = 0
+					if os.path.isdir(final_dir_path):
+						for fname in os.listdir(final_dir_path):
+							fpath = os.path.join(final_dir_path, fname)
+							if os.path.isfile(fpath):
+								os.remove(fpath)
+								deleted_count += 1
+					st.success(f"已清空分析结果（{deleted_count} 个文件）")
+				except Exception as e:
+					st.error(f"清空失败: {e}")
+
+		# File lists in tabs (fixed order)
+		tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"])
+		with tab_std:
+			std_files = get_file_list(standards_dir)
+			if std_files:
+				for file_info in std_files:
+					display_name = truncate_filename(file_info['name'])
+					with st.expander(f"📄 {display_name}", expanded=False):
+						col_i, col_a = st.columns([3, 1])
+						with col_i:
+							st.write(f"**文件名:** {file_info['name']}")
+							st.write(f"**大小:** {format_file_size(file_info['size'])}")
+							st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+						with col_a:
+							delete_key = f"del_std_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+							if st.button("🗑️ 删除", key=delete_key):
+								try:
+									os.remove(file_info['path'])
+									st.success(f"已删除: {file_info['name']}")
+								except Exception as e:
+									st.error(f"删除失败: {e}")
+			else:
+				st.write("（未上传）")
+
+		with tab_exam:
+			exam_files = get_file_list(examined_dir)
+			if exam_files:
+				for file_info in exam_files:
+					display_name = truncate_filename(file_info['name'])
+					with st.expander(f"📄 {display_name}", expanded=False):
+						col_i, col_a = st.columns([3, 1])
+						with col_i:
+							st.write(f"**文件名:** {file_info['name']}")
+							st.write(f"**大小:** {format_file_size(file_info['size'])}")
+							st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+						with col_a:
+							delete_key = f"del_exam_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+							if st.button("🗑️ 删除", key=delete_key):
+								try:
+									os.remove(file_info['path'])
+									st.success(f"已删除: {file_info['name']}")
+								except Exception as e:
+									st.error(f"删除失败: {e}")
+			else:
+				st.write("（未上传）")
+
+		with tab_results:
+			# List files under generated/<session>/enterprise_standard_check/final_results
+			final_dir = os.path.join(enterprise_out_root, 'final_results')
+			if os.path.isdir(final_dir):
+				final_files = get_file_list(final_dir)
+				if final_files:
+					for file_info in final_files:
+						display_name = truncate_filename(file_info['name'])
+						with st.expander(f"📄 {display_name}", expanded=False):
+							col_i, col_a = st.columns([4, 1])
+							with col_i:
+								st.write(f"**文件名:** {file_info['name']}")
+								st.write(f"**大小:** {format_file_size(file_info['size'])}")
+								st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+							with col_a:
+								try:
+									with open(file_info['path'], 'rb') as _fbin:
+										_data = _fbin.read()
+									st.download_button(
+										label="⬇️ 下载",
+										data=_data,
+										file_name=file_info['name'],
+										mime='application/octet-stream',
+										key=f"dl_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+									)
+								except Exception as e:
+									st.error(f"下载失败: {e}")
+								delete_key = f"del_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+								if st.button("🗑️ 删除", key=delete_key):
+									try:
+										os.remove(file_info['path'])
+										st.success(f"已删除: {file_info['name']}")
+									except Exception as e:
+										st.error(f"删除失败: {e}")
+				else:
+					st.write("（暂无分析结果）")
+			else:
+				st.write("（暂无分析结果目录）")
+
+
+
 
 	with col_main:
 		# Two uploaders side by side
@@ -1494,171 +1663,3 @@ def render_enterprise_standard_check_tab(session_id):
 				pass
 			
 		# Rendering of Bisheng streaming moved out of button column below
-
-	with col_info:
-		# Right column intentionally limited to file manager and utilities only
-		# File manager utilities (mirroring completeness tab behavior)
-		def get_file_list(folder):
-			if not folder or not os.path.exists(folder):
-				return []
-			files = []
-			for f in os.listdir(folder):
-				file_path = os.path.join(folder, f)
-				if os.path.isfile(file_path):
-					stat = os.stat(file_path)
-					files.append({
-						'name': f,
-						'size': stat.st_size,
-						'modified': stat.st_mtime,
-						'path': file_path
-					})
-			# Sort by name then modified time for stability
-			return sorted(files, key=lambda x: (x['name'].lower(), x['modified']))
-
-		def format_file_size(size_bytes):
-			if size_bytes == 0:
-				return "0 B"
-			size_names = ["B", "KB", "MB", "GB"]
-			i = 0
-			while size_bytes >= 1024 and i < len(size_names) - 1:
-				size_bytes /= 1024.0
-				i += 1
-			return f"{size_bytes:.1f} {size_names[i]}"
-
-		def format_timestamp(timestamp):
-			from datetime import datetime
-			return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
-
-		def truncate_filename(filename, max_length=40):
-			if len(filename) <= max_length:
-				return filename
-			name, ext = os.path.splitext(filename)
-			available_length = max_length - len(ext) - 3
-			if available_length <= 0:
-				return filename[:max_length-3] + "..."
-			truncated_name = name[:available_length] + "..."
-			return truncated_name + ext
-
-		# Clear buttons
-		col_clear1, col_clear2, col_clear3 = st.columns(3)
-		with col_clear1:
-			if st.button("🗑️ 清空企业标准文件", key=f"clear_enterprise_std_{session_id}"):
-				try:
-					for file in os.listdir(standards_dir):
-						file_path = os.path.join(standards_dir, file)
-						if os.path.isfile(file_path):
-							os.remove(file_path)
-					st.success("已清空企业标准文件")
-				except Exception as e:
-					st.error(f"清空失败: {e}")
-		with col_clear2:
-			if st.button("🗑️ 清空待检查文件", key=f"clear_enterprise_exam_{session_id}"):
-				try:
-					for file in os.listdir(examined_dir):
-						file_path = os.path.join(examined_dir, file)
-						if os.path.isfile(file_path):
-							os.remove(file_path)
-					st.success("已清空待检查文件")
-				except Exception as e:
-					st.error(f"清空失败: {e}")
-		with col_clear3:
-			if st.button("🗑️ 清空分析结果", key=f"clear_enterprise_results_{session_id}"):
-				try:
-					final_dir_path = os.path.join(enterprise_out_root, 'final_results')
-					deleted_count = 0
-					if os.path.isdir(final_dir_path):
-						for fname in os.listdir(final_dir_path):
-							fpath = os.path.join(final_dir_path, fname)
-							if os.path.isfile(fpath):
-								os.remove(fpath)
-								deleted_count += 1
-					st.success(f"已清空分析结果（{deleted_count} 个文件）")
-				except Exception as e:
-					st.error(f"清空失败: {e}")
-
-		# File lists in tabs (fixed order)
-		tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"])
-		with tab_std:
-			std_files = get_file_list(standards_dir)
-			if std_files:
-				for file_info in std_files:
-					display_name = truncate_filename(file_info['name'])
-					with st.expander(f"📄 {display_name}", expanded=False):
-						col_i, col_a = st.columns([3, 1])
-						with col_i:
-							st.write(f"**文件名:** {file_info['name']}")
-							st.write(f"**大小:** {format_file_size(file_info['size'])}")
-							st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-						with col_a:
-							delete_key = f"del_std_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-							if st.button("🗑️ 删除", key=delete_key):
-								try:
-									os.remove(file_info['path'])
-									st.success(f"已删除: {file_info['name']}")
-								except Exception as e:
-									st.error(f"删除失败: {e}")
-			else:
-				st.write("（未上传）")
-
-		with tab_exam:
-			exam_files = get_file_list(examined_dir)
-			if exam_files:
-				for file_info in exam_files:
-					display_name = truncate_filename(file_info['name'])
-					with st.expander(f"📄 {display_name}", expanded=False):
-						col_i, col_a = st.columns([3, 1])
-						with col_i:
-							st.write(f"**文件名:** {file_info['name']}")
-							st.write(f"**大小:** {format_file_size(file_info['size'])}")
-							st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-						with col_a:
-							delete_key = f"del_exam_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-							if st.button("🗑️ 删除", key=delete_key):
-								try:
-									os.remove(file_info['path'])
-									st.success(f"已删除: {file_info['name']}")
-								except Exception as e:
-									st.error(f"删除失败: {e}")
-			else:
-				st.write("（未上传）")
-
-		with tab_results:
-			# List files under generated/<session>/enterprise_standard_check/final_results
-			final_dir = os.path.join(enterprise_out_root, 'final_results')
-			if os.path.isdir(final_dir):
-				final_files = get_file_list(final_dir)
-				if final_files:
-					for file_info in final_files:
-						display_name = truncate_filename(file_info['name'])
-						with st.expander(f"📄 {display_name}", expanded=False):
-							col_i, col_a = st.columns([4, 1])
-							with col_i:
-								st.write(f"**文件名:** {file_info['name']}")
-								st.write(f"**大小:** {format_file_size(file_info['size'])}")
-								st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-							with col_a:
-								try:
-									with open(file_info['path'], 'rb') as _fbin:
-										_data = _fbin.read()
-									st.download_button(
-										label="⬇️ 下载",
-										data=_data,
-										file_name=file_info['name'],
-										mime='application/octet-stream',
-										key=f"dl_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-									)
-								except Exception as e:
-									st.error(f"下载失败: {e}")
-								delete_key = f"del_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-								if st.button("🗑️ 删除", key=delete_key):
-									try:
-										os.remove(file_info['path'])
-										st.success(f"已删除: {file_info['name']}")
-									except Exception as e:
-										st.error(f"删除失败: {e}")
-				else:
-					st.write("（暂无分析结果）")
-			else:
-				st.write("（暂无分析结果目录）")
-
-
