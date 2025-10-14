@@ -833,6 +833,76 @@ def render_enterprise_standard_check_tab(session_id):
 						if not exam_txt_files:
 							st.warning("未发现待检查的 .txt 文本，跳过企业标准比对。")
 						else:
+							# --- Checkpoint preparation: generate prompts for all chunks and manifest ---
+							try:
+								checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
+								os.makedirs(checkpoint_dir, exist_ok=True)
+								# Build run_id based on current examined_txt files (name|size|mtime)
+								try:
+									import hashlib
+									infos = []
+									for _n in sorted(exam_txt_files, key=lambda x: x.lower()):
+										_pp = os.path.join(examined_txt_dir, _n)
+										try:
+											_st = os.stat(_pp)
+											infos.append(f"{_n}|{_st.st_size}|{int(_st.st_mtime)}")
+										except Exception:
+											infos.append(f"{_n}|0|0")
+									run_id = hashlib.sha1("\n".join(infos).encode('utf-8', errors='ignore')).hexdigest()
+								except Exception:
+									run_id = ""
+								manifest = {"run_id": run_id, "entries": []}
+								# The same prompt prefix used later in streaming phase
+								prompt_prefix = (
+									"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
+									"以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
+									"输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
+									"由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
+								)
+								entry_id = 0
+								for _fname in sorted(exam_txt_files, key=lambda x: x.lower()):
+									_src = os.path.join(examined_txt_dir, _fname)
+									try:
+										with open(_src, 'r', encoding='utf-8') as _f:
+											_doc_text = _f.read()
+									except Exception:
+										_doc_text = ""
+									_chunks = split_to_chunks(_doc_text, int(BISHENG_MAX_WORDS))
+									for _ci, _piece in enumerate(_chunks):
+										entry_id += 1
+										_prompt_text = f"{prompt_prefix}{_piece}"
+										# Use 1-based numbering per chunk within file for filenames, new convention
+										_num = _ci + 1
+										_prompt_name = f"checkpoint_prompt_{_fname}_pt{_num}.txt"
+										_resp_name = f"checkpoint_response_{_fname}_pt{_num}.txt"
+										_prompt_path = os.path.join(checkpoint_dir, _prompt_name)
+										_response_path = os.path.join(checkpoint_dir, _resp_name)
+										try:
+											with open(_prompt_path, 'w', encoding='utf-8') as _pf:
+												_pf.write(_prompt_text)
+										except Exception:
+											pass
+											manifest["entries"].append({
+											"id": entry_id,
+											"file_name": _fname,
+											"chunk_index": _ci,
+											"prompt_file": _prompt_name,
+											"response_file": _resp_name,
+											"status": "not_done"
+										})
+								# Write manifest.json atomically (paths stored as relative filenames for portability)
+								try:
+									import json as _json, tempfile as _tmp, shutil as _sh
+									_manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
+									with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+										_tf.write(_json.dumps(manifest, ensure_ascii=False, indent=2))
+										_tmpname = _tf.name
+									_sh.move(_tmpname, _manifest_path)
+								except Exception:
+									pass
+							except Exception:
+								pass
+
 							st.session_state[f"enterprise_running_{session_id}"] = True
 							st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
 							st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
