@@ -242,11 +242,11 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
 								options={ "temperature": temperature, "top_p": top_p, "top_k": top_k,
 								          "repeat_penalty": repeat_penalty, "num_ctx": num_ctx, "num_thread": num_thread }
 							):
-							chunks_seen += 1
-							new_text = chunk.get('message', {}).get('content', '')
-							response_text += new_text
-							ph_resp2.write(response_text)
-							last_stats = chunk.get('eval_info') or chunk.get('stats') or last_stats
+								chunks_seen += 1
+								new_text = chunk.get('message', {}).get('content', '')
+								response_text += new_text
+								ph_resp2.write(response_text)
+								last_stats = chunk.get('eval_info') or chunk.get('stats') or last_stats
 						except Exception as e:
 							error_msg = str(e)[:300]
 						finally:
@@ -450,7 +450,7 @@ def _aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -
 								return "\n".join(rows)
 							return _re.sub(r"<[^>]+>", " ", txt)
 						except Exception:
-						return txt
+							return txt
 					for para in (ptext or "").splitlines():
 						line = para.strip()
 						if not line:
