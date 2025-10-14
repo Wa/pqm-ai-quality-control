@@ -844,8 +844,8 @@ def render_enterprise_standard_check_tab(session_id):
 						st.error(f"企业标准比对流程异常：{e}")
 					
 		with btn_col_stop:
-			# st.session_state[f"enterprise_running_{session_id}"] = False
 			if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
+				st.session_state[f"enterprise_running_{session_id}"] = False
 				try:
 					# Load current bisheng session id if any
 					bs_key = f"bisheng_session_{session_id}"
@@ -969,7 +969,7 @@ def render_enterprise_standard_check_tab(session_id):
 						api_key=BISHENG_API_KEY or None,
 						session_id=None,
 						history_count=0,
-						extra_tweaks={"CombineDocsChain-520ca": {"token_max": 2000}},
+						extra_tweaks={"CombineDocsChain-520ca": {"token_max": 5000}},
 						milvus_node_id=FLOW_MILVUS_NODE_ID,
 						es_node_id=FLOW_ES_NODE_ID,
 						timeout_s=60,
