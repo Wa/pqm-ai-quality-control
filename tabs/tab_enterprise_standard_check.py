@@ -837,6 +837,25 @@ def render_enterprise_standard_check_tab(session_id):
 							try:
 								checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
 								os.makedirs(checkpoint_dir, exist_ok=True)
+								# If previous manifest exists and all entries are done, clear checkpoint files
+								try:
+									import json as _json
+									_manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
+									if os.path.isfile(_manifest_path):
+										with open(_manifest_path, 'r', encoding='utf-8') as _mf:
+											_prev_manifest = _json.load(_mf) or {}
+										_entries_prev = _prev_manifest.get('entries') or []
+										_all_done = bool(_entries_prev) and all((str(e.get('status')) == 'done') for e in _entries_prev)
+										if _all_done:
+											for _fn in os.listdir(checkpoint_dir):
+												_fp = os.path.join(checkpoint_dir, _fn)
+												try:
+													if os.path.isfile(_fp):
+														os.remove(_fp)
+												except Exception:
+													pass
+								except Exception:
+									pass
 								# Build run_id based on current examined_txt files (name|size|mtime)
 								try:
 									import hashlib
@@ -934,6 +953,29 @@ def render_enterprise_standard_check_tab(session_id):
 						st.success(f"已请求停止，响应：{res}")
 				except Exception as e:
 					st.error(f"停止失败：{e}")
+
+			# Continue 按钮：始终可见。若无可续条目，提示信息；否则切换到运行分支消费 checkpoint。
+			if st.button("继续", key=f"enterprise_continue_button_{session_id}"):
+				if st.session_state.get(f"enterprise_running_{session_id}"):
+					st.info("当前流程正在运行，请先停止再继续。")
+				else:
+					checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
+					manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
+					_has_entries = False
+					try:
+						import json as _json
+						if os.path.isfile(manifest_path):
+							with open(manifest_path, 'r', encoding='utf-8') as _mf:
+								_m = _json.load(_mf) or {}
+								_ents = _m.get('entries') or []
+								_has_entries = len(_ents) > 0
+					except Exception:
+						_has_entries = False
+					if not _has_entries:
+						st.info("未发现跑到一半的项目")
+					else:
+						st.session_state[f"enterprise_running_{session_id}"] = True
+						st.rerun()
 
 		with btn_col2:
 			if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
@@ -1049,105 +1091,248 @@ def render_enterprise_standard_check_tab(session_id):
 					st.session_state[f"enterprise_warmup_done_{session_id}"] = True
 			except Exception:
 				pass
-			for idx_file, name in enumerate(exam_txt_files, start=1):
-				src_path = os.path.join(exam_txt_dir, name)
-				st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(exam_txt_files)}个：{name}**")
+			# If checkpoint manifest exists, consume it; otherwise fall back to original per-file splitting
+			checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
+			manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
+			_use_checkpoint = False
+			_manifest = None
+			try:
+				if os.path.isfile(manifest_path):
+					import json as _json
+					with open(manifest_path, 'r', encoding='utf-8') as _mf:
+						_manifest = _json.load(_mf) or {}
+					_use_checkpoint = isinstance(_manifest.get('entries'), list) and len(_manifest.get('entries') or []) > 0
+			except Exception:
+				_use_checkpoint = False
+
+			if _use_checkpoint:
+				# Build ordered groups by file based on entry id order
 				try:
-					with open(src_path, 'r', encoding='utf-8') as f:
-						doc_text = f.read()
-				except Exception as e:
-					st.error(f"读取失败：{e}")
-					continue
-				if not doc_text.strip():
-					st.info("文件为空，跳过。")
-					continue
-				chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
-				prompt_prefix = (
-					"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-					"以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
-					"输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
-					"由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
-				)
-				full_out_text = ""
-				prompt_texts = []
-				for i, piece in enumerate(chunks, start=1):
-					col_prompt, col_response = st.columns([1, 1])
-					prompt_text = f"{prompt_prefix}{piece}"
-					prompt_texts.append(prompt_text)
-					with col_prompt:
-						st.markdown(f"提示词（第{i}部分，共{len(chunks)}部分）")
-						prompt_container = st.container(height=400)
-						with prompt_container:
-							with st.chat_message("user"):
-								prompt_placeholder = st.empty()
-								words = prompt_text.split()
-								streamed = ""
-								for j in range(0, len(words), 30):
-									chunk_words = words[j:j+30]
-									streamed += " ".join(chunk_words) + " "
-									prompt_placeholder.text(streamed.strip())
-							st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{i}")
-					with col_response:
-						st.markdown(f"AI比对结果（第{i}部分，共{len(chunks)}部分）")
-						response_container = st.container(height=400)
-						with response_container:
-							with st.chat_message("assistant"):
-								response_placeholder = st.empty()
-								try:
-									# Determine per-user KB name and call Flow with tweaks for per-run KB binding
-									kb_name_dyn = f"{session_id}_{TAB_SLUG}"
-									kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
-									start_ts = time.time()
-									res = call_flow_process(
-										base_url=BISHENG_BASE_URL,
-										flow_id=BISHENG_FLOW_ID,
-										question=prompt_text,
-										kb_id=kid,
-										input_node_id=FLOW_INPUT_NODE_ID,
-										api_key=BISHENG_API_KEY or None,
-										session_id=bisheng_session_id,
-										history_count=0,
-										extra_tweaks=None,
-										milvus_node_id=FLOW_MILVUS_NODE_ID,
-										es_node_id=FLOW_ES_NODE_ID,
-										timeout_s=180,        # 新增
-										max_retries=2,        # 新增
-										# clear_cache=True,
-										)
-									ans_text, new_sid = parse_flow_answer(res)
-									dur_ms = int((time.time() - start_ts) * 1000)
+					from collections import OrderedDict as _OD
+					_entries_sorted = sorted((_manifest.get('entries') or []), key=lambda e: int(e.get('id', 0)))
+					_groups = _OD()
+					for _e in _entries_sorted:
+						fname = str(_e.get('file_name', ''))
+						_groups.setdefault(fname, []).append(_e)
+				except Exception:
+					_groups = {}
+				# Iterate each file group in the order they appeared in manifest
+				idx_file = 0
+				for name, _elist in _groups.items():
+					idx_file += 1
+					st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(_groups)}个：{name}**")
+					full_out_text = ""
+					prompt_texts = []
+					_total_parts = len(_elist)
+					# ensure order by chunk_index if present, else by id
+					try:
+						_elist.sort(key=lambda e: (int(e.get('chunk_index', 0)), int(e.get('id', 0))))
+					except Exception:
+						pass
+					for _i, _entry in enumerate(_elist, start=1):
+						col_prompt, col_response = st.columns([1, 1])
+						# Read prompt from checkpoint file
+						_prompt_file = str(_entry.get('prompt_file', ''))
+						_response_file = str(_entry.get('response_file', ''))
+						_prompt_path = os.path.join(checkpoint_dir, _prompt_file)
+						_response_path = os.path.join(checkpoint_dir, _response_file)
+						try:
+							with open(_prompt_path, 'r', encoding='utf-8') as _pf:
+								prompt_text = _pf.read()
+						except Exception:
+							prompt_text = ""
+						prompt_texts.append(prompt_text)
+						with col_prompt:
+							st.markdown(f"提示词（第{_i}部分，共{_total_parts}部分）")
+							prompt_container = st.container(height=400)
+							with prompt_container:
+								with st.chat_message("user"):
+									prompt_placeholder = st.empty()
+									words = (prompt_text or "").split()
+									streamed = ""
+									for j in range(0, len(words), 30):
+										chunk_words = words[j:j+30]
+										streamed += " ".join(chunk_words) + " "
+										prompt_placeholder.text(streamed.strip())
+							st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{_i}")
+						with col_response:
+							st.markdown(f"AI比对结果（第{_i}部分，共{_total_parts}部分）")
+							response_container = st.container(height=400)
+							with response_container:
+								with st.chat_message("assistant"):
+									response_placeholder = st.empty()
 									try:
-										from datetime import datetime as _dt
-										_log_llm_metrics(
-											enterprise_out,
-											session_id,
-											{
-												"ts": _dt.now().isoformat(timespec="seconds"),
-												"engine": "bisheng",
-												"model": "qwen3",
-												"session_id": bisheng_session_id or "",
-												"file": name,
-												"part": i,
-												"phase": "compare",
-												"prompt_chars": len(prompt_text or ""),
-												"prompt_tokens": _estimate_tokens(prompt_text or ""),
-												"output_chars": len(ans_text or ""),
-												"output_tokens": _estimate_tokens(ans_text or ""),
-												"duration_ms": dur_ms,
-												"success": 1 if (ans_text or "").strip() else 0,
-												"error": res.get("error") if isinstance(res, dict) else "",
-											},
+										start_ts = time.time()
+										kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+										kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
+										res = call_flow_process(
+											base_url=BISHENG_BASE_URL,
+											flow_id=BISHENG_FLOW_ID,
+											question=prompt_text,
+											kb_id=kid,
+											input_node_id=FLOW_INPUT_NODE_ID,
+											api_key=BISHENG_API_KEY or None,
+											session_id=bisheng_session_id,
+											history_count=0,
+											extra_tweaks=None,
+											milvus_node_id=FLOW_MILVUS_NODE_ID,
+											es_node_id=FLOW_ES_NODE_ID,
+											timeout_s=180,        # 新增
+											max_retries=2,        # 新增
 										)
-									except Exception:
-										pass
-									if new_sid:
-										bisheng_session_id = new_sid
-										st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
-									response_placeholder.write(ans_text or "")
-									full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
-								except Exception as e:
-									response_placeholder.error(f"调用失败：{e}")
-							st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
+										ans_text, new_sid = parse_flow_answer(res)
+										dur_ms = int((time.time() - start_ts) * 1000)
+										if new_sid:
+											bisheng_session_id = new_sid
+											st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
+										response_placeholder.write(ans_text or "")
+										full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
+										# Save response to checkpoint response file
+										try:
+											with open(_response_path, 'w', encoding='utf-8') as _rf:
+												_rf.write(ans_text or "")
+										except Exception:
+											pass
+										# Update manifest entry status to done
+										try:
+											import json as _json, tempfile as _tmp, shutil as _sh
+											for __e in _manifest.get('entries', []):
+												if int(__e.get('id', 0)) == int(_entry.get('id', 0)):
+													__e['status'] = 'done'
+													break
+											with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+												_tf.write(_json.dumps(_manifest, ensure_ascii=False, indent=2))
+												_tmpname = _tf.name
+											_sh.move(_tmpname, manifest_path)
+										except Exception:
+											pass
+									except Exception as e:
+										response_placeholder.error(f"调用失败：{e}")
+								st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{_i}")
+						# Persist per-file combined output and prompts (follow existing behavior)
+
+						name_no_ext = os.path.splitext(name)[0]
+						# Write combined prompts as prompt_{name}.txt
+						try:
+							total_parts = len(prompt_texts)
+							prompt_out_lines = []
+							for idx_p, ptxt in enumerate(prompt_texts, start=1):
+								prompt_out_lines.append(f"提示词（第{idx_p}部分，共{total_parts}部分）：")
+								prompt_out_lines.append(ptxt)
+							prompt_out_text = "\n".join(prompt_out_lines)
+							prompt_out_path = os.path.join(initial_dir, f"prompt_{name_no_ext}.txt")
+							with open(prompt_out_path, 'w', encoding='utf-8') as pf:
+								pf.write(prompt_out_text)
+						except Exception:
+							pass
+						# Write combined response
+						try:
+							out_path = os.path.join(initial_dir, f"response_{name_no_ext}.txt")
+							with open(out_path, 'w', encoding='utf-8') as outf:
+								outf.write(full_out_text)
+						except Exception:
+							pass
+				# End checkpoint consumption branch
+			else:
+				for idx_file, name in enumerate(exam_txt_files, start=1):
+					src_path = os.path.join(exam_txt_dir, name)
+					st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(exam_txt_files)}个：{name}**")
+					try:
+						with open(src_path, 'r', encoding='utf-8') as f:
+							doc_text = f.read()
+					except Exception as e:
+						st.error(f"读取失败：{e}")
+						continue
+					if not doc_text.strip():
+						st.info("文件为空，跳过。")
+						continue
+					chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
+					prompt_prefix = (
+						"请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
+						"以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
+						"输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
+						"由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
+					)
+					full_out_text = ""
+					prompt_texts = []
+					for i, piece in enumerate(chunks, start=1):
+						col_prompt, col_response = st.columns([1, 1])
+						prompt_text = f"{prompt_prefix}{piece}"
+						prompt_texts.append(prompt_text)
+						with col_prompt:
+							st.markdown(f"提示词（第{i}部分，共{len(chunks)}部分）")
+							prompt_container = st.container(height=400)
+							with prompt_container:
+								with st.chat_message("user"):
+									prompt_placeholder = st.empty()
+									words = prompt_text.split()
+									streamed = ""
+									for j in range(0, len(words), 30):
+										chunk_words = words[j:j+30]
+										streamed += " ".join(chunk_words) + " "
+										prompt_placeholder.text(streamed.strip())
+								st.chat_input(placeholder="", disabled=True, key=f"enterprise_prompt_{session_id}_{idx_file}_{i}")
+						with col_response:
+							st.markdown(f"AI比对结果（第{i}部分，共{len(chunks)}部分）")
+							response_container = st.container(height=400)
+							with response_container:
+								with st.chat_message("assistant"):
+									response_placeholder = st.empty()
+									try:
+										# Determine per-user KB name and call Flow with tweaks for per-run KB binding
+										kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+										kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
+										start_ts = time.time()
+										res = call_flow_process(
+											base_url=BISHENG_BASE_URL,
+											flow_id=BISHENG_FLOW_ID,
+											question=prompt_text,
+											kb_id=kid,
+											input_node_id=FLOW_INPUT_NODE_ID,
+											api_key=BISHENG_API_KEY or None,
+											session_id=bisheng_session_id,
+											history_count=0,
+											extra_tweaks=None,
+											milvus_node_id=FLOW_MILVUS_NODE_ID,
+											es_node_id=FLOW_ES_NODE_ID,
+											timeout_s=180,        # 新增
+											max_retries=2,        # 新增
+											# clear_cache=True,
+											)
+										ans_text, new_sid = parse_flow_answer(res)
+										dur_ms = int((time.time() - start_ts) * 1000)
+										try:
+											from datetime import datetime as _dt
+											_log_llm_metrics(
+												enterprise_out,
+												session_id,
+												{
+													"ts": _dt.now().isoformat(timespec="seconds"),
+													"engine": "bisheng",
+													"model": "qwen3",
+													"session_id": bisheng_session_id or "",
+													"file": name,
+													"part": i,
+													"phase": "compare",
+													"prompt_chars": len(prompt_text or ""),
+													"prompt_tokens": _estimate_tokens(prompt_text or ""),
+													"output_chars": len(ans_text or ""),
+													"output_tokens": _estimate_tokens(ans_text or ""),
+													"duration_ms": dur_ms,
+													"success": 1 if (ans_text or "").strip() else 0,
+													"error": res.get("error") if isinstance(res, dict) else "",
+												},
+											)
+										except Exception:
+											pass
+										if new_sid:
+											bisheng_session_id = new_sid
+											st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
+										response_placeholder.write(ans_text or "")
+										full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
+									except Exception as e:
+										response_placeholder.error(f"调用失败：{e}")
+								st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
 				# Persist per-file combined output
 				try:
 					name_no_ext = os.path.splitext(name)[0]
