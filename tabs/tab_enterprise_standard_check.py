@@ -2299,24 +2299,21 @@ def render_enterprise_standard_check_tab(session_id):
 										except Exception as e:
 											ph.error(f"调用失败：{e}")
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_continue_response_{session_id}_{name}_{_i}")
-					# write combined prompt/response for this file
+				# write combined prompt/response for this file
 					name_no_ext = os.path.splitext(name)[0]
 					try:
-						# prompts
-						total_parts = len(prompt_texts)
-						prompt_out_lines = []
-						for idx_p, ptxt in enumerate(prompt_texts, start=1):
-							prompt_out_lines.append(f"提示词（第{idx_p}部分，共{total_parts}部分）：")
-							prompt_out_lines.append(ptxt)
-						prompt_out_text = "\n".join(prompt_out_lines)
-						with open(os.path.join(initial_dir, f"prompt_{name_no_ext}.txt"), 'w', encoding='utf-8') as pf:
-							pf.write(prompt_out_text)
+						_persist_compare_outputs(initial_dir, name_no_ext, prompt_texts, full_out_text)
 					except Exception:
 						pass
+					# summarize for this file as well
 					try:
-						with open(os.path.join(initial_dir, f"response_{name_no_ext}.txt"), 'w', encoding='utf-8') as outf:
-							outf.write(full_out_text)
+						_summarize_with_ollama(initial_dir, enterprise_out, session_id, name_no_ext, full_out_text)
 					except Exception:
 						pass
 			# End continue branch
+			# After continue: aggregate all outputs to CSV/XLSX/Word like Start does
+			try:
+				_aggregate_outputs(initial_dir, enterprise_out, session_id)
+			except Exception as e:
+				st.error(f"汇总导出失败：{e}")
 # The end
