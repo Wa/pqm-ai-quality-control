@@ -1577,34 +1577,39 @@ def render_enterprise_standard_check_tab(session_id):
 										st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
 									response_placeholder.write(ans_text or "")
 									full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
-									# Mark progress in checkpoint: write response file and set manifest entry to done
-									try:
-										checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
-										os.makedirs(checkpoint_dir, exist_ok=True)
-										resp_fname = f"checkpoint_response_{name}_pt{i}.txt"
-										resp_path = os.path.join(checkpoint_dir, resp_fname)
-										with open(resp_path, 'w', encoding='utf-8') as _rf:
-											_rf.write(ans_text or "")
-										# load and update manifest
-										import json as _json, tempfile as _tmp, shutil as _sh
-										m_path = os.path.join(checkpoint_dir, 'manifest.json')
-										_m = None
+									# Mark progress in checkpoint only if Bisheng output contains <think>
+									if '<think>' in (ans_text or ''):
 										try:
-											with open(m_path, 'r', encoding='utf-8') as _mf:
-												_m = _json.load(_mf) or {}
-										except Exception:
-											_m = None
-										if isinstance(_m, dict) and isinstance(_m.get('entries'), list):
-											for __e in _m['entries']:
-												if __e.get('file_name') == name and int(__e.get('chunk_index', -1)) == (i - 1):
-													__e['status'] = 'done'
-													break
+											checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
+											os.makedirs(checkpoint_dir, exist_ok=True)
+											resp_fname = f"checkpoint_response_{name}_pt{i}.txt"
+											resp_path = os.path.join(checkpoint_dir, resp_fname)
+											# atomic write: temp file + move
+											import tempfile as _tmp, shutil as _sh
 											with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-												_tf.write(_json.dumps(_m, ensure_ascii=False, indent=2))
+												_tf.write(ans_text or "")
 												_tmpname = _tf.name
-											_sh.move(_tmpname, m_path)
-									except Exception:
-										pass
+											_sh.move(_tmpname, resp_path)
+											# load and update manifest
+											import json as _json, tempfile as _tmp, shutil as _sh
+											m_path = os.path.join(checkpoint_dir, 'manifest.json')
+											_m = None
+											try:
+												with open(m_path, 'r', encoding='utf-8') as _mf:
+													_m = _json.load(_mf) or {}
+											except Exception:
+												_m = None
+											if isinstance(_m, dict) and isinstance(_m.get('entries'), list):
+												for __e in _m['entries']:
+													if __e.get('file_name') == name and int(__e.get('chunk_index', -1)) == (i - 1):
+														__e['status'] = 'done'
+														break
+												with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+													_tf.write(_json.dumps(_m, ensure_ascii=False, indent=2))
+													_tmpname = _tf.name
+													_sh.move(_tmpname, m_path)
+										except Exception:
+											pass
 								except Exception as e:
 									response_placeholder.error(f"调用失败：{e}")
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
@@ -1912,24 +1917,28 @@ def render_enterprise_standard_check_tab(session_id):
 												st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
 											ph.write(ans_text or "")
 											full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
-											# save resp and mark done
-											try:
-												with open(_response_path, 'w', encoding='utf-8') as _rf:
-													_rf.write(ans_text or "")
-											except Exception:
-												pass
-											try:
-												import json as _json, tempfile as _tmp, shutil as _sh
-												for __e in _manifest.get('entries', []):
-													if int(__e.get('id', 0)) == int(_entry.get('id', 0)):
-														__e['status'] = 'done'
-														break
-												with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-													_tf.write(_json.dumps(_manifest, ensure_ascii=False, indent=2))
-													_tmpname = _tf.name
-												_sh.move(_tmpname, manifest_path)
-											except Exception:
-												pass
+											# save resp and mark done (atomic writes like Start) only if Bisheng output contains <think>
+											if '<think>' in (ans_text or ''):
+												try:
+													import tempfile as _tmp, shutil as _sh
+													with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+														_tf.write(ans_text or "")
+														_tmpname = _tf.name
+														_sh.move(_tmpname, _response_path)
+												except Exception:
+													pass
+												try:
+													import json as _json, tempfile as _tmp, shutil as _sh
+													for __e in _manifest.get('entries', []):
+														if int(__e.get('id', 0)) == int(_entry.get('id', 0)):
+															__e['status'] = 'done'
+															break
+													with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+														_tf.write(_json.dumps(_manifest, ensure_ascii=False, indent=2))
+														_tmpname = _tf.name
+														_sh.move(_tmpname, manifest_path)
+												except Exception:
+													pass
 										except Exception as e:
 											ph.error(f"调用失败：{e}")
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_continue_response_{session_id}_{name}_{_i}")
