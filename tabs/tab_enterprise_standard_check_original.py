@@ -272,7 +272,7 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
 									"output_tokens": output_tokens if isinstance(output_tokens, int) else _estimate_tokens(response_text or ""),
 									"duration_ms": dur_ms,
 									"success": 1 if (response_text or "").strip() else 0,
-									"error": error_msg
+									"error": "error_msg"
 								}
 							)
 							# save json
@@ -1288,7 +1288,7 @@ def render_enterprise_standard_check_tab(session_id):
 												_pf.write(_prompt_text)
 										except Exception:
 											pass
-										manifest["entries"].append({
+											manifest["entries"].append({
 											"id": entry_id,
 											"file_name": _fname,
 											"chunk_index": _ci,
@@ -1577,34 +1577,6 @@ def render_enterprise_standard_check_tab(session_id):
 										st.session_state[f"bisheng_session_{session_id}"] = bisheng_session_id
 									response_placeholder.write(ans_text or "")
 									full_out_text += ("\n\n" if full_out_text else "") + (ans_text or "")
-									# Mark progress in checkpoint: write response file and set manifest entry to done
-									try:
-										checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
-										os.makedirs(checkpoint_dir, exist_ok=True)
-										resp_fname = f"checkpoint_response_{name}_pt{i}.txt"
-										resp_path = os.path.join(checkpoint_dir, resp_fname)
-										with open(resp_path, 'w', encoding='utf-8') as _rf:
-											_rf.write(ans_text or "")
-										# load and update manifest
-										import json as _json, tempfile as _tmp, shutil as _sh
-										m_path = os.path.join(checkpoint_dir, 'manifest.json')
-										_m = None
-										try:
-											with open(m_path, 'r', encoding='utf-8') as _mf:
-												_m = _json.load(_mf) or {}
-										except Exception:
-											_m = None
-										if isinstance(_m, dict) and isinstance(_m.get('entries'), list):
-											for __e in _m['entries']:
-												if __e.get('file_name') == name and int(__e.get('chunk_index', -1)) == (i - 1):
-													__e['status'] = 'done'
-													break
-											with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-												_tf.write(_json.dumps(_m, ensure_ascii=False, indent=2))
-												_tmpname = _tf.name
-											_sh.move(_tmpname, m_path)
-									except Exception:
-										pass
 								except Exception as e:
 									response_placeholder.error(f"调用失败：{e}")
 							st.chat_input(placeholder="", disabled=True, key=f"enterprise_response_{session_id}_{idx_file}_{i}")
