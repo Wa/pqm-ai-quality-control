@@ -1607,7 +1607,7 @@ def render_enterprise_standard_check_tab(session_id):
 												with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
 													_tf.write(_json.dumps(_m, ensure_ascii=False, indent=2))
 													_tmpname = _tf.name
-													_sh.move(_tmpname, m_path)
+												_sh.move(_tmpname, m_path)
 										except Exception:
 											pass
 								except Exception as e:
@@ -1924,19 +1924,22 @@ def render_enterprise_standard_check_tab(session_id):
 													with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
 														_tf.write(ans_text or "")
 														_tmpname = _tf.name
-														_sh.move(_tmpname, _response_path)
+													_sh.move(_tmpname, _response_path)
 												except Exception:
 													pass
 												try:
 													import json as _json, tempfile as _tmp, shutil as _sh
 													for __e in _manifest.get('entries', []):
-														if int(__e.get('id', 0)) == int(_entry.get('id', 0)):
+														if (
+															str(__e.get('file_name')) == str(name)
+															and int(__e.get('chunk_index', -1)) == int(_entry.get('chunk_index', -1))
+														):
 															__e['status'] = 'done'
 															break
 													with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
 														_tf.write(_json.dumps(_manifest, ensure_ascii=False, indent=2))
 														_tmpname = _tf.name
-														_sh.move(_tmpname, manifest_path)
+													_sh.move(_tmpname, manifest_path)
 												except Exception:
 													pass
 										except Exception as e:
