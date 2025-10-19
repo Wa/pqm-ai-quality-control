@@ -38,7 +38,17 @@ CONFIG = {
         # Chunking default
         "max_words": 2000,
         # Request timeout seconds
-        "timeout_s": 90
+        "timeout_s": 90,
+        # Tab specific overrides
+        "tabs": {
+            "enterprise_standard_check": {
+                "workflow_id": "31208af992c94e9fb56b759ebff2f242",
+                "flow_id": "0bbd56f359454b4ea67ca85f4460e969",
+                "flow_input_node_id": "RetrievalQA-f0f31",
+                "flow_milvus_node_id": "Milvus-cyR5W",
+                "flow_es_node_id": "ElasticKeywordsSearch-1c80e"
+            }
+        }
     },
     # Central service endpoints/switches
     "services": {
