@@ -390,6 +390,61 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                                     _sh.move(tmp_name, json_path)
                                 except Exception as error:
                                     _report_exception("写入JSON汇总失败", error, level="warning")
+                        response_text = ""
+                        start_ts = time.time()
+                        last_stats = None
+                        error_msg = ""
+                        chunks_seen = 0
+                        try:
+                            for chunk in ollama_client.chat(
+                                model=model,
+                                messages=[{"role": "user", "content": prompt_text_all}],
+                                stream=True,
+                                options={ "temperature": temperature, "top_p": top_p, "top_k": top_k,
+                                          "repeat_penalty": repeat_penalty, "num_ctx": num_ctx, "num_thread": num_thread }
+                            ):
+                                chunks_seen += 1
+                                new_text = chunk.get('message', {}).get('content', '')
+                                response_text += new_text
+                                ph_resp2.write(response_text)
+                                last_stats = chunk.get('eval_info') or chunk.get('stats') or last_stats
+                        except Exception as e:
+                            error_msg = str(e)[:300]
+                        finally:
+                            from datetime import datetime as _dt
+                            dur_ms = int((time.time() - start_ts) * 1000)
+                            prompt_tokens = (last_stats or {}).get('prompt_eval_count')
+                            output_tokens = (last_stats or {}).get('eval_count')
+                            if not error_msg and chunks_seen == 0:
+                                error_msg = "no_stream_chunks"
+                            _log_llm_metrics(
+                                enterprise_out, session_id,
+                                {
+                                    "ts": _dt.now().isoformat(timespec="seconds"),
+                                    "engine": "ollama",
+                                    "model": model,
+                                    "session_id": "",
+                                    "file": name_no_ext,
+                                    "part": part_idx,
+                                    "phase": "summarize",
+                                    "prompt_chars": len(prompt_text_all or ""),
+                                    "prompt_tokens": prompt_tokens if isinstance(prompt_tokens, int) else _estimate_tokens(prompt_text_all or ""),
+                                    "output_chars": len(response_text or ""),
+                                    "output_tokens": output_tokens if isinstance(output_tokens, int) else _estimate_tokens(response_text or ""),
+                                    "duration_ms": dur_ms,
+                                    "success": 1 if (response_text or "").strip() else 0,
+                                    "error": error_msg
+                                }
+                            )
+                            # save json
+                            try:
+                                base = pfname[len("prompted_response_"):]
+                                json_name = f"json_{base}"
+                                json_path = os.path.join(initial_dir, json_name)
+                                with open(json_path, 'w', encoding='utf-8') as jf:
+                                    jf.write(response_text)
+                            except Exception as error:
+                                _report_exception("写入JSON汇总失败", error, level="warning")
     except Exception as error:
         _report_exception("调用Ollama生成汇总失败", error)
 
