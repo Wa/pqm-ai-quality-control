@@ -22,23 +22,71 @@ from bisheng_client import (
 
 
 # 
-# --- Bisheng fixed settings (edit here if endpoints or workflow change) ---
-# Base URL of Bisheng server
-BISHENG_BASE_URL = "http://10.31.60.11:3001"
-# Invoke and Stop API paths (workflow kept for other tabs; Flow uses /api/v1/process)
-BISHENG_INVOKE_PATH = "/api/v2/workflow/invoke"
-BISHENG_STOP_PATH = "/api/v2/workflow/stop"
-# Default workflow id and API key (if your server requires one)
-BISHENG_WORKFLOW_ID = "31208af992c94e9fb56b759ebff2f242"
-# Flow settings: set to your Flow id and node ids per exported JSON
-BISHENG_FLOW_ID = "0bbd56f359454b4ea67ca85f4460e969"  # 知识库问答【增强版】-1dae2
-FLOW_INPUT_NODE_ID = "RetrievalQA-f0f31"
-FLOW_MILVUS_NODE_ID = "Milvus-cyR5W"
-FLOW_ES_NODE_ID = "ElasticKeywordsSearch-1c80e"
-BISHENG_API_KEY = ""
+# --- Bisheng settings (load from CONFIG and allow environment overrides) ---
+TAB_ENV_PREFIX = "ENTERPRISE_STANDARD_CHECK"
+_BISHENG_CONFIG = CONFIG.get("bisheng", {})
+_BISHENG_TAB_CONFIG = _BISHENG_CONFIG.get("tabs", {}).get("enterprise_standard_check", {})
+
+
+def _bisheng_setting(
+    name: str,
+    *,
+    tab_key: str | None = None,
+    config_key: str | None = None,
+    default=None,
+):
+    """Resolve Bisheng settings with tab-specific env and config fallbacks."""
+
+    env_tab_name = f"{TAB_ENV_PREFIX}_{name}"
+    env_tab_value = os.getenv(env_tab_name)
+    if env_tab_value not in (None, ""):
+        return env_tab_value
+
+    env_value = os.getenv(name)
+    if env_value not in (None, ""):
+        return env_value
+
+    if tab_key:
+        tab_value = _BISHENG_TAB_CONFIG.get(tab_key)
+        if tab_value not in (None, ""):
+            return tab_value
+
+    if config_key:
+        config_value = _BISHENG_CONFIG.get(config_key)
+        if config_value not in (None, ""):
+            return config_value
+
+    return default
+
+
+def _safe_int(value, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+# Base URL and workflow endpoints
+BISHENG_BASE_URL = _bisheng_setting("BISHENG_BASE_URL", config_key="base_url", default="http://localhost:3001")
+BISHENG_INVOKE_PATH = _bisheng_setting("BISHENG_INVOKE_PATH", config_key="invoke_path", default="/api/v2/workflow/invoke")
+BISHENG_STOP_PATH = _bisheng_setting("BISHENG_STOP_PATH", config_key="stop_path", default="/api/v2/workflow/stop")
+
+# Workflow identifiers and API key
+BISHENG_WORKFLOW_ID = _bisheng_setting(
+    "BISHENG_WORKFLOW_ID",
+    tab_key="workflow_id",
+    config_key="workflow_id",
+    default="",
+)
+BISHENG_FLOW_ID = _bisheng_setting("BISHENG_FLOW_ID", tab_key="flow_id", default="")
+FLOW_INPUT_NODE_ID = _bisheng_setting("FLOW_INPUT_NODE_ID", tab_key="flow_input_node_id", default="")
+FLOW_MILVUS_NODE_ID = _bisheng_setting("FLOW_MILVUS_NODE_ID", tab_key="flow_milvus_node_id", default="")
+FLOW_ES_NODE_ID = _bisheng_setting("FLOW_ES_NODE_ID", tab_key="flow_es_node_id", default="")
+BISHENG_API_KEY = _bisheng_setting("BISHENG_API_KEY", config_key="api_key", default="")
+
 # Chunking and request timeout
-BISHENG_MAX_WORDS = 2000
-BISHENG_TIMEOUT_S = 90
+BISHENG_MAX_WORDS = _safe_int(_bisheng_setting("BISHENG_MAX_WORDS", config_key="max_words", default=2000), 2000)
+BISHENG_TIMEOUT_S = _safe_int(_bisheng_setting("BISHENG_TIMEOUT_S", config_key="timeout_s", default=90), 90)
 
 # Knowledge base settings
 # Model ID used when creating a new KB; keep consistent with server defaults
@@ -245,6 +293,19 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
             except Exception as error:
                 _report_exception(f"读取汇总提示失败({pfname})", error, level="warning")
                 prompt_text_all = ""
+
+            base = pfname[len("prompted_response_"):]
+            json_name = f"json_{base}"
+            json_path = os.path.join(initial_dir, json_name)
+            existing_json_text = ""
+            if os.path.isfile(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as jf:
+                        existing_json_text = jf.read()
+                except Exception as error:
+                    _report_exception(f"读取已存在的JSON汇总失败({json_name})", error, level="warning")
+                    existing_json_text = ""
+
             # columns
             col_prompt2, col_resp2 = st.columns([1, 1])
             with col_prompt2:
@@ -261,6 +322,74 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                 with resp_container2:
                     with st.chat_message("assistant"):
                         ph_resp2 = st.empty()
+                        if (existing_json_text or "").strip():
+                            _stream_text(ph_resp2, existing_json_text, render_method="write")
+                            st.caption("已载入之前生成的JSON结果，无需重新调用模型。")
+                        else:
+                            response_text = ""
+                            start_ts = time.time()
+                            last_stats = None
+                            error_msg = ""
+                            chunks_seen = 0
+                            try:
+                                for chunk in ollama_client.chat(
+                                    model=model,
+                                    messages=[{"role": "user", "content": prompt_text_all}],
+                                    stream=True,
+                                    options={
+                                        "temperature": temperature,
+                                        "top_p": top_p,
+                                        "top_k": top_k,
+                                        "repeat_penalty": repeat_penalty,
+                                        "num_ctx": num_ctx,
+                                        "num_thread": num_thread,
+                                    },
+                                ):
+                                    chunks_seen += 1
+                                    new_text = chunk.get('message', {}).get('content', '')
+                                    response_text += new_text
+                                    ph_resp2.write(response_text)
+                                    last_stats = chunk.get('eval_info') or chunk.get('stats') or last_stats
+                            except Exception as e:
+                                error_msg = str(e)[:300]
+                            finally:
+                                from datetime import datetime as _dt
+
+                                dur_ms = int((time.time() - start_ts) * 1000)
+                                prompt_tokens = (last_stats or {}).get('prompt_eval_count')
+                                output_tokens = (last_stats or {}).get('eval_count')
+                                if not error_msg and chunks_seen == 0:
+                                    error_msg = "no_stream_chunks"
+                                _log_llm_metrics(
+                                    enterprise_out,
+                                    session_id,
+                                    {
+                                        "ts": _dt.now().isoformat(timespec="seconds"),
+                                        "engine": "ollama",
+                                        "model": model,
+                                        "session_id": "",
+                                        "file": name_no_ext,
+                                        "part": part_idx,
+                                        "phase": "summarize",
+                                        "prompt_chars": len(prompt_text_all or ""),
+                                        "prompt_tokens": prompt_tokens if isinstance(prompt_tokens, int) else _estimate_tokens(prompt_text_all or ""),
+                                        "output_chars": len(response_text or ""),
+                                        "output_tokens": output_tokens if isinstance(output_tokens, int) else _estimate_tokens(response_text or ""),
+                                        "duration_ms": dur_ms,
+                                        "success": 1 if (response_text or "").strip() else 0,
+                                        "error": error_msg,
+                                    },
+                                )
+                                # save json
+                                try:
+                                    import tempfile as _tmp, shutil as _sh
+
+                                    with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=initial_dir) as jf_tmp:
+                                        jf_tmp.write(response_text)
+                                        tmp_name = jf_tmp.name
+                                    _sh.move(tmp_name, json_path)
+                                except Exception as error:
+                                    _report_exception("写入JSON汇总失败", error, level="warning")
                         response_text = ""
                         start_ts = time.time()
                         last_stats = None
