@@ -1,24 +1,32 @@
-import streamlit as st
-import os
+import csv
+import hashlib
 import io
-import zipfile
 import json
+import os
 import re
+import shutil
+import tempfile
 import time
+import zipfile
+from collections import OrderedDict
+from datetime import datetime
+
 import requests
-from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
-from config import CONFIG
-from ollama import Client as OllamaClient
+import streamlit as st
+
 from bisheng_client import (
-    call_workflow_invoke,
     call_flow_process,
+    call_workflow_invoke,
+    create_knowledge,
+    find_knowledge_id_by_name,
+    kb_sync_folder,
     parse_flow_answer,
     split_to_chunks,
     stop_workflow,
-    find_knowledge_id_by_name,
-    create_knowledge,
-    kb_sync_folder,
 )
+from config import CONFIG
+from ollama import Client as OllamaClient
+from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
 
 
 # 
@@ -150,15 +158,13 @@ def _get_metrics_path(base_out_dir: str, session_id: str) -> str:
     key = f"metrics_file_{session_id}"
     fname = st.session_state.get(key)
     if not fname:
-        from datetime import datetime as _dt
-        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"llm_calls_{ts}.csv"
         st.session_state[key] = fname
     return os.path.join(metrics_dir, fname)
 
 def _log_llm_metrics(base_out_dir: str, session_id: str, row: dict):
     try:
-        import csv
         path = _get_metrics_path(base_out_dir, session_id)
         exists = os.path.exists(path)
         headers = [
@@ -353,8 +359,6 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                             except Exception as e:
                                 error_msg = str(e)[:300]
                             finally:
-                                from datetime import datetime as _dt
-
                                 dur_ms = int((time.time() - start_ts) * 1000)
                                 prompt_tokens = (last_stats or {}).get('prompt_eval_count')
                                 output_tokens = (last_stats or {}).get('eval_count')
@@ -364,7 +368,7 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                                     enterprise_out,
                                     session_id,
                                     {
-                                        "ts": _dt.now().isoformat(timespec="seconds"),
+                                        "ts": datetime.now().isoformat(timespec="seconds"),
                                         "engine": "ollama",
                                         "model": model,
                                         "session_id": "",
@@ -382,12 +386,10 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                                 )
                                 # save json
                                 try:
-                                    import tempfile as _tmp, shutil as _sh
-
-                                    with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=initial_dir) as jf_tmp:
+                                    with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=initial_dir) as jf_tmp:
                                         jf_tmp.write(response_text)
                                         tmp_name = jf_tmp.name
-                                    _sh.move(tmp_name, json_path)
+                                    shutil.move(tmp_name, json_path)
                                 except Exception as error:
                                     _report_exception("写入JSON汇总失败", error, level="warning")
                         response_text = ""
@@ -411,16 +413,16 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                         except Exception as e:
                             error_msg = str(e)[:300]
                         finally:
-                            from datetime import datetime as _dt
                             dur_ms = int((time.time() - start_ts) * 1000)
                             prompt_tokens = (last_stats or {}).get('prompt_eval_count')
                             output_tokens = (last_stats or {}).get('eval_count')
                             if not error_msg and chunks_seen == 0:
                                 error_msg = "no_stream_chunks"
                             _log_llm_metrics(
-                                enterprise_out, session_id,
+                                enterprise_out,
+                                session_id,
                                 {
-                                    "ts": _dt.now().isoformat(timespec="seconds"),
+                                    "ts": datetime.now().isoformat(timespec="seconds"),
                                     "engine": "ollama",
                                     "model": model,
                                     "session_id": "",
@@ -433,8 +435,8 @@ def _summarize_with_ollama(initial_dir: str, enterprise_out: str, session_id: st
                                     "output_tokens": output_tokens if isinstance(output_tokens, int) else _estimate_tokens(response_text or ""),
                                     "duration_ms": dur_ms,
                                     "success": 1 if (response_text or "").strip() else 0,
-                                    "error": error_msg
-                                }
+                                    "error": error_msg,
+                                },
                             )
                             # save json
                             try:
@@ -464,7 +466,6 @@ def _aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -
         json_files = []
     columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由"]
     rows = []
-    import csv
     try:
         import pandas as pd  # type: ignore
     except ImportError as error:
@@ -547,8 +548,7 @@ def _aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -
                 str(obj.get("理由", "")),
             ]
             rows.append(row)
-    from datetime import datetime as _dt
-    ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     csv_path = os.path.join(final_dir, f"企标检查结果_{ts}.csv")
     with open(csv_path, 'w', encoding='utf-8-sig', newline='') as cf:
         writer = csv.writer(cf)
@@ -610,17 +610,16 @@ def _aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -
                         ptext = ""
                     def _to_plain_table(txt: str) -> str:
                         try:
-                            import re as _re
                             rows = []
-                            for m in _re.finditer(r"<tr[\s\S]*?>([\s\S]*?)</tr>", txt, flags=_re.IGNORECASE):
+                            for m in re.finditer(r"<tr[\s\S]*?>([\s\S]*?)</tr>", txt, flags=re.IGNORECASE):
                                 row_html = m.group(1)
-                                cells = _re.findall(r"<(?:td|th)[^>]*>([\s\S]*?)</(?:td|th)>", row_html, flags=_re.IGNORECASE)
-                                cells_clean = [ _re.sub(r"<[^>]+>", "", c).strip() for c in cells ]
+                                cells = re.findall(r"<(?:td|th)[^>]*>([\s\S]*?)</(?:td|th)>", row_html, flags=re.IGNORECASE)
+                                cells_clean = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
                                 if cells_clean:
                                     rows.append("\t".join(cells_clean))
                             if rows:
                                 return "\n".join(rows)
-                            return _re.sub(r"<[^>]+>", " ", txt)
+                            return re.sub(r"<[^>]+>", " ", txt)
                         except Exception:
                             return txt
                     for para in (ptext or "").splitlines():
@@ -642,8 +641,7 @@ def _aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -
                         if not line:
                             continue
                         doc.add_paragraph(_to_plain_table(line))
-                from datetime import datetime as _dt
-                ts_doc = _dt.now().strftime('%Y%m%d_%H%M%S')
+                ts_doc = datetime.now().strftime('%Y%m%d_%H%M%S')
                 doc_path = os.path.join(final_dir, f"企标检查分析过程_{ts_doc}.docx")
                 doc.save(doc_path)
                 try:
@@ -1013,8 +1011,6 @@ def _process_archives(input_dir: str, output_dir: str, progress_area) -> int:
     try:
         if not os.path.isdir(input_dir):
             return 0
-        import shutil
-        import tempfile
         processed = 0
         # Optional handlers
         try:
@@ -1132,6 +1128,105 @@ def _cleanup_orphan_txts(source_dir: str, output_dir: str, progress_area=None) -
         return 0
 
 
+_TOC_START_RE = re.compile(r"^\s*(#\s*)?(目\s*录|目录|table of contents)\s*$", re.IGNORECASE)
+_TOC_ENTRY_RE = re.compile(
+    r"^\s*((第\s*[一二三四五六七八九十百千]+\s*[章节节篇])|(\d+(?:[\.．]\d+)*))(?:\s|[\.．、\)])"
+)
+
+
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4E00-\u9FFF]", text or ""))
+
+
+def _preprocess_text_content(text: str) -> str:
+    """Remove redundant boilerplate, bilingual duplicates, and table of contents blocks."""
+
+    if not text:
+        return text
+
+    lines = text.splitlines()
+    processed: list[str] = []
+    toc_mode = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip("\r")
+        stripped = line.strip()
+
+        # Detect and skip table-of-contents sections that do not add verification value.
+        if not toc_mode and _TOC_START_RE.match(stripped):
+            toc_mode = True
+            continue
+        if toc_mode:
+            if not stripped:
+                # Allow a single blank line inside TOC without exiting.
+                continue
+            if _TOC_ENTRY_RE.match(stripped):
+                continue
+            # End of TOC encountered; resume normal processing without consuming the current line.
+            toc_mode = False
+
+        if not stripped:
+            # Collapse multiple blank lines to a single blank line.
+            if processed and processed[-1] == "":
+                continue
+            processed.append("")
+            continue
+
+        normalized = re.sub(r"\s+", " ", stripped)
+        if processed:
+            prev_norm = re.sub(r"\s+", " ", processed[-1].strip())
+            if normalized and normalized == prev_norm:
+                # Drop consecutive duplicate lines (common with repeated headers).
+                continue
+
+        # Drop English translations immediately following a Chinese line to reduce duplication.
+        if processed and _has_cjk(processed[-1]) and not _has_cjk(stripped) and re.search(r"[A-Za-z]", stripped):
+            prev_len = len(processed[-1].strip())
+            curr_len = len(stripped)
+            if prev_len and curr_len:
+                length_ratio = curr_len / prev_len
+                if 0.4 <= length_ratio <= 1.6:
+                    continue
+
+        processed.append(stripped)
+
+    # Remove trailing blank lines that may have been introduced during processing.
+    while processed and processed[-1] == "":
+        processed.pop()
+
+    return "\n".join(processed)
+
+
+def _preprocess_txt_directory(output_dir: str, progress_area=None) -> int:
+    """Apply safe text compaction heuristics to .txt files within a directory."""
+
+    if not os.path.isdir(output_dir):
+        return 0
+
+    cleaned = 0
+    for name in os.listdir(output_dir):
+        if not name.lower().endswith(".txt"):
+            continue
+        path = os.path.join(output_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                original = f.read()
+        except Exception:
+            continue
+        processed = _preprocess_text_content(original)
+        if processed != original:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(processed)
+                cleaned += 1
+            except Exception as error:
+                if progress_area is not None:
+                    progress_area.warning(f"精简文本失败: {name} → {error}")
+    return cleaned
+
+
 def render_enterprise_standard_check_tab(session_id):
     # Handle None session_id (user not logged in)
     if session_id is None:
@@ -1189,7 +1284,6 @@ def render_enterprise_standard_check_tab(session_id):
             return f"{size_bytes:.1f} {size_names[i]}"
 
         def format_timestamp(timestamp):
-            from datetime import datetime
             return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
         def truncate_filename(filename, max_length=40):
@@ -1381,6 +1475,7 @@ def render_enterprise_standard_check_tab(session_id):
                     created_std_text = _process_textlike_folder(standards_dir, standards_txt_dir, st)
                     # New: extract archives and process recursively
                     _ = _process_archives(standards_dir, standards_txt_dir, st)
+                    cleaned_std_txt = _preprocess_txt_directory(standards_txt_dir, st)
                     st.markdown("**阅读待检查文件中，10分钟左右，请等待...**")
                     created_exam_pdf = _process_pdf_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
                     created_exam_wp = _process_word_ppt_folder(examined_dir, examined_txt_dir, st, annotate_sources=False)
@@ -1389,6 +1484,11 @@ def render_enterprise_standard_check_tab(session_id):
                     created_exam_text = _process_textlike_folder(examined_dir, examined_txt_dir, st)
                     # New: extract archives and process recursively
                     _ = _process_archives(examined_dir, examined_txt_dir, st)
+                    cleaned_exam_txt = _preprocess_txt_directory(examined_txt_dir, st)
+
+                    cleaned_total = cleaned_std_txt + cleaned_exam_txt
+                    if cleaned_total:
+                        st.info(f"已精简文本 {cleaned_total} 个文件，减少冗余内容")
 
                     # If we have any txt, switch to running phase and rerun so streaming renders in main column
                     try:
@@ -1403,11 +1503,10 @@ def render_enterprise_standard_check_tab(session_id):
                                 os.makedirs(checkpoint_dir, exist_ok=True)
                                 # If previous manifest exists and all entries are done, clear checkpoint files
                                 try:
-                                    import json as _json
                                     _manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
                                     if os.path.isfile(_manifest_path):
                                         with open(_manifest_path, 'r', encoding='utf-8') as _mf:
-                                            _prev_manifest = _json.load(_mf) or {}
+                                            _prev_manifest = json.load(_mf) or {}
                                         _entries_prev = _prev_manifest.get('entries') or []
                                         _all_done = bool(_entries_prev) and all((str(e.get('status')) == 'done') for e in _entries_prev)
                                         if _all_done:
@@ -1422,7 +1521,6 @@ def render_enterprise_standard_check_tab(session_id):
                                     pass
                                 # Build run_id based on current examined_txt files (name|size|mtime)
                                 try:
-                                    import hashlib
                                     infos = []
                                     for _n in sorted(exam_txt_files, key=lambda x: x.lower()):
                                         _pp = os.path.join(examined_txt_dir, _n)
@@ -1475,12 +1573,11 @@ def render_enterprise_standard_check_tab(session_id):
                                         })
                                 # Write manifest.json atomically (paths stored as relative filenames for portability)
                                 try:
-                                    import json as _json, tempfile as _tmp, shutil as _sh
                                     _manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
-                                    with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-                                        _tf.write(_json.dumps(manifest, ensure_ascii=False, indent=2))
+                                    with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+                                        _tf.write(json.dumps(manifest, ensure_ascii=False, indent=2))
                                         _tmpname = _tf.name
-                                    _sh.move(_tmpname, _manifest_path)
+                                    shutil.move(_tmpname, _manifest_path)
                                 except Exception:
                                     pass
                             except Exception:
@@ -1490,9 +1587,6 @@ def render_enterprise_standard_check_tab(session_id):
                             st.session_state[f"enterprise_running_{session_id}"] = True
                             st.session_state[f"enterprise_std_txt_files_{session_id}"] = std_txt_files
                             st.session_state[f"enterprise_exam_txt_files_{session_id}"] = exam_txt_files
-                            st.session_state[f"enterprise_out_root_{session_id}"] = enterprise_out_root
-                            st.session_state[f"enterprise_standards_txt_dir_{session_id}"] = standards_txt_dir
-                            st.session_state[f"enterprise_examined_txt_dir_{session_id}"] = examined_txt_dir
                             st.rerun()
                     except Exception as e:
                         st.error(f"企业标准比对流程异常：{e}")
@@ -1528,10 +1622,9 @@ def render_enterprise_standard_check_tab(session_id):
                     manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
                     _has_entries = False
                     try:
-                        import json as _json
                         if os.path.isfile(manifest_path):
                             with open(manifest_path, 'r', encoding='utf-8') as _mf:
-                                _m = _json.load(_mf) or {}
+                                _m = json.load(_mf) or {}
                                 _ents = _m.get('entries') or []
                                 _has_entries = len(_ents) > 0
                     except Exception:
@@ -1547,7 +1640,6 @@ def render_enterprise_standard_check_tab(session_id):
             if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
                 # Copy demonstration files into the user's enterprise folders (no processing here)
                 try:
-                    import shutil
                     # Locate demonstration root (same convention as other tabs)
                     demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
                     demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
@@ -1597,9 +1689,6 @@ def render_enterprise_standard_check_tab(session_id):
             # Retrieve context saved before rerun
             std_txt_files = st.session_state.get(f"enterprise_std_txt_files_{session_id}") or []
             exam_txt_files = st.session_state.get(f"enterprise_exam_txt_files_{session_id}") or []
-            enterprise_out = st.session_state.get(f"enterprise_out_root_{session_id}") or enterprise_out_root
-            std_txt_dir = st.session_state.get(f"enterprise_standards_txt_dir_{session_id}") or standards_txt_dir
-            exam_txt_dir = st.session_state.get(f"enterprise_examined_txt_dir_{session_id}") or examined_txt_dir
 
             # Upload standards once (optional)
             if std_txt_files:
@@ -1614,7 +1703,7 @@ def render_enterprise_standard_check_tab(session_id):
                                 base_url=BISHENG_BASE_URL,
                                 api_key=BISHENG_API_KEY or None,
                                 knowledge_id=int(kid),
-                                folder_path=std_txt_dir,
+                                folder_path=standards_txt_dir,
                                 clear_first=False,
                                 chunk_size=1000,
                                 chunk_overlap=0,
@@ -1630,7 +1719,7 @@ def render_enterprise_standard_check_tab(session_id):
             # Iterate examined texts
             exam_txt_files.sort(key=lambda x: x.lower())
             bisheng_session_id = st.session_state.get(f"bisheng_session_{session_id}")
-            initial_dir = os.path.join(enterprise_out, 'initial_results')
+            initial_dir = os.path.join(enterprise_out_root, 'initial_results')
             os.makedirs(initial_dir, exist_ok=True)
             # 预热步骤：在并发开始前，串行对 Bisheng Flow 发起一次极短请求，促使检索/LLM 初始化与缓存
             # 说明：首次请求常见的冷启动（模型加载、连接池、检索索引唤醒）会导致首批并发请求失败率上升；
@@ -1659,7 +1748,7 @@ def render_enterprise_standard_check_tab(session_id):
                 pass
             # Start fresh: original per-file splitting and live prompting
             for idx_file, name in enumerate(exam_txt_files, start=1):
-                src_path = os.path.join(exam_txt_dir, name)
+                src_path = os.path.join(examined_txt_dir, name)
                 st.markdown(f"**📄 正在比对第{idx_file}个文件，共{len(exam_txt_files)}个：{name}**")
                 try:
                     with open(src_path, 'r', encoding='utf-8') as f:
@@ -1721,12 +1810,11 @@ def render_enterprise_standard_check_tab(session_id):
                                     ans_text, new_sid = parse_flow_answer(res)
                                     dur_ms = int((time.time() - start_ts) * 1000)
                                     try:
-                                        from datetime import datetime as _dt
-                                        _log_llm_metrics(
-                                            enterprise_out,
+                                                                                _log_llm_metrics(
+                                            enterprise_out_root,
                                             session_id,
                                             {
-                                                "ts": _dt.now().isoformat(timespec="seconds"),
+                                                "ts": datetime.now().isoformat(timespec="seconds"),
                                                 "engine": "bisheng",
                                                 "model": "qwen3",
                                                 "session_id": bisheng_session_id or "",
@@ -1752,23 +1840,21 @@ def render_enterprise_standard_check_tab(session_id):
                                     # Mark progress in checkpoint only if Bisheng output contains <think>
                                     if '<think>' in (ans_text or ''):
                                         try:
-                                            checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
+                                            checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
                                             os.makedirs(checkpoint_dir, exist_ok=True)
                                             resp_fname = f"checkpoint_response_{name}_pt{i}.txt"
                                             resp_path = os.path.join(checkpoint_dir, resp_fname)
                                             # atomic write: temp file + move
-                                            import tempfile as _tmp, shutil as _sh
-                                            with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+                                            with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
                                                 _tf.write(ans_text or "")
                                                 _tmpname = _tf.name
-                                            _sh.move(_tmpname, resp_path)
+                                            shutil.move(_tmpname, resp_path)
                                             # load and update manifest
-                                            import json as _json, tempfile as _tmp, shutil as _sh
                                             m_path = os.path.join(checkpoint_dir, 'manifest.json')
                                             _m = None
                                             try:
                                                 with open(m_path, 'r', encoding='utf-8') as _mf:
-                                                    _m = _json.load(_mf) or {}
+                                                    _m = json.load(_mf) or {}
                                             except Exception:
                                                 _m = None
                                             if isinstance(_m, dict) and isinstance(_m.get('entries'), list):
@@ -1776,10 +1862,10 @@ def render_enterprise_standard_check_tab(session_id):
                                                     if __e.get('file_name') == name and int(__e.get('chunk_index', -1)) == (i - 1):
                                                         __e['status'] = 'done'
                                                         break
-                                                with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-                                                    _tf.write(_json.dumps(_m, ensure_ascii=False, indent=2))
+                                                with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+                                                    _tf.write(json.dumps(_m, ensure_ascii=False, indent=2))
                                                     _tmpname = _tf.name
-                                                _sh.move(_tmpname, m_path)
+                                                shutil.move(_tmpname, m_path)
                                         except Exception:
                                             pass
                                 except Exception as e:
@@ -1789,7 +1875,7 @@ def render_enterprise_standard_check_tab(session_id):
                 try:
                     name_no_ext = os.path.splitext(name)[0]
                     _persist_compare_outputs(initial_dir, name_no_ext, prompt_texts, full_out_text)
-                    _summarize_with_ollama(initial_dir, enterprise_out, session_id, name_no_ext, full_out_text)
+                    _summarize_with_ollama(initial_dir, enterprise_out_root, session_id, name_no_ext, full_out_text)
                 except Exception as e:
                     st.error(f"保存结果失败：{e}")
 
@@ -1802,7 +1888,7 @@ def render_enterprise_standard_check_tab(session_id):
 
             # After LLM step: aggregate json_*_ptN.txt into CSV and XLSX in final_results
             try:
-                _aggregate_outputs(initial_dir, enterprise_out, session_id)
+                _aggregate_outputs(initial_dir, enterprise_out_root, session_id)
             except Exception as e:
                 st.error(f"汇总导出失败：{e}")
 
@@ -1959,16 +2045,14 @@ def render_enterprise_standard_check_tab(session_id):
             # Retrieve context and init dirs
             std_txt_files = st.session_state.get(f"enterprise_std_txt_files_{session_id}") or []
             exam_txt_files = st.session_state.get(f"enterprise_exam_txt_files_{session_id}") or []
-            enterprise_out = st.session_state.get(f"enterprise_out_root_{session_id}") or enterprise_out_root
-            initial_dir = os.path.join(enterprise_out, 'initial_results')
+            initial_dir = os.path.join(enterprise_out_root, 'initial_results')
             os.makedirs(initial_dir, exist_ok=True)
-            checkpoint_dir = os.path.join(enterprise_out, 'checkpoint')
+            checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
             manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
             _manifest = None
             try:
-                import json as _json
                 with open(manifest_path, 'r', encoding='utf-8') as _mf:
-                    _manifest = _json.load(_mf) or {}
+                    _manifest = json.load(_mf) or {}
             except Exception:
                 _manifest = None
             if not _manifest or not isinstance(_manifest.get('entries'), list) or not _manifest['entries']:
@@ -1976,9 +2060,8 @@ def render_enterprise_standard_check_tab(session_id):
                 st.session_state[f"enterprise_continue_running_{session_id}"] = False
             else:
                 # group by file in entry order
-                from collections import OrderedDict as _OD
                 _entries_sorted = sorted((_manifest.get('entries') or []), key=lambda e: int(e.get('id', 0)))
-                _groups = _OD()
+                _groups = OrderedDict()
                 for _e in _entries_sorted:
                     fname = str(_e.get('file_name', ''))
                     _groups.setdefault(fname, []).append(_e)
@@ -2059,15 +2142,13 @@ def render_enterprise_standard_check_tab(session_id):
                                             # save resp and mark done (atomic writes like Start) only if Bisheng output contains <think>
                                             if '<think>' in (ans_text or ''):
                                                 try:
-                                                    import tempfile as _tmp, shutil as _sh
-                                                    with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+                                                    with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
                                                         _tf.write(ans_text or "")
                                                         _tmpname = _tf.name
-                                                    _sh.move(_tmpname, _response_path)
+                                                    shutil.move(_tmpname, _response_path)
                                                 except Exception:
                                                     pass
                                                 try:
-                                                    import json as _json, tempfile as _tmp, shutil as _sh
                                                     for __e in _manifest.get('entries', []):
                                                         if (
                                                             str(__e.get('file_name')) == str(name)
@@ -2075,10 +2156,10 @@ def render_enterprise_standard_check_tab(session_id):
                                                         ):
                                                             __e['status'] = 'done'
                                                             break
-                                                    with _tmp.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
-                                                        _tf.write(_json.dumps(_manifest, ensure_ascii=False, indent=2))
+                                                    with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8', dir=checkpoint_dir) as _tf:
+                                                        _tf.write(json.dumps(_manifest, ensure_ascii=False, indent=2))
                                                         _tmpname = _tf.name
-                                                    _sh.move(_tmpname, manifest_path)
+                                                    shutil.move(_tmpname, manifest_path)
                                                 except Exception:
                                                     pass
                                         except Exception as e:
@@ -2092,13 +2173,13 @@ def render_enterprise_standard_check_tab(session_id):
                         pass
                     # summarize for this file as well
                     try:
-                        _summarize_with_ollama(initial_dir, enterprise_out, session_id, name_no_ext, full_out_text)
+                        _summarize_with_ollama(initial_dir, enterprise_out_root, session_id, name_no_ext, full_out_text)
                     except Exception:
                         pass
             # End continue branch
             # After continue: aggregate all outputs to CSV/XLSX/Word like Start does
             try:
-                _aggregate_outputs(initial_dir, enterprise_out, session_id)
+                _aggregate_outputs(initial_dir, enterprise_out_root, session_id)
             except Exception as e:
                 st.error(f"汇总导出失败：{e}")
 # The end
