@@ -1,4 +1,4 @@
-"""Metrics logging utilities for enterprise standard workflows."""
+"""Metrics logging utilities shared across Streamlit workflows."""
 from __future__ import annotations
 
 import csv

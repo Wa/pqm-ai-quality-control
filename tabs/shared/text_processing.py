@@ -1,4 +1,4 @@
-"""Text preprocessing utilities for enterprise standard workflows."""
+"""Text preprocessing utilities reusable by document workflows."""
 from __future__ import annotations
 
 import os

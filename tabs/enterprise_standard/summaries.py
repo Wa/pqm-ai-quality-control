@@ -17,8 +17,7 @@ from ollama import Client as OllamaClient
 
 from util import resolve_ollama_host
 
-from .common import estimate_tokens, report_exception, stream_text
-from .metrics import log_llm_metrics
+from tabs.shared import estimate_tokens, log_llm_metrics, report_exception, stream_text
 
 
 def persist_compare_outputs(initial_dir: str, name_no_ext: str, prompt_texts: List[str], full_out_text: str) -> None:

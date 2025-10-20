@@ -1,4 +1,4 @@
-"""Common helpers shared across the enterprise standard modules."""
+"""Common UI helpers shared across tabs."""
 from __future__ import annotations
 
 import time

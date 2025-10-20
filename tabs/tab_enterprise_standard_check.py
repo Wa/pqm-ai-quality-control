@@ -27,9 +27,9 @@ from util import ensure_session_dirs, handle_file_upload
 
 from .enterprise_standard import (
     KB_MODEL_ID,
-    TAB_SLUG,
     aggregate_outputs,
     cleanup_orphan_txts,
+    ENTERPRISE_WORKFLOW_SURFACE,
     estimate_tokens,
     get_bisheng_settings,
     log_llm_metrics,
@@ -74,14 +74,20 @@ def render_enterprise_standard_check_tab(session_id):
         "generated": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
-    standards_dir = session_dirs.get("enterprise_standards")
-    examined_dir = session_dirs.get("enterprise_examined")
-    generated_session_dir = session_dirs.get("generated")
-    enterprise_out_root = os.path.join(generated_session_dir, "enterprise_standard_check")
-    standards_txt_dir = os.path.join(enterprise_out_root, "standards_txt")
-    examined_txt_dir = os.path.join(enterprise_out_root, "examined_txt")
-    os.makedirs(standards_txt_dir, exist_ok=True)
-    os.makedirs(examined_txt_dir, exist_ok=True)
+    try:
+        workflow_paths = ENTERPRISE_WORKFLOW_SURFACE.prepare_paths(session_dirs)
+    except KeyError as error:
+        st.error(f"初始化会话目录失败：{error}")
+        return
+
+    standards_dir = workflow_paths.standards_dir
+    examined_dir = workflow_paths.examined_dir
+    enterprise_out_root = workflow_paths.output_root
+    standards_txt_dir = workflow_paths.standards_txt_dir
+    examined_txt_dir = workflow_paths.examined_txt_dir
+    initial_results_dir = workflow_paths.initial_results_dir
+    final_results_dir = workflow_paths.final_results_dir
+    checkpoint_dir = workflow_paths.checkpoint_dir
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
@@ -154,11 +160,10 @@ def render_enterprise_standard_check_tab(session_id):
         with col_clear3:
             if st.button("🗑️ 清空分析结果", key=f"clear_enterprise_results_{session_id}"):
                 try:
-                    final_dir_path = os.path.join(enterprise_out_root, 'final_results')
                     deleted_count = 0
-                    if os.path.isdir(final_dir_path):
-                        for fname in os.listdir(final_dir_path):
-                            fpath = os.path.join(final_dir_path, fname)
+                    if os.path.isdir(final_results_dir):
+                        for fname in os.listdir(final_results_dir):
+                            fpath = os.path.join(final_results_dir, fname)
                             if os.path.isfile(fpath):
                                 os.remove(fpath)
                                 deleted_count += 1
@@ -214,7 +219,7 @@ def render_enterprise_standard_check_tab(session_id):
 
         with tab_results:
             # List files under generated/<session>/enterprise_standard_check/final_results
-            final_dir = os.path.join(enterprise_out_root, 'final_results')
+            final_dir = final_results_dir
             if os.path.isdir(final_dir):
                 final_files = get_file_list(final_dir)
                 if final_files:
@@ -285,7 +290,7 @@ def render_enterprise_standard_check_tab(session_id):
                         pass
                     # Step 0b: Clear previous run results so current run writes fresh outputs
                     try:
-                        initial_dir = os.path.join(enterprise_out_root, 'initial_results')
+                        initial_dir = initial_results_dir
                         os.makedirs(initial_dir, exist_ok=True)
                         cleared = 0
                         for fname in os.listdir(initial_dir):
@@ -336,7 +341,6 @@ def render_enterprise_standard_check_tab(session_id):
                         else:
                             # --- Checkpoint preparation: generate prompts for all chunks and manifest ---
                             try:
-                                checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
                                 os.makedirs(checkpoint_dir, exist_ok=True)
                                 # If previous manifest exists and all entries are done, clear checkpoint files
                                 try:
@@ -371,12 +375,6 @@ def render_enterprise_standard_check_tab(session_id):
                                     run_id = ""
                                 manifest = {"run_id": run_id, "entries": []}
                                 # The same prompt prefix used later in streaming phase
-                                prompt_prefix = (
-                                    "请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-                                    "以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
-                                    "输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
-                                    "由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
-                                )
                                 entry_id = 0
                                 for _fname in sorted(exam_txt_files, key=lambda x: x.lower()):
                                     _src = os.path.join(examined_txt_dir, _fname)
@@ -388,7 +386,7 @@ def render_enterprise_standard_check_tab(session_id):
                                     _chunks = split_to_chunks(_doc_text, int(BISHENG_MAX_WORDS))
                                     for _ci, _piece in enumerate(_chunks):
                                         entry_id += 1
-                                        _prompt_text = f"{prompt_prefix}{_piece}"
+                                        _prompt_text = ENTERPRISE_WORKFLOW_SURFACE.build_chunk_prompt(_piece)
                                         # Use 1-based numbering per chunk within file for filenames, new convention
                                         _num = _ci + 1
                                         _prompt_name = f"checkpoint_prompt_{_fname}_pt{_num}.txt"
@@ -455,7 +453,6 @@ def render_enterprise_standard_check_tab(session_id):
                 if st.session_state.get(f"enterprise_running_{session_id}"):
                     st.info("当前流程正在运行，请先停止再继续。")
                 else:
-                    checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
                     manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
                     _has_entries = False
                     try:
@@ -489,7 +486,7 @@ def render_enterprise_standard_check_tab(session_id):
                         (os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
                         (os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
                         # New: copy final_results for demo summary
-                        (os.path.join(demo_enterprise, "final_results"), os.path.join(enterprise_out_root, "final_results")),
+                        (os.path.join(demo_enterprise, "final_results"), final_results_dir),
                         # New: copy pre-made prompted responses and json outputs for demo
                         (os.path.join(demo_enterprise, "prompted_llm responses_and_json"), os.path.join(enterprise_out_root, "prompted_llm responses_and_json")),
                     ]
@@ -531,7 +528,7 @@ def render_enterprise_standard_check_tab(session_id):
             if std_txt_files:
                 with st.status("Sync standards to KB...", expanded=False) as status:
                     try:
-                        kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+                        kb_name_dyn = ENTERPRISE_WORKFLOW_SURFACE.knowledge_base_name(session_id)
                         kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
                         if not kid:
                             kid = create_knowledge(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn, model=str(KB_MODEL_ID))
@@ -556,14 +553,14 @@ def render_enterprise_standard_check_tab(session_id):
             # Iterate examined texts
             exam_txt_files.sort(key=lambda x: x.lower())
             bisheng_session_id = st.session_state.get(f"bisheng_session_{session_id}")
-            initial_dir = os.path.join(enterprise_out_root, 'initial_results')
+            initial_dir = initial_results_dir
             os.makedirs(initial_dir, exist_ok=True)
             # 预热步骤：在并发开始前，串行对 Bisheng Flow 发起一次极短请求，促使检索/LLM 初始化与缓存
             # 说明：首次请求常见的冷启动（模型加载、连接池、检索索引唤醒）会导致首批并发请求失败率上升；
             # 通过一次轻量的预热，可以显著降低“第一批全挂”的概率。返回内容无需使用。
             try:
                 if not st.session_state.get(f"enterprise_warmup_done_{session_id}"):
-                    warmup_prompt = "预热：请简短回复 'gotcha' 即可。"
+                    warmup_prompt = ENTERPRISE_WORKFLOW_SURFACE.warmup_prompt or "预热：请简短回复 'gotcha' 即可。"
                     _ = call_flow_process(
                         base_url=BISHENG_BASE_URL,
                         flow_id=BISHENG_FLOW_ID,
@@ -597,17 +594,11 @@ def render_enterprise_standard_check_tab(session_id):
                     st.info("文件为空，跳过。")
                     continue
                 chunks = split_to_chunks(doc_text, int(BISHENG_MAX_WORDS))
-                prompt_prefix = (
-                    "请作为企业标准符合性检查专家，审阅待检查文件与企业标准是否一致。"
-                    "以列表形式列出不一致的点，并引用原文证据（简短摘录）、标明出处（提供企业标准文件的文件名）。\n"
-                    "输出的内容要言简意赅，列出不一致的点即可，不需要列出一致的点，也不需要列出企业标准中缺失的点，最后不需要总结。\n"
-                    "由于待检查文件较长，我将分成多个部分将其上传给你。以下是待检查文件的一部分。\n"
-                )
                 full_out_text = ""
                 prompt_texts = []
                 for i, piece in enumerate(chunks, start=1):
                     col_prompt, col_response = st.columns([1, 1])
-                    prompt_text = f"{prompt_prefix}{piece}"
+                    prompt_text = ENTERPRISE_WORKFLOW_SURFACE.build_chunk_prompt(piece)
                     prompt_texts.append(prompt_text)
                     with col_prompt:
                         st.markdown(f"提示词（第{i}部分，共{len(chunks)}部分）")
@@ -625,7 +616,7 @@ def render_enterprise_standard_check_tab(session_id):
                                 response_placeholder = st.empty()
                                 try:
                                     # Determine per-user KB name and call Flow with tweaks for per-run KB binding
-                                    kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+                                    kb_name_dyn = ENTERPRISE_WORKFLOW_SURFACE.knowledge_base_name(session_id)
                                     kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
                                     start_ts = time.time()
                                     res = call_flow_process(
@@ -677,7 +668,6 @@ def render_enterprise_standard_check_tab(session_id):
                                     # Mark progress in checkpoint only if Bisheng output contains <think>
                                     if '<think>' in (ans_text or ''):
                                         try:
-                                            checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
                                             os.makedirs(checkpoint_dir, exist_ok=True)
                                             resp_fname = f"checkpoint_response_{name}_pt{i}.txt"
                                             resp_path = os.path.join(checkpoint_dir, resp_fname)
@@ -734,7 +724,7 @@ def render_enterprise_standard_check_tab(session_id):
             # Directories prepared by demo button copy
             prompt_dir = os.path.join(enterprise_out_root, 'prompt_text_chunks')
             resp_dir = os.path.join(enterprise_out_root, 'llm responses')
-            final_dir = os.path.join(enterprise_out_root, 'final_results')
+            final_dir = final_results_dir
             prompted_and_json_dir = os.path.join(enterprise_out_root, 'prompted_llm responses_and_json')
             # Collect prompt chunk files
             prompt_files = []
@@ -882,9 +872,9 @@ def render_enterprise_standard_check_tab(session_id):
             # Retrieve context and init dirs
             std_txt_files = st.session_state.get(f"enterprise_std_txt_files_{session_id}") or []
             exam_txt_files = st.session_state.get(f"enterprise_exam_txt_files_{session_id}") or []
-            initial_dir = os.path.join(enterprise_out_root, 'initial_results')
+            initial_dir = initial_results_dir
             os.makedirs(initial_dir, exist_ok=True)
-            checkpoint_dir = os.path.join(enterprise_out_root, 'checkpoint')
+            os.makedirs(checkpoint_dir, exist_ok=True)
             manifest_path = os.path.join(checkpoint_dir, 'manifest.json')
             _manifest = None
             try:
@@ -952,7 +942,7 @@ def render_enterprise_standard_check_tab(session_id):
                                     else:
                                         # run LLM and update manifest
                                         try:
-                                            kb_name_dyn = f"{session_id}_{TAB_SLUG}"
+                                            kb_name_dyn = ENTERPRISE_WORKFLOW_SURFACE.knowledge_base_name(session_id)
                                             kid = find_knowledge_id_by_name(BISHENG_BASE_URL, BISHENG_API_KEY or None, kb_name_dyn)
                                             response_text = ""
                                             res = call_flow_process(

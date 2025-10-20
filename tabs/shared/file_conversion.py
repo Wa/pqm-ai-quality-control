@@ -1,4 +1,4 @@
-"""File conversion helpers for enterprise standard processing."""
+"""File conversion helpers shared across document-processing tabs."""
 from __future__ import annotations
 
 import io

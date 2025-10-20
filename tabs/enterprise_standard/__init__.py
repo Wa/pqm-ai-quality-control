@@ -1,15 +1,22 @@
 """Enterprise standard check tab package."""
 
-from .common import estimate_tokens, report_exception, stream_text
-from .file_conversion import (
+from tabs.shared import (
+    WorkflowPaths,
+    WorkflowSurface,
+    annotate_txt_file_inplace,
     cleanup_orphan_txts,
+    estimate_tokens,
+    insert_source_markers,
+    log_llm_metrics,
+    preprocess_txt_directories,
     process_archives,
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
     process_word_ppt_folder,
+    report_exception,
+    stream_text,
 )
-from .metrics import log_llm_metrics
 from .settings import (
     BishengSettings,
     KB_MODEL_ID,
@@ -18,11 +25,7 @@ from .settings import (
     get_bisheng_settings,
 )
 from .summaries import aggregate_outputs, persist_compare_outputs, summarize_with_ollama
-from .text_processing import (
-    annotate_txt_file_inplace,
-    insert_source_markers,
-    preprocess_txt_directories,
-)
+from .workflow import ENTERPRISE_WORKFLOW_SURFACE
 
 __all__ = [
     "TAB_ENV_PREFIX",
@@ -30,6 +33,8 @@ __all__ = [
     "KB_MODEL_ID",
     "BishengSettings",
     "get_bisheng_settings",
+    "WorkflowPaths",
+    "WorkflowSurface",
     "estimate_tokens",
     "report_exception",
     "stream_text",
@@ -46,4 +51,5 @@ __all__ = [
     "summarize_with_ollama",
     "aggregate_outputs",
     "log_llm_metrics",
+    "ENTERPRISE_WORKFLOW_SURFACE",
 ]
