@@ -346,6 +346,9 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 ]
             )
 
+    csv_path: str | None = None
+    xlsx_path: str | None = None
+
     if rows:
         csv_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         try:
@@ -365,6 +368,28 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 df.to_excel(xlsx_path, index=False)
             except Exception as error:
                 report_exception("写入Excel失败", error, level="warning")
+
+        try:
+            if csv_path and os.path.exists(csv_path):
+                with open(csv_path, "rb") as handle:
+                    st.download_button(
+                        label="下载CSV结果",
+                        data=handle.read(),
+                        file_name=os.path.basename(csv_path),
+                        mime="text/csv",
+                        key=f"download_csv_{session_id}",
+                    )
+            if xlsx_path and os.path.exists(xlsx_path):
+                with open(xlsx_path, "rb") as handle:
+                    st.download_button(
+                        label="下载Excel结果",
+                        data=handle.read(),
+                        file_name=os.path.basename(xlsx_path),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_xlsx_{session_id}",
+                    )
+        except Exception as error:
+            report_exception("生成下载链接失败", error, level="warning")
 
     try:
         pairs = []
