@@ -50,6 +50,77 @@ def summarize_with_ollama(
     full_out_text: str,
 ) -> None:
     try:
+        original_name = name_no_ext
+        prompt_lines = [
+            "你是一个严谨的结构化信息抽取助手。以下内容来自一个基于 RAG 的大语言模型 (RAG-LLM) 系统，",
+            "用于将若干技术文件与企业标准进行逐条比对，输出发现的不符合项及其理由。本文件对应的原始技术文件名称为：",
+            f"{original_name}。",
+            "\n请将随后的全文内容转换为 JSON 数组（list of objects），每个对象包含如下五个键：",
+            f"- 技术文件名：\"{original_name}\"",
+            "- 技术文件内容：与该条不一致点相关的技术文件条目或段落名称/编号/摘要",
+            "- 企业标准：被对比的企业标准条款名称/编号/摘要",
+            "- 不一致之处：不符合或存在差异的具体点，尽量具体明确",
+            "- 理由：判断不一致的依据与简要解释（保持客观、可追溯）",
+            "\n要求：",
+            "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本），键名使用上述中文；",
+            "2) 若内容包含多处对比，按条目拆分为多条 JSON 对象；",
+            "3) 若某处信息缺失，请以空字符串 \"\" 占位，不要编造；",
+            "4) 尽量保留可用于追溯定位的原文线索（如编号、标题、页码等）于相应字段中。",
+            "\n下面是需要转换为 JSON 的原始比对输出：\n\n",
+        ]
+        instruction = "".join(prompt_lines)
+        text = full_out_text or ""
+
+        max_thinks_per_part = 20
+        max_chars_per_part = 8000
+        think_indices: list[int] = []
+        needle = "<think>"
+        start = 0
+        while True:
+            pos = text.find(needle, start)
+            if pos == -1:
+                break
+            think_indices.append(pos)
+            start = pos + len(needle)
+
+        boundaries: list[int] = []
+        prev = 0
+        count_since_prev = 0
+        for pos in think_indices:
+            count_since_prev += 1
+            if count_since_prev >= max_thinks_per_part or (pos - prev) >= max_chars_per_part:
+                boundaries.append(pos)
+                prev = pos
+                count_since_prev = 0
+
+        parts: list[str] = []
+        prev = 0
+        for boundary in boundaries:
+            parts.append(text[prev:boundary])
+            prev = boundary
+        parts.append(text[prev:])
+
+        # Remove legacy prompted_response files for this document to avoid stale parts lingering.
+        try:
+            for fname in os.listdir(initial_dir):
+                if fname.startswith(f"prompted_response_{name_no_ext}_pt") and fname.endswith(".txt"):
+                    os.remove(os.path.join(initial_dir, fname))
+        except Exception:
+            # Best effort cleanup; continue writing new parts even if deletion fails.
+            pass
+
+        for index, part in enumerate(parts, start=1):
+            cleaned_part = re.sub(r"<think>[\s\S]*?</think>", "", part)
+            prompted_path = os.path.join(
+                initial_dir, f"prompted_response_{name_no_ext}_pt{index}.txt"
+            )
+            with open(prompted_path, "w", encoding="utf-8") as handle:
+                handle.write(instruction)
+                handle.write(cleaned_part)
+    except Exception as error:
+        report_exception("生成Ollama汇总提示失败", error, level="warning")
+
+    try:
         part_files: list[str] = []
         try:
             for fname in os.listdir(initial_dir):
