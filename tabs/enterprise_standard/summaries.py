@@ -10,7 +10,10 @@ import time
 from datetime import datetime
 from typing import List
 
-import streamlit as st
+try:  # pragma: no cover - backend execution may not ship Streamlit
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # type: ignore
 
 from config import CONFIG
 from ollama import Client as OllamaClient

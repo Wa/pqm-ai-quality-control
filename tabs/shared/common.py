@@ -4,17 +4,25 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import streamlit as st
+try:  # pragma: no cover - optional dependency during backend execution
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover - backend or tests without Streamlit
+    st = None  # type: ignore
 
 
 def report_exception(message: str, error: Exception, *, level: str = "error") -> None:
-    """Log exceptions to Streamlit while avoiding silent failures."""
+    """Log exceptions to Streamlit when available, otherwise fallback to stderr."""
 
-    log_fn = getattr(st, level, None)
-    if callable(log_fn):
-        log_fn(f"{message}: {error}")
-    else:
-        st.error(f"{message}: {error}")
+    formatted = f"{message}: {error}"
+    if st is not None:
+        log_fn = getattr(st, level, None)
+        if callable(log_fn):
+            log_fn(formatted)
+            return
+        # Fall back to Streamlit error display if requested level missing
+        st.error(formatted)
+    else:  # pragma: no cover - lightweight fallback for backend workers
+        print(formatted)
 
 
 def stream_text(
