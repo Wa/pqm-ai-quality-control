@@ -1,11 +1,14 @@
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-import json
+import multiprocessing
+from multiprocessing import Process, Queue
+from queue import Full
 import os
 import shutil
 import time
-from threading import Lock
-from typing import Any, Dict, List, Optional
+import traceback
+from datetime import datetime
+from threading import Lock, Thread
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -58,6 +61,7 @@ class EnterpriseJobStatus(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: float
     updated_at: float
+    pid: Optional[int] = None
 
 
 @dataclass
@@ -75,12 +79,41 @@ class JobRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=lambda: time.time())
     updated_at: float = field(default_factory=lambda: time.time())
-    future: Optional[Future] = None
+    process: Optional[Process] = None
+    pid: Optional[int] = None
 
 
-executor = ThreadPoolExecutor(max_workers=2)
 jobs_lock = Lock()
 jobs: Dict[str, JobRecord] = {}
+
+# IPC queue for background worker processes to push incremental updates
+_update_queue: "Queue[Tuple[str, Dict[str, Any]]]" = multiprocessing.Queue()
+
+
+def _update_listener_loop(queue: "Queue[Tuple[str, Dict[str, Any]]]") -> None:
+    """Drain the multiprocessing queue and apply updates to job records."""
+
+    while True:
+        try:
+            job_id, payload = queue.get()
+        except Exception:
+            continue
+        if job_id is None:
+            break
+        try:
+            if isinstance(payload, dict):
+                _update_job(job_id, payload)
+        except Exception:
+            continue
+
+
+if multiprocessing.current_process().name == "MainProcess":
+    _listener_thread = Thread(
+        target=_update_listener_loop,
+        args=(_update_queue,),
+        daemon=True,
+    )
+    _listener_thread.start()
 
 
 def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
@@ -98,6 +131,7 @@ def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
         metadata=record.metadata,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        pid=record.pid,
     )
 
 
@@ -138,6 +172,11 @@ def _update_job(job_id: str, update: Dict[str, Any]) -> None:
                     record.logs = record.logs[-200:]
         if "checkpoint" in update:
             record.metadata["checkpoint"] = update["checkpoint"]
+        if "pid" in update:
+            try:
+                record.pid = int(update["pid"]) if update["pid"] is not None else None
+            except (TypeError, ValueError):
+                record.pid = None
 
 
 def _prune_jobs(max_age_seconds: float = 6 * 3600) -> None:
@@ -146,6 +185,75 @@ def _prune_jobs(max_age_seconds: float = 6 * 3600) -> None:
         expired = [job_id for job_id, record in jobs.items() if record.updated_at < cutoff and record.status in {"succeeded", "failed"}]
         for job_id in expired:
             jobs.pop(job_id, None)
+
+
+def _job_process_entry(job_id: str, session_id: str, queue: "Queue[Tuple[str, Dict[str, Any]]]") -> None:
+    """Entry point executed within a separate process for enterprise jobs."""
+
+    def publish(update: Dict[str, Any]) -> None:
+        payload = dict(update or {})
+        try:
+            queue.put_nowait((job_id, payload))
+        except Full:
+            pass
+        except Exception:
+            pass
+
+    try:
+        run_enterprise_standard_job(session_id, publish)
+    except Exception as error:
+        publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": str(error),
+                "message": "后台任务执行失败",
+            }
+        )
+        try:
+            queue.put_nowait(
+                (
+                    job_id,
+                    {
+                        "log": {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "level": "error",
+                            "message": traceback.format_exc(limit=10),
+                        }
+                    },
+                )
+            )
+        except Full:
+            pass
+        except Exception:
+            pass
+        raise
+
+
+def _monitor_process(job_id: str, process: Process) -> None:
+    """Wait for a child process to exit and reconcile final status."""
+
+    try:
+        process.join()
+    except Exception:
+        return
+
+    exit_code = process.exitcode
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            return
+        record.process = None
+        record.pid = None
+        record.updated_at = time.time()
+        if record.status not in {"failed", "succeeded"}:
+            if exit_code == 0:
+                record.status = "succeeded"
+                record.stage = "completed"
+            else:
+                record.status = "failed"
+                record.stage = "completed"
+                record.error = f"任务进程异常退出(code={exit_code})"
 # Base directories
 BASE_DIR = ""  # Use root directory instead of "user_sessions"
 
@@ -299,35 +407,33 @@ async def start_enterprise_standard_job(request: EnterpriseJobRequest):
         record.created_at = record.updated_at = time.time()
         jobs[job_id] = record
 
-    def publish(update: Dict[str, Any]) -> None:
-        _update_job(job_id, update)
+    try:
+        process = Process(
+            target=_job_process_entry,
+            args=(job_id, request.session_id, _update_queue),
+            daemon=False,
+        )
+        process.start()
+    except Exception as error:
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        raise HTTPException(status_code=500, detail=f"后台任务启动失败: {error}")
 
-    future = executor.submit(run_enterprise_standard_job, request.session_id, publish)
     with jobs_lock:
         record = jobs[job_id]
-        record.future = future
+        record.process = process
+        record.pid = process.pid
         record.status = "running"
         record.stage = "initializing"
         record.message = "任务已启动"
         record.updated_at = time.time()
 
-    def finalize(fut: Future) -> None:
-        exc = fut.exception()
-        if exc is not None:
-            _update_job(job_id, {"status": "failed", "stage": "completed", "error": str(exc)})
-        else:
-            with jobs_lock:
-                rec = jobs.get(job_id)
-                if rec and rec.status not in {"succeeded", "failed"}:
-                    rec.status = "succeeded"
-                    rec.stage = "completed"
-                    rec.updated_at = time.time()
-        with jobs_lock:
-            rec = jobs.get(job_id)
-            if rec:
-                rec.future = None
-
-    future.add_done_callback(finalize)
+    try:
+        _update_queue.put_nowait((job_id, {"pid": process.pid}))
+    except Full:
+        pass
+    monitor_thread = Thread(target=_monitor_process, args=(job_id, process), daemon=True)
+    monitor_thread.start()
     return _record_to_status(record)
 
 
@@ -355,4 +461,4 @@ async def list_enterprise_standard_jobs(session_id: Optional[str] = None):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001) 
+    uvicorn.run(app, host="0.0.0.0", port=8001)

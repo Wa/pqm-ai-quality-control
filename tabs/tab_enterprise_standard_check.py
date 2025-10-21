@@ -259,11 +259,14 @@ def render_enterprise_standard_check_tab(session_id):
                 }
                 stage = str(job_status.get("stage") or "")
                 message = str(job_status.get("message") or "")
+                pid = job_status.get("pid")
                 st.markdown(f"**后台任务状态：{status_labels.get(status_value, status_value)}**")
                 if stage:
                     st.caption(f"当前阶段：{stage}")
                 if message:
                     st.write(message)
+                if pid:
+                    st.caption(f"后台进程ID：{pid}")
                 total_chunks = int(job_status.get("total_chunks") or 0)
                 processed_chunks = int(job_status.get("processed_chunks") or 0)
                 if total_chunks > 0:
