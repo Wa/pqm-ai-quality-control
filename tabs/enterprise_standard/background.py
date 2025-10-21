@@ -356,9 +356,21 @@ def run_enterprise_standard_job(
         chunks = split_to_chunks(doc_text, int(settings.max_words))
         full_out_text = ""
         prompt_texts: List[str] = []
+        total_parts = len(chunks)
         for index, piece in enumerate(chunks, start=1):
             prompt_text = ENTERPRISE_WORKFLOW_SURFACE.build_chunk_prompt(piece)
             prompt_texts.append(prompt_text)
+            publish(
+                {
+                    "stream": {
+                        "kind": "prompt",
+                        "file": name,
+                        "part": index,
+                        "total_parts": total_parts,
+                        "text": prompt_text,
+                    }
+                }
+            )
             publish({
                 "stage": "compare",
                 "message": f"调用 Bisheng ({name} 第{index}/{len(chunks)}段)",
@@ -427,6 +439,17 @@ def run_enterprise_standard_job(
                     pass
             processed_chunks += 1
             publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
+            publish(
+                {
+                    "stream": {
+                        "kind": "response",
+                        "file": name,
+                        "part": index,
+                        "total_parts": total_parts,
+                        "text": ans_text or "",
+                    }
+                }
+            )
         try:
             name_no_ext = os.path.splitext(name)[0]
             persist_compare_outputs(initial_results_dir, name_no_ext, prompt_texts, full_out_text)

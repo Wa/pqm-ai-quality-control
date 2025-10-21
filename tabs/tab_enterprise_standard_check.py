@@ -50,6 +50,7 @@ def render_enterprise_standard_check_tab(session_id):
     job_state_key = f"enterprise_job_id_{session_id}"
     job_status: dict[str, object] | None = None
     job_error: str | None = None
+    stream_state_key = f"enterprise_stream_state_{session_id}"
     if backend_ready and backend_client is not None:
         stored_job_id = st.session_state.get(job_state_key)
         if stored_job_id:
@@ -294,12 +295,64 @@ def render_enterprise_standard_check_tab(session_id):
                             level = entry.get("level") or "info"
                             message = entry.get("message") or ""
                             st.write(f"[{ts}] {level}: {message}")
+                stream_events = job_status.get("stream_events")
+                if isinstance(stream_events, list) and stream_events:
+                    stream_state = st.session_state.get(stream_state_key)
+                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_status.get("job_id"):
+                        stream_state = {"job_id": job_status.get("job_id"), "rendered": []}
+                    rendered_set = set(stream_state.get("rendered") or [])
+                    events_sorted = sorted(
+                        [event for event in stream_events if isinstance(event, dict)],
+                        key=lambda item: int(item.get("sequence") or 0),
+                    )
+                    with st.expander("运行输出", expanded=status_value in {"queued", "running"}):
+                        current_group: tuple[str, int] | None = None
+                        for event in events_sorted:
+                            seq = int(event.get("sequence") or 0)
+                            is_new = seq not in rendered_set
+                            rendered_set.add(seq)
+                            file_name = str(event.get("file") or event.get("file_name") or "")
+                            part = int(event.get("part") or 0)
+                            total_parts = int(event.get("total_parts") or 0)
+                            kind = str(event.get("kind") or "info")
+                            header_key: tuple[str, int] | None = None
+                            if file_name and part:
+                                header_key = (file_name, part)
+                            if header_key and header_key != current_group:
+                                if total_parts > 0:
+                                    st.markdown(f"**{file_name} · 第{part}/{total_parts}段**")
+                                else:
+                                    st.markdown(f"**{file_name} · 第{part}段**")
+                                current_group = header_key
+                            role = "user" if kind == "prompt" else "assistant"
+                            message_text = str(event.get("text") or "")
+                            timestamp = event.get("ts")
+                            with st.chat_message(role):
+                                if timestamp:
+                                    st.caption(str(timestamp))
+                                if message_text:
+                                    if is_new:
+                                        placeholder = st.empty()
+                                        render_method = "text" if role == "user" else "write"
+                                        stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
+                                    else:
+                                        if role == "user":
+                                            st.text(message_text)
+                                        else:
+                                            st.write(message_text)
+                                else:
+                                    st.write("(无内容)")
+                    stream_state["rendered"] = sorted(rendered_set)
+                    st.session_state[stream_state_key] = stream_state
             elif job_error:
                 st.warning(job_error)
+                st.session_state.pop(stream_state_key, None)
             elif backend_ready:
                 st.info("后台服务已连接，点击开始即可在后台运行企业标准检查。")
+                st.session_state.pop(stream_state_key, None)
             else:
                 st.warning("后台服务不可用，请稍后重试。")
+                st.session_state.pop(stream_state_key, None)
 
         # Two uploaders side by side
         col_std, col_exam = st.columns(2)

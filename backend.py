@@ -58,6 +58,7 @@ class EnterpriseJobStatus(BaseModel):
     result_files: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     logs: List[Dict[str, Any]] = Field(default_factory=list)
+    stream_events: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: float
     updated_at: float
@@ -76,6 +77,7 @@ class JobRecord:
     result_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    stream_events: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=lambda: time.time())
     updated_at: float = field(default_factory=lambda: time.time())
@@ -128,6 +130,7 @@ def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
         result_files=record.result_files,
         error=record.error,
         logs=record.logs,
+        stream_events=record.stream_events,
         metadata=record.metadata,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -170,6 +173,18 @@ def _update_job(job_id: str, update: Dict[str, Any]) -> None:
                 record.logs.append(log_entry)
                 if len(record.logs) > 200:
                     record.logs = record.logs[-200:]
+        if "stream" in update:
+            stream_entry = update["stream"]
+            if isinstance(stream_entry, dict):
+                entry = dict(stream_entry)
+                seq_counter = int(record.metadata.get("_stream_seq", 0))
+                seq_counter += 1
+                record.metadata["_stream_seq"] = seq_counter
+                entry.setdefault("sequence", seq_counter)
+                entry.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+                record.stream_events.append(entry)
+                if len(record.stream_events) > 120:
+                    record.stream_events = record.stream_events[-120:]
         if "checkpoint" in update:
             record.metadata["checkpoint"] = update["checkpoint"]
         if "pid" in update:
