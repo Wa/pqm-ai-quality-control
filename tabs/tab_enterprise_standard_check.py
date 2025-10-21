@@ -327,7 +327,10 @@ def render_enterprise_standard_check_tab(session_id):
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
                         st.success("已提交后台任务，刷新或稍后查看进度。")
-                        st.experimental_rerun()
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        else:
+                            st.experimental_rerun()
                     else:
                         detail = ""
                         if isinstance(response, dict):
