@@ -1,10 +1,18 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+import json
 import os
 import shutil
-from typing import List, Dict
-import json
+import time
+from threading import Lock
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from tabs.enterprise_standard.background import run_enterprise_standard_job
 
 app = FastAPI(title="PQM AI Backend", description="File operations backend for PQM AI Quality Control")
 
@@ -31,6 +39,113 @@ class FileInfo(BaseModel):
     size: int
     modified_time: str
 
+
+class EnterpriseJobRequest(BaseModel):
+    session_id: str
+
+
+class EnterpriseJobStatus(BaseModel):
+    job_id: str
+    session_id: str
+    status: str
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    result_files: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    logs: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+@dataclass
+class JobRecord:
+    job_id: str
+    session_id: str
+    status: str = "queued"
+    stage: Optional[str] = None
+    message: Optional[str] = None
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    result_files: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=lambda: time.time())
+    updated_at: float = field(default_factory=lambda: time.time())
+    future: Optional[Future] = None
+
+
+executor = ThreadPoolExecutor(max_workers=2)
+jobs_lock = Lock()
+jobs: Dict[str, JobRecord] = {}
+
+
+def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
+    return EnterpriseJobStatus(
+        job_id=record.job_id,
+        session_id=record.session_id,
+        status=record.status,
+        stage=record.stage,
+        message=record.message,
+        processed_chunks=record.processed_chunks,
+        total_chunks=record.total_chunks,
+        result_files=record.result_files,
+        error=record.error,
+        logs=record.logs,
+        metadata=record.metadata,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _update_job(job_id: str, update: Dict[str, Any]) -> None:
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            return
+        record.updated_at = time.time()
+        if "status" in update:
+            record.status = str(update["status"])
+        if "stage" in update:
+            record.stage = str(update["stage"]) if update["stage"] is not None else None
+        if "message" in update:
+            record.message = str(update["message"]) if update["message"] is not None else None
+        if "processed_chunks" in update:
+            try:
+                record.processed_chunks = int(update["processed_chunks"])  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                pass
+        if "total_chunks" in update:
+            try:
+                record.total_chunks = int(update["total_chunks"])  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                pass
+        if "result_files" in update:
+            try:
+                record.result_files = [str(path) for path in update["result_files"]]
+            except Exception:
+                record.result_files = []
+        if "error" in update and update["error"]:
+            record.error = str(update["error"])
+        if "log" in update:
+            log_entry = update["log"]
+            if isinstance(log_entry, dict):
+                record.logs.append(log_entry)
+                if len(record.logs) > 200:
+                    record.logs = record.logs[-200:]
+        if "checkpoint" in update:
+            record.metadata["checkpoint"] = update["checkpoint"]
+
+
+def _prune_jobs(max_age_seconds: float = 6 * 3600) -> None:
+    cutoff = time.time() - max_age_seconds
+    with jobs_lock:
+        expired = [job_id for job_id, record in jobs.items() if record.updated_at < cutoff and record.status in {"succeeded", "failed"}]
+        for job_id in expired:
+            jobs.pop(job_id, None)
 # Base directories
 BASE_DIR = ""  # Use root directory instead of "user_sessions"
 
@@ -168,6 +283,75 @@ async def file_exists(session_id: str, file_path: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Check file failed: {str(e)}")
+
+
+@app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)
+async def start_enterprise_standard_job(request: EnterpriseJobRequest):
+    _prune_jobs()
+    with jobs_lock:
+        for record in jobs.values():
+            if record.session_id == request.session_id and record.status in {"queued", "running"}:
+                raise HTTPException(status_code=409, detail="已有企业标准检查任务正在运行")
+        job_id = uuid4().hex
+        record = JobRecord(job_id=job_id, session_id=request.session_id)
+        record.stage = "queued"
+        record.message = "任务已加入队列"
+        record.created_at = record.updated_at = time.time()
+        jobs[job_id] = record
+
+    def publish(update: Dict[str, Any]) -> None:
+        _update_job(job_id, update)
+
+    future = executor.submit(run_enterprise_standard_job, request.session_id, publish)
+    with jobs_lock:
+        record = jobs[job_id]
+        record.future = future
+        record.status = "running"
+        record.stage = "initializing"
+        record.message = "任务已启动"
+        record.updated_at = time.time()
+
+    def finalize(fut: Future) -> None:
+        exc = fut.exception()
+        if exc is not None:
+            _update_job(job_id, {"status": "failed", "stage": "completed", "error": str(exc)})
+        else:
+            with jobs_lock:
+                rec = jobs.get(job_id)
+                if rec and rec.status not in {"succeeded", "failed"}:
+                    rec.status = "succeeded"
+                    rec.stage = "completed"
+                    rec.updated_at = time.time()
+        with jobs_lock:
+            rec = jobs.get(job_id)
+            if rec:
+                rec.future = None
+
+    future.add_done_callback(finalize)
+    return _record_to_status(record)
+
+
+@app.get("/enterprise-standard/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_enterprise_standard_job(job_id: str):
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="未找到任务")
+    return _record_to_status(record)
+
+
+@app.get("/enterprise-standard/jobs", response_model=List[EnterpriseJobStatus])
+async def list_enterprise_standard_jobs(session_id: Optional[str] = None):
+    _prune_jobs()
+    with jobs_lock:
+        records = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if session_id is None or record.session_id == session_id
+        ]
+    records.sort(key=lambda status: status.created_at, reverse=True)
+    return records
 
 if __name__ == "__main__":
     import uvicorn

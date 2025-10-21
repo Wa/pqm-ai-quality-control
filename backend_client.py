@@ -64,6 +64,32 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def start_enterprise_job(self, session_id: str) -> Dict:
+        """Start an enterprise standard check job."""
+        try:
+            payload = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/enterprise-standard/jobs", json=payload)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_enterprise_job(self, job_id: str) -> Dict:
+        """Fetch a specific enterprise job status."""
+        try:
+            response = requests.get(f"{self.base_url}/enterprise-standard/jobs/{job_id}")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_enterprise_jobs(self, session_id: Optional[str] = None) -> Dict:
+        """List enterprise jobs for a session (or all sessions)."""
+        try:
+            params = {"session_id": session_id} if session_id else {}
+            response = requests.get(f"{self.base_url}/enterprise-standard/jobs", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
 # Global backend client instance
 def get_backend_client():
     """Get backend client instance"""

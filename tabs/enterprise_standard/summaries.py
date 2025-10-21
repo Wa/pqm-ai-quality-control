@@ -23,6 +23,12 @@ from util import resolve_ollama_host
 from tabs.shared import estimate_tokens, log_llm_metrics, report_exception, stream_text
 
 
+def _st_available() -> bool:
+    """Return True when Streamlit runtime is importable and active."""
+
+    return st is not None
+
+
 def persist_compare_outputs(initial_dir: str, name_no_ext: str, prompt_texts: List[str], full_out_text: str) -> None:
     """Write prompt_{file}.txt and response_{file}.txt under initial_results."""
 
@@ -142,6 +148,7 @@ def summarize_with_ollama(
         repeat_penalty = 1.1
         num_ctx = 40001
         num_thread = 4
+        show_ui = _st_available()
         for part_idx, pfname in enumerate(part_files, start=1):
             p_path = os.path.join(initial_dir, pfname)
             try:
@@ -163,97 +170,137 @@ def summarize_with_ollama(
                     report_exception(f"读取已存在的JSON汇总失败({json_name})", error, level="warning")
                     existing_json_text = ""
 
-            col_prompt2, col_resp2 = st.columns([1, 1])
-            with col_prompt2:
-                st.markdown(f"生成汇总表格提示词（第{part_idx}部分，共{total_parts}部分）")
-                prompt_container2 = st.container(height=400)
-                with prompt_container2:
-                    with st.chat_message("user"):
-                        placeholder = st.empty()
-                        stream_text(placeholder, prompt_text_all, render_method="text")
-                st.chat_input(
-                    placeholder="",
-                    disabled=True,
-                    key=f"enterprise_prompted_prompt_{session_id}_{pfname}",
-                )
-            with col_resp2:
-                st.markdown(f"生成汇总表格结果（第{part_idx}部分，共{total_parts}部分）")
-                resp_container2 = st.container(height=400)
-                with resp_container2:
-                    with st.chat_message("assistant"):
-                        ph_resp2 = st.empty()
-                        if (existing_json_text or "").strip():
-                            stream_text(ph_resp2, existing_json_text, render_method="write")
-                            st.caption("已载入之前生成的JSON结果，无需重新调用模型。")
-                        else:
-                            response_text = ""
-                            start_ts = time.time()
-                            last_stats = None
-                            error_msg = ""
-                            chunks_seen = 0
-                            try:
-                                for chunk in ollama_client.chat(
-                                    model=model,
-                                    messages=[{"role": "user", "content": prompt_text_all}],
-                                    stream=True,
-                                    options={
-                                        "temperature": temperature,
-                                        "top_p": top_p,
-                                        "top_k": top_k,
-                                        "repeat_penalty": repeat_penalty,
-                                        "num_ctx": num_ctx,
-                                        "num_thread": num_thread,
-                                    },
-                                ):
-                                    chunks_seen += 1
-                                    new_text = chunk.get("message", {}).get("content", "")
-                                    response_text += new_text
-                                    ph_resp2.write(response_text)
-                                    last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-                            except Exception as error:  # pragma: no cover - runtime safeguard
-                                error_msg = str(error)[:300]
-                            finally:
-                                dur_ms = int((time.time() - start_ts) * 1000)
-                                prompt_tokens = (last_stats or {}).get("prompt_eval_count")
-                                output_tokens = (last_stats or {}).get("eval_count")
-                                if not error_msg and chunks_seen == 0:
-                                    error_msg = "no_stream_chunks"
-                                log_llm_metrics(
-                                    enterprise_out,
-                                    session_id,
-                                    {
-                                        "ts": datetime.now().isoformat(timespec="seconds"),
-                                        "engine": "ollama",
-                                        "model": model,
-                                        "session_id": "",
-                                        "file": name_no_ext,
-                                        "part": part_idx,
-                                        "phase": "summarize",
-                                        "prompt_chars": len(prompt_text_all or ""),
-                                        "prompt_tokens": prompt_tokens
-                                        if isinstance(prompt_tokens, int)
-                                        else estimate_tokens(prompt_text_all or ""),
-                                        "output_chars": len(response_text or ""),
-                                        "output_tokens": output_tokens
-                                        if isinstance(output_tokens, int)
-                                        else estimate_tokens(response_text or ""),
-                                        "duration_ms": dur_ms,
-                                        "success": 1 if (response_text or "").strip() else 0,
-                                        "error": error_msg,
-                                    },
-                                )
-                                try:
-                                    with tempfile.NamedTemporaryFile(
-                                        "w",
-                                        delete=False,
-                                        encoding="utf-8",
-                                        dir=initial_dir,
-                                    ) as tmp:
-                                        tmp.write(response_text)
-                                        tmp_name = tmp.name
-                                    shutil.move(tmp_name, json_path)
-                                except Exception as error:  # pragma: no cover - file IO failures
-                                    report_exception("写入JSON汇总失败", error, level="warning")
+            placeholder = None
+            if show_ui:
+                col_prompt2, col_resp2 = st.columns([1, 1])
+                with col_prompt2:
+                    st.markdown(f"生成汇总表格提示词（第{part_idx}部分，共{total_parts}部分）")
+                    prompt_container2 = st.container(height=400)
+                    with prompt_container2:
+                        with st.chat_message("user"):
+                            placeholder = st.empty()
+                            stream_text(placeholder, prompt_text_all, render_method="text")
+                    st.chat_input(
+                        placeholder="",
+                        disabled=True,
+                        key=f"enterprise_prompted_prompt_{session_id}_{pfname}",
+                    )
+                resp_column = col_resp2
+            else:
+                resp_column = None
+
+            response_placeholder = None
+            if show_ui and resp_column is not None:
+                with resp_column:
+                    st.markdown(f"生成汇总表格结果（第{part_idx}部分，共{total_parts}部分）")
+                    resp_container2 = st.container(height=400)
+                    with resp_container2:
+                        with st.chat_message("assistant"):
+                            response_placeholder = st.empty()
+
+            response_text = (existing_json_text or "").strip()
+            error_msg = ""
+            last_stats = None
+            dur_ms = 0
+            prompt_tokens = None
+            output_tokens = None
+            generated_new = False
+
+            if response_text:
+                if show_ui and response_placeholder is not None:
+                    stream_text(response_placeholder, response_text, render_method="write")
+                    st.caption("已载入之前生成的JSON结果，无需重新调用模型。")
+            else:
+                start_ts = time.time()
+                chunks_seen = 0
+                try:
+                    if show_ui and response_placeholder is not None:
+                        for chunk in ollama_client.chat(
+                            model=model,
+                            messages=[{"role": "user", "content": prompt_text_all}],
+                            stream=True,
+                            options={
+                                "temperature": temperature,
+                                "top_p": top_p,
+                                "top_k": top_k,
+                                "repeat_penalty": repeat_penalty,
+                                "num_ctx": num_ctx,
+                                "num_thread": num_thread,
+                            },
+                        ):
+                            chunks_seen += 1
+                            new_text = chunk.get("message", {}).get("content", "")
+                            response_text += new_text
+                            response_placeholder.write(response_text)
+                            last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+                        generated_new = True
+                    else:
+                        result = ollama_client.chat(
+                            model=model,
+                            messages=[{"role": "user", "content": prompt_text_all}],
+                            stream=False,
+                            options={
+                                "temperature": temperature,
+                                "top_p": top_p,
+                                "top_k": top_k,
+                                "repeat_penalty": repeat_penalty,
+                                "num_ctx": num_ctx,
+                                "num_thread": num_thread,
+                            },
+                        )
+                        if isinstance(result, dict):
+                            response_text = (
+                                result.get("message", {}).get("content")
+                                or result.get("response")
+                                or ""
+                            )
+                            last_stats = result.get("eval_info") or result.get("stats")
+                            generated_new = True if response_text else False
+                except Exception as error:  # pragma: no cover - runtime safeguard
+                    error_msg = str(error)[:300]
+                finally:
+                    dur_ms = int((time.time() - start_ts) * 1000)
+                    prompt_tokens = (last_stats or {}).get("prompt_eval_count") if last_stats else None
+                    output_tokens = (last_stats or {}).get("eval_count") if last_stats else None
+                    if not error_msg and chunks_seen == 0 and not response_text:
+                        error_msg = "no_stream_chunks"
+                    log_llm_metrics(
+                        enterprise_out,
+                        session_id,
+                        {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "engine": "ollama",
+                            "model": model,
+                            "session_id": "",
+                            "file": name_no_ext,
+                            "part": part_idx,
+                            "phase": "summarize",
+                            "prompt_chars": len(prompt_text_all or ""),
+                            "prompt_tokens": prompt_tokens
+                            if isinstance(prompt_tokens, int)
+                            else estimate_tokens(prompt_text_all or ""),
+                            "output_chars": len(response_text or ""),
+                            "output_tokens": output_tokens
+                            if isinstance(output_tokens, int)
+                            else estimate_tokens(response_text or ""),
+                            "duration_ms": dur_ms,
+                            "success": 1 if (response_text or "").strip() else 0,
+                            "error": error_msg,
+                        },
+                    )
+                    if generated_new and (response_text or error_msg):
+                        try:
+                            with tempfile.NamedTemporaryFile(
+                                "w",
+                                delete=False,
+                                encoding="utf-8",
+                                dir=initial_dir,
+                            ) as tmp:
+                                tmp.write(response_text)
+                                tmp_name = tmp.name
+                            shutil.move(tmp_name, json_path)
+                        except Exception as error:  # pragma: no cover - file IO failures
+                            report_exception("写入JSON汇总失败", error, level="warning")
     except Exception as error:  # pragma: no cover - global safeguard
         report_exception("调用Ollama生成汇总失败", error)
 
@@ -277,7 +324,10 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         import pandas as pd  # type: ignore
     except ImportError as error:
         pd = None  # type: ignore[assignment]
-        st.info(f"未安装 pandas，Excel 导出将被跳过：{error}")
+        if _st_available():
+            st.info(f"未安装 pandas，Excel 导出将被跳过：{error}")
+        else:
+            report_exception("未安装 pandas，Excel 导出将被跳过", error, level="warning")
 
     def _strip_code_fences(value: str) -> str:
         value = (value or "").strip()
@@ -372,27 +422,28 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             except Exception as error:
                 report_exception("写入Excel失败", error, level="warning")
 
-        try:
-            if csv_path and os.path.exists(csv_path):
-                with open(csv_path, "rb") as handle:
-                    st.download_button(
-                        label="下载CSV结果",
-                        data=handle.read(),
-                        file_name=os.path.basename(csv_path),
-                        mime="text/csv",
-                        key=f"download_csv_{session_id}",
-                    )
-            if xlsx_path and os.path.exists(xlsx_path):
-                with open(xlsx_path, "rb") as handle:
-                    st.download_button(
-                        label="下载Excel结果",
-                        data=handle.read(),
-                        file_name=os.path.basename(xlsx_path),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_xlsx_{session_id}",
-                    )
-        except Exception as error:
-            report_exception("生成下载链接失败", error, level="warning")
+        if _st_available():
+            try:
+                if csv_path and os.path.exists(csv_path):
+                    with open(csv_path, "rb") as handle:
+                        st.download_button(
+                            label="下载CSV结果",
+                            data=handle.read(),
+                            file_name=os.path.basename(csv_path),
+                            mime="text/csv",
+                            key=f"download_csv_{session_id}",
+                        )
+                if xlsx_path and os.path.exists(xlsx_path):
+                    with open(xlsx_path, "rb") as handle:
+                        st.download_button(
+                            label="下载Excel结果",
+                            data=handle.read(),
+                            file_name=os.path.basename(xlsx_path),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_xlsx_{session_id}",
+                        )
+            except Exception as error:
+                report_exception("生成下载链接失败", error, level="warning")
 
     try:
         pairs = []
@@ -407,8 +458,11 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             return
         try:
             from docx import Document  # type: ignore
-        except ImportError:
-            st.info("未安装 python-docx，暂无法生成Word文档。请安装 python-docx 后重试。")
+        except ImportError as error:
+            if _st_available():
+                st.info("未安装 python-docx，暂无法生成Word文档。请安装 python-docx 后重试。")
+            else:
+                report_exception("缺少 python-docx 依赖，跳过生成Word文档", error, level="warning")
             return
         doc = Document()
         try:
@@ -473,19 +527,20 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         ts_doc = datetime.now().strftime("%Y%m%d_%H%M%S")
         doc_path = os.path.join(final_dir, f"企标检查分析过程_{ts_doc}.docx")
         doc.save(doc_path)
-        try:
-            with open(doc_path, "rb") as handle:
-                st.download_button(
-                    label="下载分析过程Word",
-                    data=handle.read(),
-                    file_name=os.path.basename(doc_path),
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key=f"download_docx_{session_id}",
-                )
-        except Exception:
-            pass
+        if _st_available():
+            try:
+                with open(doc_path, "rb") as handle:
+                    st.download_button(
+                        label="下载分析过程Word",
+                        data=handle.read(),
+                        file_name=os.path.basename(doc_path),
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"download_docx_{session_id}",
+                    )
+            except Exception:
+                pass
     except Exception as error:
-        st.error(f"生成分析过程Word失败：{error}")
+        report_exception("生成分析过程Word失败", error, level="warning")
 
 
 __all__ = ["aggregate_outputs", "persist_compare_outputs", "summarize_with_ollama"]
