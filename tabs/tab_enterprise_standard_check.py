@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -73,8 +74,6 @@ def render_enterprise_standard_check_tab(session_id):
         job_error = "后台服务未连接"
 
     job_running = bool(job_status and str(job_status.get("status")) in {"queued", "running"})
-    if job_running:
-        st.autorefresh(interval=5000, key=f"enterprise_job_refresh_{session_id}")
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
@@ -465,7 +464,7 @@ def render_enterprise_standard_check_tab(session_id):
                             st.chat_input(placeholder="", disabled=True, key=f"enterprise_demo_resp_{session_id}_{base}_{idx}")
             # (Removed hardcoded final report section for demo)
             # End of demo streaming pass; reset the flag
-                st.session_state[f"enterprise_demo_{session_id}"] = False
+            st.session_state[f"enterprise_demo_{session_id}"] = False
 
             # New demo rendering: prompted_response_* and corresponding json_* from pre-made folder
             try:
@@ -541,5 +540,13 @@ def render_enterprise_standard_check_tab(session_id):
                             st.download_button(label="下载Excel结果(演示)", data=fxlsx.read(), file_name=os.path.basename(latest_xlsx), mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f"demo_download_xlsx_{session_id}")
             except Exception:
                 pass
+
+    if job_running:
+        st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
+        time.sleep(5)
+        if hasattr(st, "rerun"):
+            st.rerun()
+        else:
+            st.experimental_rerun()
 
 # The end
