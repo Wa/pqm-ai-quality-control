@@ -10,6 +10,7 @@ from datetime import datetime
 from threading import Lock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+import tempfile
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -204,6 +205,7 @@ def _prune_jobs(max_age_seconds: float = 6 * 3600) -> None:
 
 def _job_process_entry(job_id: str, session_id: str, queue: "Queue[Tuple[str, Dict[str, Any]]]") -> None:
     """Entry point executed within a separate process for enterprise jobs."""
+    # Backward-compat signature retained; control_dir resolved from metadata if available.
 
     def publish(update: Dict[str, Any]) -> None:
         payload = dict(update or {})
@@ -214,8 +216,22 @@ def _job_process_entry(job_id: str, session_id: str, queue: "Queue[Tuple[str, Di
         except Exception:
             pass
 
+    # Attempt to locate control_dir from environment variable set by parent
+    _ctrl_key = f"PQM_JOB_CONTROL_DIR_{job_id}"
+    control_dir = os.environ.get(_ctrl_key, "")
+
+    def check_control() -> Dict[str, bool]:
+        if not control_dir:
+            return {"paused": False, "stopped": False}
+        try:
+            paused = os.path.isfile(os.path.join(control_dir, "pause"))
+            stopped = os.path.isfile(os.path.join(control_dir, "stop"))
+            return {"paused": paused, "stopped": stopped}
+        except Exception:
+            return {"paused": False, "stopped": False}
+
     try:
-        run_enterprise_standard_job(session_id, publish)
+        run_enterprise_standard_job(session_id, publish, check_control=check_control)
     except Exception as error:
         publish(
             {
@@ -423,12 +439,31 @@ async def start_enterprise_standard_job(request: EnterpriseJobRequest):
         jobs[job_id] = record
 
     try:
-        process = Process(
-            target=_job_process_entry,
-            args=(job_id, request.session_id, _update_queue),
-            daemon=False,
-        )
-        process.start()
+        # create a control directory per job for simple cross-process signaling
+        base_ctrl = os.path.join(tempfile.gettempdir(), "pqm_backend", "jobs")
+        os.makedirs(base_ctrl, exist_ok=True)
+        control_dir = os.path.join(base_ctrl, job_id)
+        os.makedirs(control_dir, exist_ok=True)
+        with jobs_lock:
+            jobs[job_id].metadata["control_dir"] = control_dir
+
+        # set an environment variable for the child to locate its control dir
+        _ctrl_key = f"PQM_JOB_CONTROL_DIR_{job_id}"
+        _prev_env = os.environ.get(_ctrl_key)
+        os.environ[_ctrl_key] = control_dir
+        try:
+            process = Process(
+                target=_job_process_entry,
+                args=(job_id, request.session_id, _update_queue),
+                daemon=False,
+            )
+            process.start()
+        finally:
+            # restore/cleanup env var in parent
+            if _prev_env is None:
+                os.environ.pop(_ctrl_key, None)
+            else:
+                os.environ[_ctrl_key] = _prev_env
     except Exception as error:
         with jobs_lock:
             jobs.pop(job_id, None)
@@ -473,6 +508,69 @@ async def list_enterprise_standard_jobs(session_id: Optional[str] = None):
         ]
     records.sort(key=lambda status: status.created_at, reverse=True)
     return records
+
+
+@app.post("/enterprise-standard/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_enterprise_standard_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="未找到任�?")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持暂停")
+        try:
+            open(os.path.join(control_dir, "pause"), "a").close()
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"设置暂停失败: {error}")
+        record.status = "paused"
+        record.stage = "paused"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/enterprise-standard/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_enterprise_standard_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="未找到任�?")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持恢复")
+        try:
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"取消暂停失败: {error}")
+        record.status = "running"
+        record.stage = record.stage or "running"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/enterprise-standard/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+async def stop_enterprise_standard_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="未找到任�?")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持停止")
+        try:
+            open(os.path.join(control_dir, "stop"), "a").close()
+            # also clear pause to allow graceful exit if it was paused
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"请求停止失败: {error}")
+        record.status = "stopping"
+        record.stage = "stopping"
+        record.updated_at = time.time()
+        return _record_to_status(record)
 
 if __name__ == "__main__":
     import uvicorn

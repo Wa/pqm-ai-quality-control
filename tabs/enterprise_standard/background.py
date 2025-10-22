@@ -207,6 +207,7 @@ def _update_manifest_entry(checkpoint_dir: str, file_name: str, chunk_index: int
 def run_enterprise_standard_job(
     session_id: str,
     publish: Callable[[Dict[str, object]], None],
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
 ) -> Dict[str, List[str]]:
     """Run the enterprise standard workflow headlessly and report progress via ``publish``."""
 
@@ -343,6 +344,37 @@ def run_enterprise_standard_job(
     emitter.set_stage("compare")
     processed_chunks = 0
     for name in sorted(exam_txt_files, key=lambda value: value.lower()):
+        # Check control flags before starting each file
+        try:
+            status = check_control() if check_control else None
+        except Exception:
+            status = None
+        if status:
+            if status.get("stopped"):
+                publish({
+                    "status": "failed",
+                    "stage": "stopped",
+                    "message": "任务已被用户停止",
+                    "processed_chunks": processed_chunks,
+                    "total_chunks": total_chunks,
+                })
+                return {"final_results": []}
+            while status.get("paused") and not status.get("stopped"):
+                publish({"status": "paused", "stage": "paused", "message": f"暂停中：等待恢复（当前文件 {name}）"})
+                time.sleep(1)
+                try:
+                    status = check_control() if check_control else None
+                except Exception:
+                    status = None
+            if status and status.get("stopped"):
+                publish({
+                    "status": "failed",
+                    "stage": "stopped",
+                    "message": "任务已被用户停止",
+                    "processed_chunks": processed_chunks,
+                    "total_chunks": total_chunks,
+                })
+                return {"final_results": []}
         publish({"current_file": name, "stage": "compare", "message": f"比对 {name}"})
         try:
             with open(os.path.join(examined_txt_dir, name), "r", encoding="utf-8") as handle:
@@ -358,6 +390,37 @@ def run_enterprise_standard_job(
         prompt_texts: List[str] = []
         total_parts = len(chunks)
         for index, piece in enumerate(chunks, start=1):
+            # Check control flags before each chunk
+            try:
+                status = check_control() if check_control else None
+            except Exception:
+                status = None
+            if status:
+                if status.get("stopped"):
+                    publish({
+                        "status": "failed",
+                        "stage": "stopped",
+                        "message": "任务已被用户停止",
+                        "processed_chunks": processed_chunks,
+                        "total_chunks": total_chunks,
+                    })
+                    return {"final_results": []}
+                while status.get("paused") and not status.get("stopped"):
+                    publish({"status": "paused", "stage": "paused", "message": f"暂停中：等待恢复（{name} 第{index}/{total_parts}）"})
+                    time.sleep(1)
+                    try:
+                        status = check_control() if check_control else None
+                    except Exception:
+                        status = None
+                if status and status.get("stopped"):
+                    publish({
+                        "status": "failed",
+                        "stage": "stopped",
+                        "message": "任务已被用户停止",
+                        "processed_chunks": processed_chunks,
+                        "total_chunks": total_chunks,
+                    })
+                    return {"final_results": []}
             prompt_text = ENTERPRISE_WORKFLOW_SURFACE.build_chunk_prompt(piece)
             prompt_texts.append(prompt_text)
             publish(
