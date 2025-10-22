@@ -64,6 +64,56 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def start_enterprise_job(self, session_id: str) -> Dict:
+        """Start an enterprise standard check job."""
+        try:
+            payload = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/enterprise-standard/jobs", json=payload)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_enterprise_job(self, job_id: str) -> Dict:
+        """Fetch a specific enterprise job status."""
+        try:
+            response = requests.get(f"{self.base_url}/enterprise-standard/jobs/{job_id}")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_enterprise_jobs(self, session_id: Optional[str] = None) -> Dict:
+        """List enterprise jobs for a session (or all sessions)."""
+        try:
+            params = {"session_id": session_id} if session_id else {}
+            response = requests.get(f"{self.base_url}/enterprise-standard/jobs", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def pause_enterprise_job(self, job_id: str) -> Dict:
+        """Pause a running enterprise job."""
+        try:
+            response = requests.post(f"{self.base_url}/enterprise-standard/jobs/{job_id}/pause")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def resume_enterprise_job(self, job_id: str) -> Dict:
+        """Resume a paused enterprise job."""
+        try:
+            response = requests.post(f"{self.base_url}/enterprise-standard/jobs/{job_id}/resume")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def stop_enterprise_job(self, job_id: str) -> Dict:
+        """Request a running enterprise job to stop as soon as possible."""
+        try:
+            response = requests.post(f"{self.base_url}/enterprise-standard/jobs/{job_id}/stop")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
 # Global backend client instance
 def get_backend_client():
     """Get backend client instance"""
