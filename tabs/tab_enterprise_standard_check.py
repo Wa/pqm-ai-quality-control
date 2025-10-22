@@ -22,8 +22,6 @@ def render_enterprise_standard_check_tab(session_id):
         st.warning("请先登录以使用此功能。")
         return
 
-    st.subheader("🏢 企业标准检查")
-
     # No CSS width overrides; rely on Streamlit columns like special symbols tab
     # Ensure enterprise directories and a generated output root exist
     base_dirs = {
@@ -246,6 +244,15 @@ def render_enterprise_standard_check_tab(session_id):
                 st.write("（暂无分析结果目录）")
 
     with col_main:
+        st.subheader("🏢 企业标准检查")
+        st.markdown(
+            "第1步：重要！在右边文件列表处清空上次任务的文件（不需要清空分析结果）。  \n"
+            "第2步：上传企标和待检查文件。  \n"
+            "第3步：点击开始，AI会比对待检查文件不符合企标的地方，并输出结果。  \n"
+            "第4步：在右边文件列表处下载结果。  \n"
+            "审核时间取决于文件数量和长度，一般在10分钟到一小时之间。  \n"
+            )
+
         # Two uploaders side by side
         col_std, col_exam = st.columns(2)
         with col_std:
@@ -282,6 +289,7 @@ def render_enterprise_standard_check_tab(session_id):
                         if not detail:
                             detail = str(response)
                         st.error(f"提交任务失败：{detail}")
+            st.caption("记得在右边文件列表处清除上次任务的文件！")
                     
         with btn_col_stop:
             stop_disabled = (not backend_ready) or (not job_status) or job_paused
@@ -383,21 +391,22 @@ def render_enterprise_standard_check_tab(session_id):
                         _label = "停止中"
                     else:
                         _label = status_value
-                st.markdown(f"**后台任务状态：{_label}**")
-                if stage:
-                    st.caption(f"当前阶段：{stage}")
+                # st.markdown(f"**任务状态：{_label}**")
+                # if stage:
+                #     st.caption(f"当前阶段：{stage}")
                 if message:
                     st.write(message)
-                if pid:
-                    st.caption(f"后台进程ID：{pid}")
+                # if pid:
+                #     st.caption(f"后台进程ID：{pid}")
                 total_chunks = int(job_status.get("total_chunks") or 0)
                 processed_chunks = int(job_status.get("processed_chunks") or 0)
-                if total_chunks > 0:
-                    progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
-                    st.progress(progress_value)
-                    st.caption(f"进度：{processed_chunks}/{total_chunks} 段")
-                elif status_value in {"queued", "running"}:
-                    st.progress(0.0)
+                with st.spinner(f"**任务状态：{_label}**"):
+                    if total_chunks > 0:
+                        progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
+                        st.progress(progress_value)
+                        st.caption(f"进度：{1 + int(progress_value*99)}% ")
+                    elif status_value in {"queued", "running"}:
+                        st.progress(0.0)
                 result_files = job_status.get("result_files") or []
                 if result_files and status_value == "succeeded":
                     st.write("已生成结果文件：")
@@ -407,17 +416,6 @@ def render_enterprise_standard_check_tab(session_id):
                         except Exception:
                             st.write(f"- {path}")
                 logs = job_status.get("logs")
-                if isinstance(logs, list) and logs:
-                    expanded = status_value in {"queued", "running"}
-                    with st.expander("后台日志", expanded=expanded):
-                        for entry in logs[-50:]:
-                            if not isinstance(entry, dict):
-                                st.write(entry)
-                                continue
-                            ts = entry.get("ts") or ""
-                            level = entry.get("level") or "info"
-                            message = entry.get("message") or ""
-                            st.write(f"[{ts}] {level}: {message}")
                 stream_events = job_status.get("stream_events")
                 if isinstance(stream_events, list) and stream_events:
                     stream_state = st.session_state.get(stream_state_key)
@@ -434,7 +432,7 @@ def render_enterprise_standard_check_tab(session_id):
                         [event for event in stream_events if isinstance(event, dict)],
                         key=lambda item: int(item.get("sequence") or 0),
                     )
-                    with st.expander("运行输出", expanded=status_value in {"queued", "running"}):
+                    with st.expander("点击查看具体进展", expanded=False):
                         current_group: tuple[str, int] | None = None
                         for event in events_sorted:
                             seq = int(event.get("sequence") or 0)
@@ -473,6 +471,17 @@ def render_enterprise_standard_check_tab(session_id):
                                     st.write("(无内容)")
                     stream_state["rendered"] = sorted(rendered_set)
                     st.session_state[stream_state_key] = stream_state
+                if isinstance(logs, list) and logs:
+                    expanded = status_value in {"queued", "running"}
+                    with st.expander("点击查看后台日志", expanded=False):
+                        for entry in logs[-50:]:
+                            if not isinstance(entry, dict):
+                                st.write(entry)
+                                continue
+                            ts = entry.get("ts") or ""
+                            level = entry.get("level") or "info"
+                            message = entry.get("message") or ""
+                            st.write(f"[{ts}] {level}: {message}")
             elif job_error:
                 st.warning(job_error)
                 st.session_state.pop(stream_state_key, None)
