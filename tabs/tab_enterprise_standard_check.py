@@ -86,18 +86,38 @@ def render_enterprise_standard_check_tab(session_id):
             if not folder or not os.path.exists(folder):
                 return []
             files = []
+            
+            def _ts_from_name(name: str) -> tuple[int, int]:
+                # Extract timestamp at end of filename stem: yyyymmdd_hhmmss (or yyyymmddhhmmss)
+                stem, _ = os.path.splitext(name)
+                m = re.search(r"(\d{8})[_-]?(\d{6})$", stem)
+                if not m:
+                    return 0, 0  # (has_ts=0, ts_key=0)
+                try:
+                    ts_key = int(m.group(1) + m.group(2))  # yyyymmddhhmmss as integer
+                    return 1, ts_key
+                except Exception:
+                    return 0, 0
+
             for f in os.listdir(folder):
                 file_path = os.path.join(folder, f)
                 if os.path.isfile(file_path):
                     stat = os.stat(file_path)
+                    has_ts, ts_key = _ts_from_name(f)
                     files.append({
                         'name': f,
                         'size': stat.st_size,
                         'modified': stat.st_mtime,
-                        'path': file_path
+                        'path': file_path,
+                        'has_ts': has_ts,
+                        'ts_key': ts_key,
                     })
-            # Sort by name then modified time for stability
-            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']))
+            # Sort by: has_ts desc → ts_key desc → modified desc → name asc
+            return sorted(
+                files,
+                key=lambda x: (x['has_ts'], x['ts_key'], x['modified'], x['name'].lower()),
+                reverse=True
+            )
 
         def format_file_size(size_bytes):
             if size_bytes == 0:
@@ -289,7 +309,6 @@ def render_enterprise_standard_check_tab(session_id):
                         if not detail:
                             detail = str(response)
                         st.error(f"提交任务失败：{detail}")
-            st.caption("记得在右边文件列表处清除上次任务的文件！")
                     
         with btn_col_stop:
             stop_disabled = (not backend_ready) or (not job_status) or job_paused
@@ -409,12 +428,7 @@ def render_enterprise_standard_check_tab(session_id):
                         st.progress(0.0)
                 result_files = job_status.get("result_files") or []
                 if result_files and status_value == "succeeded":
-                    st.write("已生成结果文件：")
-                    for path in result_files:
-                        try:
-                            st.write(f"- {os.path.basename(str(path))}")
-                        except Exception:
-                            st.write(f"- {path}")
+                    st.write("已生成结果文件，在右边文件列表处下载分析结果。")
                 logs = job_status.get("logs")
                 stream_events = job_status.get("stream_events")
                 if isinstance(stream_events, list) and stream_events:
