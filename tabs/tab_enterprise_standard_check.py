@@ -243,10 +243,99 @@ def render_enterprise_standard_check_tab(session_id):
             else:
                 st.write("（暂无分析结果目录）")
 
-
-
-
     with col_main:
+        # Two uploaders side by side
+        col_std, col_exam = st.columns(2)
+        with col_std:
+            files_std = st.file_uploader("点击上传企业标准文件", type=None, accept_multiple_files=True, key=f"enterprise_std_{session_id}")
+            if files_std:
+                handle_file_upload(files_std, standards_dir)
+                st.success(f"已上传 {len(files_std)} 个企业标准文件")
+        with col_exam:
+            files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"enterprise_exam_{session_id}")
+            if files_exam:
+                handle_file_upload(files_exam, examined_dir)
+                st.success(f"已上传 {len(files_exam)} 个待检查文件")
+
+        # Start / Stop / Demo buttons
+        btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
+        with btn_col1:
+            start_disabled = (not backend_ready) or job_running
+            if st.button("开始", key=f"enterprise_start_button_{session_id}", disabled=start_disabled):
+                if not backend_ready or backend_client is None:
+                    st.error("后台服务不可用，无法启动企业标准检查。")
+                else:
+                    response = backend_client.start_enterprise_job(session_id)
+                    if isinstance(response, dict) and response.get("job_id"):
+                        st.session_state[job_state_key] = response["job_id"]
+                        st.success("已提交后台任务，刷新或稍后查看进度。")
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        else:
+                            st.experimental_rerun()
+                    else:
+                        detail = ""
+                        if isinstance(response, dict):
+                            detail = str(response.get("detail") or response.get("message") or "")
+                        if not detail:
+                            detail = str(response)
+                        st.error(f"提交任务失败：{detail}")
+                    
+        with btn_col_stop:
+            if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
+                st.info("后台任务在服务器中执行，当前版本暂不支持在此处直接停止。请联系管理员或等待任务完成。")
+
+            if st.button("继续", key=f"enterprise_continue_button_{session_id}"):
+                st.info("后台任务会自动继续执行，无需手动恢复。")
+
+        with btn_col2:
+            if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
+                # Copy demonstration files into the user's enterprise folders (no processing here)
+                try:
+                    # Locate demonstration root (same convention as other tabs)
+                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
+                    # Subfolders to copy from → to
+                    pairs = [
+                        (os.path.join(demo_enterprise, "standards"), standards_dir),
+                        (os.path.join(demo_enterprise, "examined_files"), examined_dir),
+                        # New: copy demonstration prompt/response chunks into session enterprise output
+                        # Entire folders copied under enterprise_out_root
+                        (os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
+                        (os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
+                        # New: copy final_results for demo summary
+                        (os.path.join(demo_enterprise, "final_results"), final_results_dir),
+                        # New: copy pre-made prompted responses and json outputs for demo
+                        (os.path.join(demo_enterprise, "prompted_llm responses_and_json"), os.path.join(enterprise_out_root, "prompted_llm responses_and_json")),
+                    ]
+                    files_copied = 0
+                    for src, dst in pairs:
+                        if not os.path.exists(src):
+                            continue
+                    # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
+                        if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results") or src.endswith("prompted_llm responses_and_json")):
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
+                            # Copy whole directory tree into enterprise_out_root subfolder
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            for root, _, files in os.walk(src):
+                                files_copied += len([f for f in files if os.path.isfile(os.path.join(root, f))])
+                            continue
+                        # Otherwise treat as file list copy (standards / examined_files)
+                        for name in os.listdir(src):
+                            src_path = os.path.join(src, name)
+                            dst_path = os.path.join(dst, name)
+                            if os.path.isfile(src_path):
+                                os.makedirs(dst, exist_ok=True)
+                                shutil.copy2(src_path, dst_path)
+                                files_copied += 1
+                    # Trigger demo streaming phase
+                    st.session_state[f"enterprise_demo_{session_id}"] = True
+                    st.success(f"已复制演示文件：{files_copied} 个，开始演示…")
+                except Exception as e:
+                    st.error(f"演示文件复制失败: {e}")
+                # Immediately rerun to render the demo streaming phase in main column
+                st.rerun()
+        
         status_area = st.container()
         with status_area:
             if job_status:
@@ -359,99 +448,7 @@ def render_enterprise_standard_check_tab(session_id):
             else:
                 st.warning("后台服务不可用，请稍后重试。")
                 st.session_state.pop(stream_state_key, None)
-
-        # Two uploaders side by side
-        col_std, col_exam = st.columns(2)
-        with col_std:
-            files_std = st.file_uploader("点击上传企业标准文件", type=None, accept_multiple_files=True, key=f"enterprise_std_{session_id}")
-            if files_std:
-                handle_file_upload(files_std, standards_dir)
-                st.success(f"已上传 {len(files_std)} 个企业标准文件")
-        with col_exam:
-            files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"enterprise_exam_{session_id}")
-            if files_exam:
-                handle_file_upload(files_exam, examined_dir)
-                st.success(f"已上传 {len(files_exam)} 个待检查文件")
-
-        # Start / Stop / Demo buttons
-        btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
-        with btn_col1:
-            start_disabled = (not backend_ready) or job_running
-            if st.button("开始", key=f"enterprise_start_button_{session_id}", disabled=start_disabled):
-                if not backend_ready or backend_client is None:
-                    st.error("后台服务不可用，无法启动企业标准检查。")
-                else:
-                    response = backend_client.start_enterprise_job(session_id)
-                    if isinstance(response, dict) and response.get("job_id"):
-                        st.session_state[job_state_key] = response["job_id"]
-                        st.success("已提交后台任务，刷新或稍后查看进度。")
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        else:
-                            st.experimental_rerun()
-                    else:
-                        detail = ""
-                        if isinstance(response, dict):
-                            detail = str(response.get("detail") or response.get("message") or "")
-                        if not detail:
-                            detail = str(response)
-                        st.error(f"提交任务失败：{detail}")
-                    
-        with btn_col_stop:
-            if st.button("停止", key=f"enterprise_stop_button_{session_id}"):
-                st.info("后台任务在服务器中执行，当前版本暂不支持在此处直接停止。请联系管理员或等待任务完成。")
-
-            if st.button("继续", key=f"enterprise_continue_button_{session_id}"):
-                st.info("后台任务会自动继续执行，无需手动恢复。")
-
-        with btn_col2:
-            if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
-                # Copy demonstration files into the user's enterprise folders (no processing here)
-                try:
-                    # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
-                    demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
-                    # Subfolders to copy from → to
-                    pairs = [
-                        (os.path.join(demo_enterprise, "standards"), standards_dir),
-                        (os.path.join(demo_enterprise, "examined_files"), examined_dir),
-                        # New: copy demonstration prompt/response chunks into session enterprise output
-                        # Entire folders copied under enterprise_out_root
-                        (os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
-                        (os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
-                        # New: copy final_results for demo summary
-                        (os.path.join(demo_enterprise, "final_results"), final_results_dir),
-                        # New: copy pre-made prompted responses and json outputs for demo
-                        (os.path.join(demo_enterprise, "prompted_llm responses_and_json"), os.path.join(enterprise_out_root, "prompted_llm responses_and_json")),
-                    ]
-                    files_copied = 0
-                    for src, dst in pairs:
-                        if not os.path.exists(src):
-                            continue
-                    # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
-                        if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results") or src.endswith("prompted_llm responses_and_json")):
-                            os.makedirs(os.path.dirname(dst), exist_ok=True)
-                            # Copy whole directory tree into enterprise_out_root subfolder
-                            shutil.copytree(src, dst, dirs_exist_ok=True)
-                            for root, _, files in os.walk(src):
-                                files_copied += len([f for f in files if os.path.isfile(os.path.join(root, f))])
-                            continue
-                        # Otherwise treat as file list copy (standards / examined_files)
-                        for name in os.listdir(src):
-                            src_path = os.path.join(src, name)
-                            dst_path = os.path.join(dst, name)
-                            if os.path.isfile(src_path):
-                                os.makedirs(dst, exist_ok=True)
-                                shutil.copy2(src_path, dst_path)
-                                files_copied += 1
-                    # Trigger demo streaming phase
-                    st.session_state[f"enterprise_demo_{session_id}"] = True
-                    st.success(f"已复制演示文件：{files_copied} 个，开始演示…")
-                except Exception as e:
-                    st.error(f"演示文件复制失败: {e}")
-                # Immediately rerun to render the demo streaming phase in main column
-                st.rerun()
-
+        
         # Demo streaming phase (reads from prepared prompt/response chunks; no LLM calls)
         if st.session_state.get(f"enterprise_demo_{session_id}"):
             # Directories prepared by demo button copy
