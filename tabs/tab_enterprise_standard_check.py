@@ -300,7 +300,13 @@ def render_enterprise_standard_check_tab(session_id):
                     stream_state = st.session_state.get(stream_state_key)
                     if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_status.get("job_id"):
                         stream_state = {"job_id": job_status.get("job_id"), "rendered": []}
-                    rendered_set = set(stream_state.get("rendered") or [])
+                    rendered_raw = stream_state.get("rendered") or []
+                    rendered_set = set()
+                    for v in rendered_raw:
+                        try:
+                            rendered_set.add(int(v))
+                        except (TypeError, ValueError):
+                            pass
                     events_sorted = sorted(
                         [event for event in stream_events if isinstance(event, dict)],
                         key=lambda item: int(item.get("sequence") or 0),
