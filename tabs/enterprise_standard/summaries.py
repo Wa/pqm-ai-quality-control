@@ -377,6 +377,15 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         except Exception as error:
             report_exception(f"读取JSON失败({os.path.basename(jf)})", error, level="warning")
             continue
+
+        # Derive original file name from json_*.txt for fallback when JSON omits it
+        try:
+            base_name = os.path.basename(jf)
+            orig_name = base_name[5:] if base_name.startswith("json_") else base_name
+            orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
+        except Exception:
+            orig_name = ""
+
         parsed_text = _extract_json_text(raw)
         try:
             data = json.loads(parsed_text)
@@ -386,18 +395,20 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             data = [data]
         if not isinstance(data, list):
             continue
+
+        # Helper: prefer Chinese keys, fallback to English
+        def _kv(d: dict, cn_key: str, en_key: str) -> str:
+            return str(d.get(cn_key) or d.get(en_key) or "")
+
         for row in data:
             if not isinstance(row, dict):
                 continue
-            rows.append(
-                [
-                    row.get("technical_file_name", ""),
-                    row.get("technical_file_content", ""),
-                    row.get("enterprise_standard", ""),
-                    row.get("inconsistency", ""),
-                    row.get("reason", ""),
-                ]
-            )
+            name_val = _kv(row, "技术文件名", "technical_file_name") or orig_name
+            content_val = _kv(row, "技术文件内容", "technical_file_content")
+            std_val = _kv(row, "企业标准", "enterprise_standard")
+            inconsistency_val = _kv(row, "不一致之处", "inconsistency")
+            reason_val = _kv(row, "理由", "reason")
+            rows.append([name_val, content_val, std_val, inconsistency_val, reason_val])
 
     csv_path: str | None = None
     xlsx_path: str | None = None
