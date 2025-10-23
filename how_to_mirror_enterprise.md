@@ -27,10 +27,16 @@ This document records the steps taken while rebuilding the Special Symbols tab s
 3. **Update shared utilities** (`util.py`, `config.py`, etc.) only when the new workflow requires additional shared state.
 4. **Document any deviations** inside this guide so future tabs can follow the same pattern with minimal friction.
 
-## 5. Next Steps for the Special Symbols Tab
-- Build a `tabs/special_symbols/workflow.py` module that wraps the new Bisheng flow (see credentials snippet in the user instructions).
-- Replace the placeholder UI in `tabs/tab_special_symbols_check.py` with the enterprise-style layout once the workflow surface is ready.
-- Wire the new workflow to the dedicated Bisheng backend endpoint created for this tab.
-- Revisit the login experience: 当前“退出登录”按钮尚未接入逻辑，后续优化时需同步更新本指南。
+## 5. Special Symbols Tab Progress
+- Added `tabs/special_symbols/workflow.py` and supporting settings so the tab reuses the enterprise surface pattern while targeting the dedicated Bisheng flow and tweaks.
+- Replaced the legacy UI in `tabs/tab_special_symbols_check.py` with the enterprise-style layout, including 基准文件 terminology and the demo streaming experience.
+- Implemented a background worker (`tabs/special_symbols/background.py`) that mirrors the enterprise pipeline: converts files, syncs the knowledge base, chunk-calls Bisheng with tab-specific tweaks, and aggregates outputs.
+- Extended the FastAPI backend to manage both enterprise and special-symbol jobs with the same control signals (start/list/pause/resume/stop) so Streamlit no longer needs to stream prompts directly.
+- Documented outstanding login work: 当前“退出登录”按钮尚未接入逻辑，后续优化时需同步更新本指南。
+
+## 6. Remaining Follow-ups
+- Run end-to-end validation with the new Bisheng flow to confirm prompt formats, tweaks, and knowledge-base sync behave as expected for production file sets.
+- Decide whether special-symbol post-processing needs tab-specific summaries or can continue reusing the enterprise aggregation helpers.
+- Revisit authentication polish (logout wiring, optional password verification) once the workflow stabilises.
 
 Keep this document updated as further steps are completed.

@@ -1,11 +1,24 @@
+import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass
+from typing import Any, Dict
 
 from config import CONFIG
 
 TAB_ENV_PREFIX = "SPECIAL_SYMBOLS_CHECK"
 TAB_SLUG = "special_symbols"
 KB_MODEL_ID = 7
+
+DEFAULT_TWEAKS: Dict[str, Dict[str, object]] = {
+    "MixEsVectorRetriever-J35CZ": {},
+    "Milvus-cyR5W": {},
+    "PromptTemplate-bs0vj": {},
+    "BishengLLM-768ac": {},
+    "ElasticKeywordsSearch-1c80e": {},
+    "RetrievalQA-f0f31": {},
+    "CombineDocsChain-2f68e": {},
+}
 
 
 @dataclass(frozen=True)
@@ -23,6 +36,7 @@ class BishengSettings:
     api_key: str
     max_words: int
     timeout_s: int
+    flow_tweaks: Dict[str, Dict[str, object]]
 
 
 def _bisheng_setting(
@@ -94,6 +108,8 @@ def get_bisheng_settings() -> BishengSettings:
         90,
     )
 
+    flow_tweaks = _resolve_tweaks(tab_config)
+
     return BishengSettings(
         base_url=base_url,
         invoke_path=invoke_path,
@@ -106,7 +122,43 @@ def get_bisheng_settings() -> BishengSettings:
         api_key=api_key,
         max_words=max_words,
         timeout_s=timeout_s,
+        flow_tweaks=flow_tweaks,
     )
+
+
+def _resolve_tweaks(tab_config: Dict[str, Any]) -> Dict[str, Dict[str, object]]:
+    """Resolve tweaks configuration from env or config, with safe defaults."""
+
+    env_keys = [
+        f"{TAB_ENV_PREFIX}_FLOW_TWEAKS",
+        f"{TAB_ENV_PREFIX}_TWEAKS",
+        "SPECIAL_SYMBOLS_FLOW_TWEAKS",
+        "SPECIAL_SYMBOLS_TWEAKS",
+        "BISHENG_FLOW_TWEAKS",
+        "BISHENG_TWEAKS",
+    ]
+    for key in env_keys:
+        raw = os.getenv(key)
+        if raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+
+    value = tab_config.get("tweaks")
+    if isinstance(value, dict):
+        return deepcopy(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            data = json.loads(value)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    return deepcopy(DEFAULT_TWEAKS)
 
 
 __all__ = [

@@ -28,6 +28,7 @@ from .settings import (
     get_bisheng_settings,
 )
 from .workflow import SPECIAL_SYMBOLS_WORKFLOW_SURFACE
+from .background import run_special_symbols_job
 
 __all__ = [
     "TAB_ENV_PREFIX",
@@ -53,4 +54,5 @@ __all__ = [
     "aggregate_outputs",
     "log_llm_metrics",
     "SPECIAL_SYMBOLS_WORKFLOW_SURFACE",
+    "run_special_symbols_job",
 ]
