@@ -30,7 +30,7 @@ def resolve_ollama_host(llm_backend: str) -> str:
 
 # --- Login Management ---
 def render_login_widget():
-    """Render the login widget and return the authenticated username."""
+    """Render the login widget in the main page and return the username if logged in."""
 
     if "authenticated_username" not in st.session_state:
         saved_username = load_username()
@@ -41,30 +41,52 @@ def render_login_widget():
         st.session_state.login_form_username = st.session_state.get(
             "authenticated_username", ""
         )
+    if "login_form_password" not in st.session_state:
+        st.session_state.login_form_password = ""
 
-    with st.sidebar:
-        st.header("🔐 用户登录")
+    username = st.session_state.get("authenticated_username")
+    login_container = st.container()
+
+    if username:
+        with login_container:
+            st.markdown("### 🔐 用户登录")
+            st.success(f"已登录用户：{username}")
+            if st.button("退出登录", key="logout_button"):
+                st.session_state.pop("authenticated_username", None)
+                st.session_state.login_form_username = ""
+                st.session_state.login_form_password = ""
+                return None
+        return username
+
+    with login_container.form("login_form"):
+        st.markdown("### 🔐 用户登录")
         username_input = st.text_input(
-            "请输入用户名",
+            "用户名",
             value=st.session_state.get("login_form_username", ""),
             key="login_username_input",
         )
-        login_clicked = st.button("登录", type="primary")
-        logout_clicked = st.button("退出登录")
-
-    if logout_clicked:
-        st.session_state.pop("authenticated_username", None)
-        st.session_state.login_form_username = ""
-        return None
+        password_input = st.text_input(
+            "密码",
+            value=st.session_state.get("login_form_password", ""),
+            type="password",
+            key="login_password_input",
+        )
+        submit = st.form_submit_button("登录", type="primary")
 
     username_input = username_input.strip()
+    password_input = password_input.strip()
 
-    if login_clicked and username_input:
+    if submit and username_input:
         st.session_state.authenticated_username = username_input
         st.session_state.login_form_username = username_input
+        st.session_state.login_form_password = password_input
         save_username(username_input)
+        return username_input
 
-    return st.session_state.get("authenticated_username")
+    st.session_state.login_form_username = username_input
+    st.session_state.login_form_password = password_input
+
+    return None
 
 
 def get_username_file():
@@ -148,6 +170,19 @@ def ensure_session_dirs(base_dirs, session_id):
         session_dirs.setdefault("enterprise_examined", examined_dir)
     except Exception:
         # Fail-safe: do not break callers if path operations fail
+        pass
+
+    # Ensure special symbols directories exist under project root
+    try:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        special_root = os.path.join(project_root, "special_symbols_files")
+        reference_dir = os.path.join(special_root, "reference", str(session_id))
+        inspected_dir = os.path.join(special_root, "inspected", str(session_id))
+        os.makedirs(reference_dir, exist_ok=True)
+        os.makedirs(inspected_dir, exist_ok=True)
+        session_dirs.setdefault("special_reference", reference_dir)
+        session_dirs.setdefault("special_examined", inspected_dir)
+    except Exception:
         pass
 
     # Ensure history issues avoidance directories exist under project root:

@@ -114,6 +114,56 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def start_special_symbols_job(self, session_id: str) -> Dict:
+        """Start a special symbols check job."""
+        try:
+            payload = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/special-symbols/jobs", json=payload)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_special_symbols_job(self, job_id: str) -> Dict:
+        """Fetch a specific special symbols job status."""
+        try:
+            response = requests.get(f"{self.base_url}/special-symbols/jobs/{job_id}")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_special_symbols_jobs(self, session_id: Optional[str] = None) -> Dict:
+        """List special symbols jobs for a session (or all sessions)."""
+        try:
+            params = {"session_id": session_id} if session_id else {}
+            response = requests.get(f"{self.base_url}/special-symbols/jobs", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def pause_special_symbols_job(self, job_id: str) -> Dict:
+        """Pause a running special symbols job."""
+        try:
+            response = requests.post(f"{self.base_url}/special-symbols/jobs/{job_id}/pause")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def resume_special_symbols_job(self, job_id: str) -> Dict:
+        """Resume a paused special symbols job."""
+        try:
+            response = requests.post(f"{self.base_url}/special-symbols/jobs/{job_id}/resume")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def stop_special_symbols_job(self, job_id: str) -> Dict:
+        """Request a running special symbols job to stop."""
+        try:
+            response = requests.post(f"{self.base_url}/special-symbols/jobs/{job_id}/stop")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
 # Global backend client instance
 def get_backend_client():
     """Get backend client instance"""

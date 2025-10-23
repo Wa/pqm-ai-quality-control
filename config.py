@@ -47,6 +47,13 @@ CONFIG = {
                 "flow_input_node_id": "RetrievalQA-f0f31",
                 "flow_milvus_node_id": "Milvus-cyR5W",
                 "flow_es_node_id": "ElasticKeywordsSearch-1c80e"
+            },
+            "special_symbols_check": {
+                "workflow_id": "",
+                "flow_id": "edfbfc1b82db49c5b87e38ac2aaf2b65",
+                "flow_input_node_id": "",
+                "flow_milvus_node_id": "",
+                "flow_es_node_id": ""
             }
         }
     },
