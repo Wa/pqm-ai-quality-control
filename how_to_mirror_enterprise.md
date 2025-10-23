@@ -31,5 +31,6 @@ This document records the steps taken while rebuilding the Special Symbols tab s
 - Build a `tabs/special_symbols/workflow.py` module that wraps the new Bisheng flow (see credentials snippet in the user instructions).
 - Replace the placeholder UI in `tabs/tab_special_symbols_check.py` with the enterprise-style layout once the workflow surface is ready.
 - Wire the new workflow to the dedicated Bisheng backend endpoint created for this tab.
+- Revisit the login experience: 当前“退出登录”按钮尚未接入逻辑，后续优化时需同步更新本指南。
 
 Keep this document updated as further steps are completed.

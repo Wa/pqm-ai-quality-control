@@ -145,13 +145,13 @@ def render_special_symbols_check_tab(session_id):
         # Clear buttons
         col_clear1, col_clear2, col_clear3 = st.columns(3)
         with col_clear1:
-            if st.button("🗑️ 清空参考资料", key=f"clear_special_symbols_reference_{session_id}"):
+            if st.button("🗑️ 清空基准文件", key=f"clear_special_symbols_reference_{session_id}"):
                 try:
                     for file in os.listdir(reference_dir):
                         file_path = os.path.join(reference_dir, file)
                         if os.path.isfile(file_path):
                             os.remove(file_path)
-                    st.success("已清空参考资料")
+                    st.success("已清空基准文件")
                 except Exception as e:
                     st.error(f"清空失败: {e}")
         with col_clear2:
@@ -179,7 +179,7 @@ def render_special_symbols_check_tab(session_id):
                     st.error(f"清空失败: {e}")
 
         # File lists in tabs (fixed order)
-        tab_std, tab_exam, tab_results = st.tabs(["参考资料", "待检查文件", "分析结果"])
+        tab_std, tab_exam, tab_results = st.tabs(["基准文件", "待检查文件", "分析结果"])
         with tab_std:
             reference_files = get_file_list(reference_dir)
             if reference_files:
@@ -267,8 +267,8 @@ def render_special_symbols_check_tab(session_id):
         st.subheader("🔍 特殊特性符号检查")
         st.markdown(
             "第1步：重要！在右侧文件列表清空上一轮任务残留（结果可按需保留）。  \n"
-            "第2步：上传特殊特性参考资料与待检查文件。  \n"
-            "第3步：点击开始，AI 会比对待检文件中的符号标注并定位与参考资料不一致的内容。  \n"
+            "第2步：上传特殊特性基准文件与待检查文件。  \n"
+            "第3步：点击开始，AI 会比对待检文件中的符号标注并定位与基准文件不一致的内容。  \n"
             "第4步：在右侧文件列表下载分析结果。  \n"
             "审核时间取决于文件数量与长度，通常约需 10~60 分钟。  \n"
         )
@@ -276,10 +276,10 @@ def render_special_symbols_check_tab(session_id):
         # Two uploaders side by side
         col_std, col_exam = st.columns(2)
         with col_std:
-            reference_uploads = st.file_uploader("点击上传参考资料", type=None, accept_multiple_files=True, key=f"special_symbols_reference_{session_id}")
+            reference_uploads = st.file_uploader("点击上传基准文件", type=None, accept_multiple_files=True, key=f"special_symbols_reference_{session_id}")
             if reference_uploads:
                 handle_file_upload(reference_uploads, reference_dir)
-                st.success(f"已上传 {len(reference_uploads)} 份参考资料")
+                st.success(f"已上传 {len(reference_uploads)} 份基准文件")
         with col_exam:
             files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"special_symbols_exam_{session_id}")
             if files_exam:

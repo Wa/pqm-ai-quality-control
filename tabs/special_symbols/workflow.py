@@ -6,9 +6,9 @@ from tabs.shared import WorkflowSurface
 from .settings import TAB_SLUG
 
 SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX = (
-    "你是一名特殊特性符号检查专家，需根据企业参考资料核对待检文件。"
+    "你是一名特殊特性符号检查专家，需根据企业基准文件核对待检文件。"
     "请聚焦于符号的标注是否存在遗漏、错误或与标准不一致的情况。\n"
-    "对于每一处问题，请提供简要说明并引用参考资料的出处（文件名及关键位置）。\n"
+    "对于每一处问题，请提供简要说明并引用基准文件的出处（文件名及关键位置）。\n"
     "以下是待检文件的一部分：\n"
 )
 
