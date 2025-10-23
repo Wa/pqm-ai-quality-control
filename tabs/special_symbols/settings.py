@@ -108,6 +108,8 @@ def get_bisheng_settings() -> BishengSettings:
         90,
     )
 
+    bisheng_config = CONFIG.get("bisheng", {})
+    tab_config = bisheng_config.get("tabs", {}).get("special_symbols_check", {})
     flow_tweaks = _resolve_tweaks(tab_config)
 
     return BishengSettings(
