@@ -29,6 +29,44 @@ def resolve_ollama_host(llm_backend: str) -> str:
     return CONFIG["llm"]["ollama_host"]
 
 # --- Login Management ---
+def render_login_widget():
+    """Render the login widget and return the authenticated username."""
+
+    if "authenticated_username" not in st.session_state:
+        saved_username = load_username()
+        if saved_username:
+            st.session_state.authenticated_username = saved_username
+
+    if "login_form_username" not in st.session_state:
+        st.session_state.login_form_username = st.session_state.get(
+            "authenticated_username", ""
+        )
+
+    with st.sidebar:
+        st.header("🔐 用户登录")
+        username_input = st.text_input(
+            "请输入用户名",
+            value=st.session_state.get("login_form_username", ""),
+            key="login_username_input",
+        )
+        login_clicked = st.button("登录", type="primary")
+        logout_clicked = st.button("退出登录")
+
+    if logout_clicked:
+        st.session_state.pop("authenticated_username", None)
+        st.session_state.login_form_username = ""
+        return None
+
+    username_input = username_input.strip()
+
+    if login_clicked and username_input:
+        st.session_state.authenticated_username = username_input
+        st.session_state.login_form_username = username_input
+        save_username(username_input)
+
+    return st.session_state.get("authenticated_username")
+
+
 def get_username_file():
     """Get the path to the username storage file."""
     return os.path.join(os.path.expanduser("~"), ".streamlit_username")
