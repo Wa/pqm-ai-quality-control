@@ -35,8 +35,8 @@ This document records the steps taken while rebuilding the Special Symbols tab s
 - Documented outstanding login work: 当前“退出登录”按钮尚未接入逻辑，后续优化时需同步更新本指南。
 
 ## 6. Remaining Follow-ups
-- Run end-to-end validation with the new Bisheng flow to confirm prompt formats, tweaks, and knowledge-base sync behave as expected for production file sets.
-- Decide whether special-symbol post-processing needs tab-specific summaries or can continue reusing the enterprise aggregation helpers.
-- Revisit authentication polish (logout wiring, optional password verification) once the workflow stabilises.
+- ✅ 完成：已在集成环境跑通 Bisheng 流程，确认提示词、KB 同步与结果导出均符合预期。
+- ✅ 完成：特殊特性符号暂时沿用企业标准的汇总与导出逻辑，实测满足需求，如后续需要差异化再补充说明。
+- ⏳ 待办：继续完善登录体验（例如“退出登录”按钮逻辑、可选的密码校验）。
 
 Keep this document updated as further steps are completed.
