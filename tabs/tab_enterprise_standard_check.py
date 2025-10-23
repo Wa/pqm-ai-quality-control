@@ -365,16 +365,34 @@ def render_enterprise_standard_check_tab(session_id):
                     for src, dst in pairs:
                         if not os.path.exists(src):
                             continue
-                    # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
-                        if os.path.isdir(src) and (src.endswith("prompt_text_chunks") or src.endswith("llm responses") or src.endswith("final_results") or src.endswith("prompted_llm responses_and_json")):
+                        # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
+                        if os.path.isdir(src) and (
+                            src.endswith("prompt_text_chunks")
+                            or src.endswith("llm responses")
+                            or src.endswith("final_results")
+                            or src.endswith("prompted_llm responses_and_json")
+                        ):
                             os.makedirs(os.path.dirname(dst), exist_ok=True)
                             # Copy whole directory tree into enterprise_out_root subfolder
-                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            shutil.copytree(
+                                src,
+                                dst,
+                                dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(".gitkeep"),
+                            )
                             for root, _, files in os.walk(src):
-                                files_copied += len([f for f in files if os.path.isfile(os.path.join(root, f))])
+                                files_copied += len(
+                                    [
+                                        f
+                                        for f in files
+                                        if f != ".gitkeep" and os.path.isfile(os.path.join(root, f))
+                                    ]
+                                )
                             continue
                         # Otherwise treat as file list copy (standards / examined_files)
                         for name in os.listdir(src):
+                            if name == ".gitkeep":
+                                continue
                             src_path = os.path.join(src, name)
                             dst_path = os.path.join(dst, name)
                             if os.path.isfile(src_path):
