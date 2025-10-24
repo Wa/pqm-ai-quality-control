@@ -25,6 +25,7 @@ from config import CONFIG
 from util import ensure_session_dirs
 
 from tabs.enterprise_standard.summaries import persist_compare_outputs
+from .file_filter import run_filtering
 
 from . import (
     KB_MODEL_ID,
@@ -283,12 +284,27 @@ def run_special_symbols_job(
         report_exception("文本预处理失败", error, level="warning")
 
     reference_txt_files = _list_txt_files(reference_txt_dir)
-    exam_txt_files = _list_txt_files(examined_txt_dir)
+    # Filter examined .txt files into a separate folder to reduce irrelevant content
+    examined_txt_filtered_dir = os.path.join(output_root, "examined_txt_filtered")
+    try:
+        summary = run_filtering(
+            examined_txt_dir,
+            examined_txt_filtered_dir,
+            config_path=os.path.join(os.path.dirname(__file__), "filter_config.yml"),
+        )
+        emitter.info(
+            f"过滤完成 保留{summary.get('kept', 0)} 排除{summary.get('dropped', 0)} 清空{summary.get('empty_after_filter', 0)}"
+        )
+    except Exception as error:
+        report_exception("过滤待检文本失败", error, level="warning")
+
+    exam_src_dir = examined_txt_filtered_dir if _list_txt_files(examined_txt_filtered_dir) else examined_txt_dir
+    exam_txt_files = _list_txt_files(exam_src_dir)
     if not exam_txt_files:
         publish({"status": "succeeded", "stage": "completed", "message": "未发现待检查文本"})
         return {"final_results": []}
 
-    manifest = _build_run_manifest(checkpoint_dir, examined_txt_dir, exam_txt_files, publish)
+    manifest = _build_run_manifest(checkpoint_dir, exam_src_dir, exam_txt_files, publish)
     total_chunks = len(manifest.get("entries", []))
     context.total_chunks = total_chunks
     publish({"total_chunks": total_chunks, "processed_chunks": 0})
@@ -386,7 +402,7 @@ def run_special_symbols_job(
                 return {"final_results": []}
         publish({"current_file": name, "stage": "compare", "message": f"比对 {name}"})
         try:
-            with open(os.path.join(examined_txt_dir, name), "r", encoding="utf-8") as handle:
+            with open(os.path.join(exam_src_dir, name), "r", encoding="utf-8") as handle:
                 doc_text = handle.read()
         except Exception as error:
             report_exception(f"读取待检查文本失败({name})", error, level="warning")

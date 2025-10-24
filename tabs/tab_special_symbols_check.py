@@ -294,6 +294,29 @@ def render_special_symbols_check_tab(session_id):
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法启动特殊特性符号检查。")
                 else:
+                    # Before starting, clear examined text directories to avoid stale content
+                    try:
+                        # Examined raw txt dir
+                        if os.path.isdir(inspected_txt_dir):
+                            for fname in os.listdir(inspected_txt_dir):
+                                fpath = os.path.join(inspected_txt_dir, fname)
+                                if os.path.isfile(fpath):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                        # Examined filtered txt dir (under output root)
+                        examined_txt_filtered_dir = os.path.join(special_out_root, "examined_txt_filtered")
+                        if os.path.isdir(examined_txt_filtered_dir):
+                            for fname in os.listdir(examined_txt_filtered_dir):
+                                fpath = os.path.join(examined_txt_filtered_dir, fname)
+                                if os.path.isfile(fpath):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
                     response = backend_client.start_special_symbols_job(session_id)
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
