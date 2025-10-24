@@ -397,12 +397,25 @@ def render_special_symbols_check_tab(session_id):
                         ):
                             os.makedirs(os.path.dirname(dst), exist_ok=True)
                             # Copy whole directory tree into special_out_root subfolder
-                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            shutil.copytree(
+                                src,
+                                dst,
+                                dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(".gitkeep"),
+                            )
                             for root, _, files in os.walk(src):
-                                files_copied += len([f for f in files if os.path.isfile(os.path.join(root, f))])
+                                files_copied += len(
+                                    [
+                                        f
+                                        for f in files
+                                        if f != ".gitkeep" and os.path.isfile(os.path.join(root, f))
+                                    ]
+                                )
                             continue
                         # Otherwise treat as file list copy (standards / examined_files)
                         for name in os.listdir(src):
+                            if name == ".gitkeep":
+                                continue
                             src_path = os.path.join(src, name)
                             dst_path = os.path.join(dst, name)
                             if os.path.isfile(src_path):
