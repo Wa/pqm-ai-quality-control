@@ -29,66 +29,6 @@ def resolve_ollama_host(llm_backend: str) -> str:
     return CONFIG["llm"]["ollama_host"]
 
 # --- Login Management ---
-def render_login_widget():
-    """Render the login widget in the main page and return the username if logged in."""
-
-    if "authenticated_username" not in st.session_state:
-        saved_username = load_username()
-        if saved_username:
-            st.session_state.authenticated_username = saved_username
-
-    if "login_form_username" not in st.session_state:
-        st.session_state.login_form_username = st.session_state.get(
-            "authenticated_username", ""
-        )
-    if "login_form_password" not in st.session_state:
-        st.session_state.login_form_password = ""
-
-    username = st.session_state.get("authenticated_username")
-    login_container = st.container()
-
-    if username:
-        with login_container:
-            st.markdown("### 🔐 用户登录")
-            st.success(f"已登录用户：{username}")
-            if st.button("退出登录", key="logout_button"):
-                st.session_state.pop("authenticated_username", None)
-                st.session_state.login_form_username = ""
-                st.session_state.login_form_password = ""
-                return None
-        return username
-
-    with login_container.form("login_form"):
-        st.markdown("### 🔐 用户登录")
-        username_input = st.text_input(
-            "用户名",
-            value=st.session_state.get("login_form_username", ""),
-            key="login_username_input",
-        )
-        password_input = st.text_input(
-            "密码",
-            value=st.session_state.get("login_form_password", ""),
-            type="password",
-            key="login_password_input",
-        )
-        submit = st.form_submit_button("登录", type="primary")
-
-    username_input = username_input.strip()
-    password_input = password_input.strip()
-
-    if submit and username_input:
-        st.session_state.authenticated_username = username_input
-        st.session_state.login_form_username = username_input
-        st.session_state.login_form_password = password_input
-        save_username(username_input)
-        return username_input
-
-    st.session_state.login_form_username = username_input
-    st.session_state.login_form_password = password_input
-
-    return None
-
-
 def get_username_file():
     """Get the path to the username storage file."""
     return os.path.join(os.path.expanduser("~"), ".streamlit_username")
@@ -111,6 +51,141 @@ def load_username():
     except Exception:
         pass
     return None
+
+# Multi-User Support (JSON-backed per-user sessions)
+def get_user_sessions_dir():
+    """Get the directory for storing user session files."""
+    sessions_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+    return sessions_dir
+
+def get_user_session_file(username):
+    """Get the path to a specific user's session file."""
+    sessions_dir = get_user_sessions_dir()
+    return os.path.join(sessions_dir, f"{username}_session.json")
+
+def load_user_session(username):
+    """Load user session data from JSON file if it exists."""
+    try:
+        session_file = get_user_session_file(username)
+        if os.path.exists(session_file):
+            with open(session_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def save_user_session(username, session_data):
+    """Save user session data to a JSON file."""
+    try:
+        session_file = get_user_session_file(username)
+        with open(session_file, 'w', encoding='utf-8') as f:
+            json.dump(session_data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"保存用户会话失败: {e}")
+        return False
+
+def create_user_session(username):
+    """Create a new user session with simple username-based approach."""
+    session_data = {
+        "username": username,
+        "login_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_activity": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "active": True
+    }
+    if save_user_session(username, session_data):
+        return session_data
+    return None
+
+def update_user_activity(username):
+    """Update the last activity timestamp for a user session."""
+    session_data = load_user_session(username)
+    if session_data:
+        session_data["last_activity"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_user_session(username, session_data)
+
+def deactivate_user_session(username):
+    """Mark a user session as inactive (for logout)."""
+    session_data = load_user_session(username)
+    if session_data:
+        session_data["active"] = False
+        session_data["logout_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_user_session(username, session_data)
+
+def get_active_users():
+    """Get list of currently active users."""
+    sessions_dir = get_user_sessions_dir()
+    active_users = []
+    if not os.path.exists(sessions_dir):
+        return active_users
+    for filename in os.listdir(sessions_dir):
+        if filename.endswith('_session.json'):
+            username = filename.replace('_session.json', '')
+            session_data = load_user_session(username)
+            if session_data and session_data.get('active', False):
+                active_users.append(username)
+    return active_users
+
+def render_login_widget():
+    """Render login widget using URL params for per-browser username and auth flag."""
+    current_user = st.query_params.get("user", None)
+    auth = st.query_params.get("auth", None)
+
+    if current_user and auth == "1":
+        session_data = load_user_session(current_user)
+        if not session_data or not session_data.get('active', False):
+            create_user_session(current_user)
+        return current_user
+
+    st.markdown("### 用户登录")
+    st.markdown("使用OA用户名和密码，不用加@calb-tech.com后缀")
+
+    prefill_username = current_user or ""
+
+    with st.form("login_form"):
+        username = st.text_input("用户名", value=prefill_username, placeholder="请输入您的用户名")
+        password = st.text_input("密码", type="password", placeholder="请输入密码")
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            login_button = st.form_submit_button("登录")
+        with col2:
+            if current_user:
+                clear_button = st.form_submit_button("清除本机用户名")
+            else:
+                clear_button = st.form_submit_button("清除", disabled=True)
+
+        if login_button:
+            if username.strip():
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = username.strip()
+                create_user_session(username.strip())
+                st.query_params["user"] = username.strip()
+                st.query_params["auth"] = "1"
+                st.success(f"欢迎，{username.strip()}！")
+                st.rerun()
+            else:
+                st.error("请输入用户名")
+
+        if clear_button:
+            try:
+                if "user" in st.query_params:
+                    del st.query_params["user"]
+                if "auth" in st.query_params:
+                    del st.query_params["auth"]
+                st.success("已清除本机用户名")
+                st.rerun()
+            except Exception:
+                st.error("清除失败")
+
+    return None
+
+
+def get_user_session_id(username):
+    """Generate session ID based on username for persistence."""
+    # Always derive from the provided username to avoid cross-user leakage
+    return username
 
 def get_user_session_id(username):
     """Generate session ID based on username for persistence."""

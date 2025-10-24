@@ -32,11 +32,11 @@ This document records the steps taken while rebuilding the Special Symbols tab s
 - Replaced the legacy UI in `tabs/tab_special_symbols_check.py` with the enterprise-style layout, including 基准文件 terminology and the demo streaming experience.
 - Implemented a background worker (`tabs/special_symbols/background.py`) that mirrors the enterprise pipeline: converts files, syncs the knowledge base, chunk-calls Bisheng with tab-specific tweaks, and aggregates outputs.
 - Extended the FastAPI backend to manage both enterprise and special-symbol jobs with the same control signals (start/list/pause/resume/stop) so Streamlit no longer needs to stream prompts directly.
-- Documented outstanding login work: 当前“退出登录”按钮尚未接入逻辑，后续优化时需同步更新本指南。
+- 登录已恢复为旧版机制：基于 URL 参数的每浏览器自动登录与 per-user JSON 会话管理；设置页“退出登录”现已调用 `deactivate_user_session` 并清除 `auth` 标记。
 
 ## 6. Remaining Follow-ups
 - ✅ 完成：已在集成环境跑通 Bisheng 流程，确认提示词、KB 同步与结果导出均符合预期。
 - ✅ 完成：特殊特性符号暂时沿用企业标准的汇总与导出逻辑，实测满足需求，如后续需要差异化再补充说明。
-- ⏳ 待办：继续完善登录体验（例如“退出登录”按钮逻辑、可选的密码校验）。
+- ⏳ 待办：如需增强安全性，可按需加入密码校验/单点登录；当前仍为用户名门禁。
 
 Keep this document updated as further steps are completed.
