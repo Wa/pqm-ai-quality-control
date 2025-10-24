@@ -551,7 +551,7 @@ def render_special_symbols_check_tab(session_id):
         if st.session_state.get(f"special_symbols_demo_{session_id}"):
             # Directories prepared by demo button copy
             prompt_dir = os.path.join(special_out_root, 'prompt_text_chunks')
-            resp_dir = os.path.join(special_out_root, 'llm responses')
+            resp_dir = os.path.join(special_out_root, 'llm_responses')
             final_dir = final_results_dir
             prompted_and_json_dir = os.path.join(special_out_root, 'prompted_llm responses_and_json')
             # Collect prompt chunk files

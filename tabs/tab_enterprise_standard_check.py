@@ -355,7 +355,7 @@ def render_enterprise_standard_check_tab(session_id):
                         # New: copy demonstration prompt/response chunks into session enterprise output
                         # Entire folders copied under enterprise_out_root
                         (os.path.join(demo_enterprise, "prompt_text_chunks"), os.path.join(enterprise_out_root, "prompt_text_chunks")),
-                        (os.path.join(demo_enterprise, "llm responses"), os.path.join(enterprise_out_root, "llm responses")),
+                        (os.path.join(demo_enterprise, "llm_responses"), os.path.join(enterprise_out_root, "llm_responses")),
                         # New: copy final_results for demo summary
                         (os.path.join(demo_enterprise, "final_results"), final_results_dir),
                         # New: copy pre-made prompted responses and json outputs for demo
@@ -368,7 +368,7 @@ def render_enterprise_standard_check_tab(session_id):
                         # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
                         if os.path.isdir(src) and (
                             src.endswith("prompt_text_chunks")
-                            or src.endswith("llm responses")
+                            or src.endswith("llm_responses")
                             or src.endswith("final_results")
                             or src.endswith("prompted_llm responses_and_json")
                         ):
@@ -528,7 +528,7 @@ def render_enterprise_standard_check_tab(session_id):
         if st.session_state.get(f"enterprise_demo_{session_id}"):
             # Directories prepared by demo button copy
             prompt_dir = os.path.join(enterprise_out_root, 'prompt_text_chunks')
-            resp_dir = os.path.join(enterprise_out_root, 'llm responses')
+            resp_dir = os.path.join(enterprise_out_root, 'llm_responses')
             final_dir = final_results_dir
             prompted_and_json_dir = os.path.join(enterprise_out_root, 'prompted_llm responses_and_json')
             # Collect prompt chunk files
