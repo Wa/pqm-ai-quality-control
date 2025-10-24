@@ -17,6 +17,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from tabs.enterprise_standard.background import run_enterprise_standard_job
+from tabs.special_symbols.background import run_special_symbols_job
+
+
+JOB_DEFINITIONS = {
+    "enterprise_standard": {
+        "runner": run_enterprise_standard_job,
+        "label": "企业标准检查",
+    },
+    "special_symbols": {
+        "runner": run_special_symbols_job,
+        "label": "特殊特性符号检查",
+    },
+}
+
+
+def _job_label(job_type: str) -> str:
+    return JOB_DEFINITIONS.get(job_type, {}).get("label", job_type)
 
 app = FastAPI(title="PQM AI Backend", description="File operations backend for PQM AI Quality Control")
 
@@ -64,12 +81,14 @@ class EnterpriseJobStatus(BaseModel):
     created_at: float
     updated_at: float
     pid: Optional[int] = None
+    job_type: str = Field(default="enterprise_standard")
 
 
 @dataclass
 class JobRecord:
     job_id: str
     session_id: str
+    job_type: str = "enterprise_standard"
     status: str = "queued"
     stage: Optional[str] = None
     message: Optional[str] = None
@@ -136,6 +155,7 @@ def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
         created_at=record.created_at,
         updated_at=record.updated_at,
         pid=record.pid,
+        job_type=record.job_type,
     )
 
 
@@ -203,8 +223,13 @@ def _prune_jobs(max_age_seconds: float = 6 * 3600) -> None:
             jobs.pop(job_id, None)
 
 
-def _job_process_entry(job_id: str, session_id: str, queue: "Queue[Tuple[str, Dict[str, Any]]]") -> None:
-    """Entry point executed within a separate process for enterprise jobs."""
+def _job_process_entry(
+    job_id: str,
+    session_id: str,
+    queue: "Queue[Tuple[str, Dict[str, Any]]]",
+    job_type: str,
+) -> None:
+    """Entry point executed within a separate process for long-running jobs."""
     # Backward-compat signature retained; control_dir resolved from metadata if available.
 
     def publish(update: Dict[str, Any]) -> None:
@@ -230,8 +255,20 @@ def _job_process_entry(job_id: str, session_id: str, queue: "Queue[Tuple[str, Di
         except Exception:
             return {"paused": False, "stopped": False}
 
+    runner_def = JOB_DEFINITIONS.get(job_type)
+    if not runner_def:
+        publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": f"未知的任务类型: {job_type}",
+                "message": "任务初始化失败",
+            }
+        )
+        return
+
     try:
-        run_enterprise_standard_job(session_id, publish, check_control=check_control)
+        runner_def["runner"](session_id, publish, check_control=check_control)
     except Exception as error:
         publish(
             {
@@ -285,6 +322,73 @@ def _monitor_process(job_id: str, process: Process) -> None:
                 record.status = "failed"
                 record.stage = "completed"
                 record.error = f"任务进程异常退出(code={exit_code})"
+
+
+def _start_job(job_type: str, session_id: str) -> JobRecord:
+    if job_type not in JOB_DEFINITIONS:
+        raise HTTPException(status_code=404, detail="未知任务类型")
+
+    _prune_jobs()
+    with jobs_lock:
+        for record in jobs.values():
+            if (
+                record.session_id == session_id
+                and record.job_type == job_type
+                and record.status in {"queued", "running"}
+            ):
+                raise HTTPException(status_code=409, detail=f"已有{_job_label(job_type)}任务正在运行")
+        job_id = uuid4().hex
+        record = JobRecord(job_id=job_id, session_id=session_id, job_type=job_type)
+        record.stage = "queued"
+        record.message = "任务已加入队列"
+        record.created_at = record.updated_at = time.time()
+        jobs[job_id] = record
+
+    try:
+        base_ctrl = os.path.join(tempfile.gettempdir(), "pqm_backend", "jobs")
+        os.makedirs(base_ctrl, exist_ok=True)
+        control_dir = os.path.join(base_ctrl, job_id)
+        os.makedirs(control_dir, exist_ok=True)
+        with jobs_lock:
+            jobs[job_id].metadata["control_dir"] = control_dir
+            jobs[job_id].metadata["job_type"] = job_type
+
+        _ctrl_key = f"PQM_JOB_CONTROL_DIR_{job_id}"
+        _prev_env = os.environ.get(_ctrl_key)
+        os.environ[_ctrl_key] = control_dir
+        try:
+            process = Process(
+                target=_job_process_entry,
+                args=(job_id, session_id, _update_queue, job_type),
+                daemon=False,
+            )
+            process.start()
+        finally:
+            if _prev_env is None:
+                os.environ.pop(_ctrl_key, None)
+            else:
+                os.environ[_ctrl_key] = _prev_env
+    except Exception as error:
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        raise HTTPException(status_code=500, detail=f"后台任务启动失败: {error}")
+
+    with jobs_lock:
+        record = jobs[job_id]
+        record.process = process
+        record.pid = process.pid
+        record.status = "running"
+        record.stage = "initializing"
+        record.message = "任务已启动"
+        record.updated_at = time.time()
+
+    try:
+        _update_queue.put_nowait((job_id, {"pid": process.pid}))
+    except Full:
+        pass
+    monitor_thread = Thread(target=_monitor_process, args=(job_id, process), daemon=True)
+    monitor_thread.start()
+    return record
 # Base directories
 BASE_DIR = ""  # Use root directory instead of "user_sessions"
 
@@ -426,64 +530,7 @@ async def file_exists(session_id: str, file_path: str):
 
 @app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)
 async def start_enterprise_standard_job(request: EnterpriseJobRequest):
-    _prune_jobs()
-    with jobs_lock:
-        for record in jobs.values():
-            if record.session_id == request.session_id and record.status in {"queued", "running"}:
-                raise HTTPException(status_code=409, detail="已有企业标准检查任务正在运行")
-        job_id = uuid4().hex
-        record = JobRecord(job_id=job_id, session_id=request.session_id)
-        record.stage = "queued"
-        record.message = "任务已加入队列"
-        record.created_at = record.updated_at = time.time()
-        jobs[job_id] = record
-
-    try:
-        # create a control directory per job for simple cross-process signaling
-        base_ctrl = os.path.join(tempfile.gettempdir(), "pqm_backend", "jobs")
-        os.makedirs(base_ctrl, exist_ok=True)
-        control_dir = os.path.join(base_ctrl, job_id)
-        os.makedirs(control_dir, exist_ok=True)
-        with jobs_lock:
-            jobs[job_id].metadata["control_dir"] = control_dir
-
-        # set an environment variable for the child to locate its control dir
-        _ctrl_key = f"PQM_JOB_CONTROL_DIR_{job_id}"
-        _prev_env = os.environ.get(_ctrl_key)
-        os.environ[_ctrl_key] = control_dir
-        try:
-            process = Process(
-                target=_job_process_entry,
-                args=(job_id, request.session_id, _update_queue),
-                daemon=False,
-            )
-            process.start()
-        finally:
-            # restore/cleanup env var in parent
-            if _prev_env is None:
-                os.environ.pop(_ctrl_key, None)
-            else:
-                os.environ[_ctrl_key] = _prev_env
-    except Exception as error:
-        with jobs_lock:
-            jobs.pop(job_id, None)
-        raise HTTPException(status_code=500, detail=f"后台任务启动失败: {error}")
-
-    with jobs_lock:
-        record = jobs[job_id]
-        record.process = process
-        record.pid = process.pid
-        record.status = "running"
-        record.stage = "initializing"
-        record.message = "任务已启动"
-        record.updated_at = time.time()
-
-    try:
-        _update_queue.put_nowait((job_id, {"pid": process.pid}))
-    except Full:
-        pass
-    monitor_thread = Thread(target=_monitor_process, args=(job_id, process), daemon=True)
-    monitor_thread.start()
+    record = _start_job("enterprise_standard", request.session_id)
     return _record_to_status(record)
 
 
@@ -492,7 +539,7 @@ async def get_enterprise_standard_job(job_id: str):
     _prune_jobs()
     with jobs_lock:
         record = jobs.get(job_id)
-    if not record:
+    if not record or record.job_type != "enterprise_standard":
         raise HTTPException(status_code=404, detail="未找到任务")
     return _record_to_status(record)
 
@@ -504,18 +551,111 @@ async def list_enterprise_standard_jobs(session_id: Optional[str] = None):
         records = [
             _record_to_status(record)
             for record in jobs.values()
-            if session_id is None or record.session_id == session_id
+            if record.job_type == "enterprise_standard"
+            and (session_id is None or record.session_id == session_id)
         ]
     records.sort(key=lambda status: status.created_at, reverse=True)
     return records
+
+
+@app.post("/special-symbols/jobs", response_model=EnterpriseJobStatus)
+async def start_special_symbols_job(request: EnterpriseJobRequest):
+    record = _start_job("special_symbols", request.session_id)
+    return _record_to_status(record)
+
+
+@app.get("/special-symbols/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_special_symbols_job(job_id: str):
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+    if not record or record.job_type != "special_symbols":
+        raise HTTPException(status_code=404, detail="未找到任务")
+    return _record_to_status(record)
+
+
+@app.get("/special-symbols/jobs", response_model=List[EnterpriseJobStatus])
+async def list_special_symbols_jobs(session_id: Optional[str] = None):
+    _prune_jobs()
+    with jobs_lock:
+        records = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if record.job_type == "special_symbols"
+            and (session_id is None or record.session_id == session_id)
+        ]
+    records.sort(key=lambda status: status.created_at, reverse=True)
+    return records
+
+
+@app.post("/special-symbols/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_special_symbols_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "special_symbols":
+            raise HTTPException(status_code=404, detail="未找到任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持暂停")
+        try:
+            open(os.path.join(control_dir, "pause"), "a").close()
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"设置暂停失败: {error}")
+        record.status = "paused"
+        record.stage = "paused"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/special-symbols/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_special_symbols_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "special_symbols":
+            raise HTTPException(status_code=404, detail="未找到任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持恢复")
+        try:
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"取消暂停失败: {error}")
+        record.status = "running"
+        record.stage = record.stage or "running"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/special-symbols/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+async def stop_special_symbols_job(job_id: str):
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "special_symbols":
+            raise HTTPException(status_code=404, detail="未找到任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持停止")
+        try:
+            open(os.path.join(control_dir, "stop"), "a").close()
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"请求停止失败: {error}")
+        record.status = "stopping"
+        record.stage = "stopping"
+        record.updated_at = time.time()
+        return _record_to_status(record)
 
 
 @app.post("/enterprise-standard/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
 async def pause_enterprise_standard_job(job_id: str):
     with jobs_lock:
         record = jobs.get(job_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="未找到任�?")
+        if not record or record.job_type != "enterprise_standard":
+            raise HTTPException(status_code=404, detail="未找到任务")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持暂停")
@@ -533,8 +673,8 @@ async def pause_enterprise_standard_job(job_id: str):
 async def resume_enterprise_standard_job(job_id: str):
     with jobs_lock:
         record = jobs.get(job_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="未找到任�?")
+        if not record or record.job_type != "enterprise_standard":
+            raise HTTPException(status_code=404, detail="未找到任务")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持恢复")
@@ -554,14 +694,13 @@ async def resume_enterprise_standard_job(job_id: str):
 async def stop_enterprise_standard_job(job_id: str):
     with jobs_lock:
         record = jobs.get(job_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="未找到任�?")
+        if not record or record.job_type != "enterprise_standard":
+            raise HTTPException(status_code=404, detail="未找到任务")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持停止")
         try:
             open(os.path.join(control_dir, "stop"), "a").close()
-            # also clear pause to allow graceful exit if it was paused
             pause_flag = os.path.join(control_dir, "pause")
             if os.path.isfile(pause_flag):
                 os.remove(pause_flag)

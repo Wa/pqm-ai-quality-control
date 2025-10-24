@@ -49,9 +49,8 @@ streamlit run main.py --server.port 8888
 
 ### Core Analysis Tabs
 1. **特殊特性符号检查** (Special Symbols Check)
-   - AI-powered consistency checking between control plans and target files
-   - Real-time streaming LLM responses
-   - File upload and management with FastAPI backend
+   - Workflow currently undergoing a major rebuild to align with the enterprise standard experience
+   - Placeholder interface keeps the tab visible while the new implementation is prepared
 
 2. **设计制程检查** (Design Process Check)
    - Parameter validation and process design analysis
@@ -95,12 +94,6 @@ streamlit run main.py --server.port 8888
 # Tab-specific session state structure
 session = {
     'tabs': {
-        'special_symbols': {
-            'process_started': False,
-            'analysis_completed': False,
-            'ollama_history': [],
-            'openai_history': [],
-        },
         'completeness': { ... },
         'parameters': { ... }
     },
@@ -121,7 +114,7 @@ PQM_AI/
 ├── start_app.py                     # Automated startup script
 ├── config.py                        # Centralized configuration
 ├── util.py                          # Utility functions and session management
-├── tab_special_symbols_check.py     # Special symbols analysis
+├── tab_special_symbols_check.py     # Special symbols tab (placeholder during rebuild)
 ├── tab_parameters_check.py          # Design process analysis
 ├── tab_file_completeness_check.py   # File completeness analysis
 ├── tab_file_elements_check.py       # File elements integration

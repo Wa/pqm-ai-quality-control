@@ -1,704 +1,125 @@
-import streamlit as st
+"""Streamlit tab for special symbols checks."""
+from __future__ import annotations
+
 import os
-import json
+import re
+import shutil
 import time
 from datetime import datetime
-from pathlib import Path
-from util import get_user_session, reset_user_session, start_analysis, complete_analysis, SimplePromptGenerator, ensure_session_dirs, handle_file_upload, resolve_ollama_host
-from config import CONFIG
+
+import streamlit as st
+
 from backend_client import get_backend_client, is_backend_available
-from ollama import Client as OllamaClient
-import openai
-import re
-import pandas as pd
+from config import CONFIG
+from util import ensure_session_dirs, handle_file_upload
 
-def render_file_upload_section(session_dirs, session_id):
-    """Render the file upload section with proper keys to prevent duplication."""
-    col_cp, col_target, col_graph = st.columns([1, 1, 1])
+from .special_symbols import SPECIAL_SYMBOLS_WORKFLOW_SURFACE, stream_text
 
-    with col_cp:
-        cp_files = st.file_uploader("点击上传控制计划文件", type=None, accept_multiple_files=True, key=f"cp_uploader_{session_id}")
-        if cp_files:
-            handle_file_upload(cp_files, session_dirs["cp"])
-
-    with col_target:
-        target_files = st.file_uploader("点击上传基准源文件", type=None, accept_multiple_files=True, key=f"target_uploader_{session_id}")
-        if target_files:
-            handle_file_upload(target_files, session_dirs["target"])
-
-    with col_graph:
-        graph_files = st.file_uploader("点击上传图纸文件", type=None, accept_multiple_files=True, key=f"graph_uploader_{session_id}")
-        if graph_files:
-            handle_file_upload(graph_files, session_dirs["graph"])
-
-def parse_prompts(output_file):
-    """Parse prompt_output.txt into individual prompts."""
-    if not os.path.exists(output_file):
-        return []
-    with open(output_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    prompts = [p.strip() for p in content.split('='*80) if p.strip()]
-    return prompts
-
-def remove_think_blocks(text):
-    """Remove all <think>...</think> blocks, including the tags."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-
-def run_analysis_workflow(session_id, session_dirs, prompt_generator):
-    """Run the complete analysis workflow."""
-    # Get tab-specific session state
-    session = get_user_session(session_id, 'special_symbols')
-    cp_session_dir = session_dirs["cp"]
-    target_session_dir = session_dirs["target"]
-    generated_session_dir = session_dirs["generated"]
-    special_dir = session_dirs.get("generated_special_symbols_check", os.path.join(generated_session_dir, "special_symbols_check"))
-    os.makedirs(special_dir, exist_ok=True)
-    st.info("🔍 开始特殊特性符号检查分析，请稍候...")
-    
-    # Get target files
-    target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
-    if not target_files_list:
-        st.warning("请先上传基准源文件")
-        return
-    
-    target_file_path = os.path.join(target_session_dir, target_files_list[0])
-    output_file = os.path.join(special_dir, "prompt_output.txt")
-    
-    # Check if prompt_output.txt already exists (from demo or previous run)
-    if not os.path.exists(output_file):
-        # Generate prompt only if it doesn't exist
-        prompt_generator.generate_prompt(cp_session_dir, target_file_path, output_file)
-    
-    prompts = parse_prompts(output_file)
-    result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
-    
-    # Get LLM backend from session state (default to ollama)
-    llm_backend = st.session_state.get(f'llm_backend_{session_id}', 'ollama_9')
-    
-    # Initialize LLM clients based on selected backend
-    if llm_backend in ("ollama_127","ollama_9"):
-        host = resolve_ollama_host(llm_backend)
-        ollama_client = OllamaClient(host=host)
-        
-        # Streaming generator for Ollama (stateless per call)
-        def llm_stream_chat(prompt):
-            response_text = ""
-            
-            # Get Ollama parameters from session state
-            model = st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"])
-            temperature = st.session_state.get(f'ollama_temperature_{session_id}', 0.7)
-            top_p = st.session_state.get(f'ollama_top_p_{session_id}', 0.9)
-            top_k = st.session_state.get(f'ollama_top_k_{session_id}', 40)
-            repeat_penalty = st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1)
-            num_ctx = st.session_state.get(f'ollama_num_ctx_{session_id}', 40001)
-            num_thread = st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-            
-            for chunk in ollama_client.chat(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-                options={
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "top_k": top_k,
-                    "repeat_penalty": repeat_penalty,
-                    "num_ctx": num_ctx,
-                    "num_thread": num_thread
-                }
-            ):
-                new_text = chunk['message']['content']
-                response_text += new_text
-                yield new_text
-
-    elif llm_backend == "openai":
-        openai.base_url = CONFIG["llm"]["openai_base_url"]
-        openai.api_key = CONFIG["llm"]["openai_api_key"]
-        
-        # Streaming generator for OpenAI (stateless per call)
-        def llm_stream_chat(prompt):
-            response_text = ""
-            
-            # Get OpenAI parameters from session state
-            model = st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"])
-            temperature = st.session_state.get(f'openai_temperature_{session_id}', 0.7)
-            top_p = st.session_state.get(f'openai_top_p_{session_id}', 1.0)
-            max_tokens = st.session_state.get(f'openai_max_tokens_{session_id}', 2048)
-            presence_penalty = st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0)
-            frequency_penalty = st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-            logit_bias_str = st.session_state.get(f'openai_logit_bias_{session_id}', '{}')
-            
-            # Parse logit_bias if provided
-            logit_bias = {}
-            try:
-                if logit_bias_str and logit_bias_str != '{}':
-                    logit_bias = json.loads(logit_bias_str)
-            except json.JSONDecodeError:
-                pass
-            
-            stream = openai.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                presence_penalty=presence_penalty,
-                frequency_penalty=frequency_penalty,
-                logit_bias=logit_bias if logit_bias else None
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                response_text += delta
-                yield delta
-
-    # Add timestamp to make keys even more unique
-    import time
-    timestamp = int(time.time())
-    
-    # Demo mode shortcut: when launched via 演示, skip LLM streaming for initial prompts
-    demo_mode = session.get('demo_mode', False)
-    demo_response_chunks = []
-    if demo_mode:
-        # Use pre-made responses to build 2_symbol_check_result.txt directly
-        response_src = os.path.join(special_dir, "response_output.txt")
-        result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
-        try:
-            if os.path.exists(response_src):
-                with open(response_src, "r", encoding="utf-8") as fsrc:
-                    response_text_all = fsrc.read()
-                # Write the combined responses for downstream prompt step
-                with open(result_file, "w", encoding="utf-8") as fdst:
-                    fdst.write(response_text_all)
-                # Split into per-prompt chunks using two consecutive separator lines
-                # Accept variations in whitespace and number of '=' characters
-                import re as _re
-                # Split on a single divider line containing one or more '=' characters
-                demo_response_chunks = [c.strip() for c in _re.split(r"(?:\r?\n\s*=+\s*\r?\n)", response_text_all) if c.strip()]
-            else:
-                st.warning("未找到演示响应文件 response_output.txt")
-        except Exception as e:
-            st.warning(f"读取演示响应失败: {e}")
-    
-    # Display analysis results
-    for prompt_idx, prompt in enumerate(prompts, 1):
-        col_prompt, col_response = st.columns([1, 1])
-        with col_prompt:
-            # Create bounded container for auto-scrolling prompt
-            prompt_container = st.container(height=400)
-            
-            with prompt_container:
-                # Use chat message structure for prompt display
-                # Note: Render prompts with st.text() to avoid Markdown parsing artifacts
-                # (e.g., unintended strikethrough from '*'/'_'); render responses with
-                # st.write() to keep formatting where it is appropriate.
-                with st.chat_message("user"):
-                    prompt_placeholder = st.empty()
-                    
-                    # Simulated streaming for prompt (10 words at a time)
-                    words = prompt.split()
-                    streamed_prompt = ""
-                    for chunk_idx in range(0, len(words), 10):
-                        chunk_words = words[chunk_idx:chunk_idx + 10]
-                        streamed_prompt += " ".join(chunk_words) + " "
-                        prompt_placeholder.text(streamed_prompt.strip())
-                        if demo_mode:
-                            time.sleep(0.02)
-                
-                # Add disabled chat input for auto-scroll with unique key including timestamp
-                st.chat_input(placeholder="", disabled=True, key=f"workflow_prompt_{timestamp}_{prompt_idx}_{session_id}")
-        
-        with col_response:
-            # Create bounded container for auto-scrolling response
-            response_container = st.container(height=400)
-            
-            with response_container:
-                # Use chat message structure for response display
-                with st.chat_message("assistant"):
-                    response_placeholder = st.empty()
-                    
-                    if demo_mode:
-                        # Show the corresponding pre-generated response chunk with simulated streaming
-                        idx = prompt_idx - 1
-                        demo_text = demo_response_chunks[idx] if idx < len(demo_response_chunks) else ""
-                        words = demo_text.split()
-                        streamed = ""
-                        for chunk_idx in range(0, len(words), 10):
-                            chunk_words = words[chunk_idx:chunk_idx + 10]
-                            streamed += " ".join(chunk_words) + " "
-                            response_placeholder.write(streamed.strip())
-                            time.sleep(0.02)
-                        # Do not rewrite result_file here; already written above
-                    else:
-                        # Stream the response using selected LLM
-                        response_text = ""
-                        for chunk in llm_stream_chat(prompt):
-                            response_text += chunk
-                            response_placeholder.write(response_text)
-                        
-                        # Write response_text to file (overwrite for first, append for others), filtering <think>...</think>
-                        cleaned_response = remove_think_blocks(response_text)
-                        if prompt_idx == 1:
-                            with open(result_file, "w", encoding="utf-8") as f:
-                                f.write('提取以下文字中有关"特殊特性符号（/、 ★和☆）不一致"的地方，如果下文字未提及任何"特殊特性符号（/、 ★和☆）不一致"的地方，则输出"比对结果为全部一致，但是有些参数的特殊性作符号在控制计划中没有定义"\n')
-                                f.write(cleaned_response)
-                        else:
-                            with open(result_file, "a", encoding="utf-8") as f:
-                                f.write(cleaned_response)
-                
-                # Add disabled chat input for auto-scroll with unique key including timestamp
-                st.chat_input(placeholder="", disabled=True, key=f"workflow_response_{timestamp}_{prompt_idx}_{session_id}")
-    
-    # --- 特殊特性符号不一致结论 (symbol_check_final) ---
-    # Read the content of 2_symbol_check_result.txt as the new prompt
-    symbol_check_final_file = os.path.join(special_dir, "2_symbol_check_result.txt")
-    if os.path.exists(symbol_check_final_file):
-        with open(symbol_check_final_file, "r", encoding="utf-8") as f:
-            symbol_check_final_prompt = f.read()
-        # Augment prompt to require including an explicit parameter field per item
-        _parameter_requirement = "\n\n请在每条结论中明确提供一个\"参数\"字段（可称为\"参数\"/\"目标参数\"/\"零件参数\"等），用于标示相关的参数名称。"
-        # Also require explicit file references (目标文件与控制计划文件)，包含文件名与工作表（若已知）
-        _file_fields_requirement = (
-            "\n请在每条结论中同时给出对应的\"目标文件\"与\"控制计划文件\"来源（若可判定），"
-            "格式为：目标文件：<文件名>/<Sheet名>；控制计划：<文件名>/<Sheet名>。若未知请留空字符串。"
-        )
-        symbol_check_final_prompt_aug = symbol_check_final_prompt + _parameter_requirement + _file_fields_requirement
-        
-        # Display the prompt and response side by side
-        col_final_prompt, col_final_response = st.columns([1, 1])
-        with col_final_prompt:
-            st.subheader("特殊特性符号不一致结论 - 提示词:")
-            prompt_container = st.container(height=400)
-            with prompt_container:
-                with st.chat_message("user"):
-                    prompt_placeholder = st.empty()
-                    prompt_placeholder.text(symbol_check_final_prompt_aug)
-                
-                st.chat_input(placeholder="", disabled=True, key=f"workflow_final_prompt_{timestamp}_{session_id}")
-        
-        with col_final_response:
-            st.subheader("特殊特性符号不一致结论 - AI回复:")
-            response_container = st.container(height=400)
-            with response_container:
-                with st.chat_message("assistant"):
-                    response_placeholder = st.empty()
-                    
-                    # In demo mode, bypass LLM and display pre-generated conclusion
-                    if session.get('demo_mode', False):
-                        try:
-                            result_path = os.path.join(special_dir, "3_special_symbols_check_result.txt")
-                            if os.path.exists(result_path):
-                                with open(result_path, "r", encoding="utf-8") as f:
-                                    symbol_check_final_response = f.read()
-                                # Simulate streaming for the final response as well
-                                words = symbol_check_final_response.split()
-                                streamed = ""
-                                for chunk_idx in range(0, len(words), 10):
-                                    chunk_words = words[chunk_idx:chunk_idx + 10]
-                                    streamed += " ".join(chunk_words) + " "
-                                    response_placeholder.write(streamed.strip())
-                                    time.sleep(0.02)
-                            else:
-                                st.warning("未找到演示结论文件 3_special_symbols_check_result.txt，改为使用实时模型回复。")
-                                raise FileNotFoundError
-                        except Exception:
-                            # Fallback to original streaming behavior if demo asset missing
-                            symbol_check_final_response = ""
-                            if llm_backend in ("ollama_127", "ollama_9"):
-                                for chunk in ollama_client.chat(
-                                    model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                                    messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
-                                    stream=True,
-                                    options={
-                                        "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                                        "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                                        "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                                        "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                        "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 40001),
-                                        "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                                    }
-                                ):
-                                    new_text = chunk['message']['content']
-                                    symbol_check_final_response += new_text
-                                    response_placeholder.write(symbol_check_final_response)
-                            elif llm_backend == "openai":
-                                stream = openai.chat.completions.create(
-                                    model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                                    messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
-                                    stream=True,
-                                    temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                                    top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                                    max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                                    presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                    frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-                                )
-                                for chunk in stream:
-                                    delta = chunk.choices[0].delta.content or ""
-                                    symbol_check_final_response += delta
-                                    response_placeholder.write(symbol_check_final_response)
-                        # In demo mode, we do not overwrite the existing file
-                    else:
-                        # Original streaming behavior (non-demo)
-                        symbol_check_final_response = ""
-                        if llm_backend in ("ollama_127", "ollama_9"):
-                            for chunk in ollama_client.chat(
-                                model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                                messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
-                                stream=True,
-                                options={
-                                    "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                                    "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                                    "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                                    "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                    "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 40001),
-                                    "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4)
-                                }
-                            ):
-                                new_text = chunk['message']['content']
-                                symbol_check_final_response += new_text
-                                response_placeholder.write(symbol_check_final_response)
-                        elif llm_backend == "openai":
-                            stream = openai.chat.completions.create(
-                                model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                                messages=[{"role": "user", "content": symbol_check_final_prompt_aug}],
-                                stream=True,
-                                temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                                top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                                max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                                presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0)
-                            )
-                            for chunk in stream:
-                                delta = chunk.choices[0].delta.content or ""
-                                symbol_check_final_response += delta
-                                response_placeholder.write(symbol_check_final_response)
-                        # Save only the AI response to the subfolder (non-demo)
-                        result_path = os.path.join(special_dir, "3_special_symbols_check_result.txt")
-                        with open(result_path, "w", encoding="utf-8") as f:
-                            f.write(symbol_check_final_response)
-                
-                st.chat_input(placeholder="", disabled=True, key=f"workflow_final_response_{timestamp}_{session_id}")
-
-    # --- JSON/Excel 展示步骤（演示模式直接使用预制 Excel）---
-    demo_mode_for_json = session.get('demo_mode', False)
-    if demo_mode_for_json:
-        try:
-            excel_path = os.path.join(special_dir, "special_symbols_json_result_20250905_104850.xlsx")
-            if os.path.exists(excel_path):
-                try:
-                    df = pd.read_excel(excel_path)
-                    st.success(f"已加载演示 Excel 结果: {os.path.basename(excel_path)}")
-                    st.dataframe(df, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"读取或展示演示 Excel 失败: {e}")
-            else:
-                st.warning("未找到演示 Excel 文件 special_symbols_json_result_20250905_104850.xlsx。")
-        except Exception as e:
-            st.warning(f"演示 Excel 加载失败: {e}")
-    else:
-        # --- 原有 JSON 转换步骤（非演示模式）---
-        # 读取上一步保存的文本并构建“转换为 JSON”的提示词
-        json_source_file = os.path.join(special_dir, "3_special_symbols_check_result.txt")
-        if os.path.exists(json_source_file):
-            try:
-                with open(json_source_file, "r", encoding="utf-8") as f:
-                    source_text_for_json = f.read()
-            except Exception:
-                source_text_for_json = ""
-            
-            # 参考文件齐套性检查中的严格 JSON 要求，构造仅输出 JSON 的提示词
-            # 更新字段：
-            # - issue: 要求为“参数”（如 参数/目标参数/零件参数），而非问题描述
-            # - location: 拆分为 target_file 与 control_plan_file 两列
-            json_conversion_prompt = (
-                "请将以下内容转换为严格的 JSON 对象，并且仅输出 JSON（不要输出解释、Markdown 或其他文本）。\n"
-                "请将结果组织为：{\n"
-                "  \"items\": [\n"
-                "    {\n"
-                "      \"issue\": \"参数名称（如 参数/目标参数/零件参数 等）\",\n"
-                "      \"target_file\": \"目标文件：<文件名>/<Sheet名>，未知则空字符串\",\n"
-                "      \"control_plan_file\": \"控制计划：<文件名>/<Sheet名>，未知则空字符串\",\n"
-                "      \"note\": \"可选的补充说明，没有则空字符串\",\n"
-                "      \"suggestion\": \"简短的修订建议，没有则空字符串\"\n"
-                "    }\n"
-                "  ]\n"
-                "}\n\n"
-                "请确保 issue 字段填写为参数名称，而非问题描述。\n\n"
-                "内容如下：\n"
-                f"{source_text_for_json}"
-            )
-            
-            col_json_left, col_json_right = st.columns([1, 1])
-            with col_json_left:
-                # 左侧显示提示词（无标题）
-                left_container = st.container(height=400)
-                with left_container:
-                    with st.chat_message("user"):
-                        ph_left = st.empty()
-                        ph_left.text(json_conversion_prompt)
-                    st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_prompt_{timestamp}_{session_id}")
-            
-            with col_json_right:
-                # 右侧流式显示 LLM 回复（无标题）
-                right_container = st.container(height=400)
-                with right_container:
-                    with st.chat_message("assistant"):
-                        ph_right = st.empty()
-                        json_response_text = ""
-                        if llm_backend in ("ollama_127", "ollama_9"):
-                            for chunk in ollama_client.chat(
-                                model=st.session_state.get(f'ollama_model_{session_id}', CONFIG["llm"]["ollama_model"]),
-                                messages=[{"role": "user", "content": json_conversion_prompt}],
-                                stream=True,
-                                options={
-                                    "temperature": st.session_state.get(f'ollama_temperature_{session_id}', 0.7),
-                                    "top_p": st.session_state.get(f'ollama_top_p_{session_id}', 0.9),
-                                    "top_k": st.session_state.get(f'ollama_top_k_{session_id}', 40),
-                                    "repeat_penalty": st.session_state.get(f'ollama_repeat_penalty_{session_id}', 1.1),
-                                    "num_ctx": st.session_state.get(f'ollama_num_ctx_{session_id}', 40001),
-                                    "num_thread": st.session_state.get(f'ollama_num_thread_{session_id}', 4),
-                                    "format": "json",
-                                }
-                            ):
-                                new_text = chunk['message']['content']
-                                json_response_text += new_text
-                                ph_right.write(json_response_text)
-                        elif llm_backend == "openai":
-                            stream = openai.chat.completions.create(
-                                model=st.session_state.get(f'openai_model_{session_id}', CONFIG["llm"]["openai_model"]),
-                                messages=[{"role": "user", "content": json_conversion_prompt}],
-                                stream=True,
-                                temperature=st.session_state.get(f'openai_temperature_{session_id}', 0.7),
-                                top_p=st.session_state.get(f'openai_top_p_{session_id}', 1.0),
-                                max_tokens=st.session_state.get(f'openai_max_tokens_{session_id}', 2048),
-                                presence_penalty=st.session_state.get(f'openai_presence_penalty_{session_id}', 0.0),
-                                frequency_penalty=st.session_state.get(f'openai_frequency_penalty_{session_id}', 0.0),
-                                response_format={"type": "json_object"},
-                            )
-                            for chunk in stream:
-                                delta = chunk.choices[0].delta.content or ""
-                                json_response_text += delta
-                                ph_right.write(json_response_text)
-                    st.chat_input(placeholder="", disabled=True, key=f"special_symbols_json_response_{timestamp}_{session_id}")
-            
-            # 解析 JSON 并导出为 Excel，显示在页面
-            parsed_json = None
-            try:
-                parsed_json = json.loads(json_response_text)
-            except Exception:
-                # 尝试从代码块/杂文中提取 JSON 对象
-                try:
-                    cleaned = (json_response_text or "").strip()
-                    if cleaned.startswith("```"):
-                        cleaned = cleaned.strip('`')
-                        idx = cleaned.find("{")
-                        if idx >= 0:
-                            cleaned = cleaned[idx:]
-                    start = cleaned.find('{')
-                    end = cleaned.rfind('}')
-                    if start >= 0 and end > start:
-                        cleaned = cleaned[start:end+1]
-                    parsed_json = json.loads(cleaned)
-                except Exception:
-                    parsed_json = None
-
-            if isinstance(parsed_json, dict):
-                items = parsed_json.get('items')
-                if isinstance(items, list) and items:
-                    # 归一化为表格
-                    try:
-                        df = pd.DataFrame(items)
-                    except Exception:
-                        df = pd.DataFrame()
-                    if not df.empty:
-                        try:
-                            from datetime import datetime as _dt
-                            ts = _dt.now().strftime('%Y%m%d_%H%M%S')
-                            excel_path = os.path.join(special_dir, f"special_symbols_json_result_{ts}.xlsx")
-                            df.to_excel(excel_path, index=False, engine='openpyxl')
-                            st.success(f"已导出 JSON 结果为 Excel: {os.path.basename(excel_path)}")
-                            # 展示在页面
-                            st.dataframe(df, use_container_width=True)
-                        except Exception as e:
-                            st.warning(f"导出或展示 Excel 失败: {e}")
-                else:
-                    st.info("JSON 中未找到可用的 items 列表。")
-
-    st.info("✅ 分析完成")
 
 def render_special_symbols_check_tab(session_id):
     # Handle None session_id (user not logged in)
     if session_id is None:
         st.warning("请先登录以使用此功能。")
         return
-    
-    # Add CSS to hide chat input scoped ONLY to this tab's container
-    with st.container(key="special_symbols_root"):
-        st.markdown("""
-        <style>
-        [data-testid="stChatInput"] { display: none; }
-        </style>
-        """, unsafe_allow_html=True)
-    
-    # Base directories for each upload box - using centralized config
-    BASE_DIRS = {
-        "cp": str(CONFIG["directories"]["cp_files"]),
-        "target": str(CONFIG["directories"]["target_files"]),
-        "graph": str(CONFIG["directories"]["graph_files"]),
-        "generated": str(CONFIG["directories"]["generated_files"])
-    }
-    session_dirs = ensure_session_dirs(BASE_DIRS, session_id)
-    cp_session_dir = session_dirs["cp"]
-    target_session_dir = session_dirs["target"]
-    graph_session_dir = session_dirs["graph"]
-    generated_session_dir = session_dirs["generated"]
-    special_dir = session_dirs.get("generated_special_symbols_check", os.path.join(generated_session_dir, "special_symbols_check"))
-    os.makedirs(special_dir, exist_ok=True)
 
-    # Initialize prompt generator
-    prompt_generator = SimplePromptGenerator(session_id)
+    # No CSS width overrides; rely on Streamlit columns like special symbols tab
+    # Ensure special_symbols directories and a generated output root exist
+    base_dirs = {
+        "generated": str(CONFIG["directories"]["generated_files"]),
+    }
+    session_dirs = ensure_session_dirs(base_dirs, session_id)
+    try:
+        workflow_paths = SPECIAL_SYMBOLS_WORKFLOW_SURFACE.prepare_paths(session_dirs)
+    except KeyError as error:
+        st.error(f"初始化会话目录失败：{error}")
+        return
+
+    reference_dir = workflow_paths.standards_dir
+    inspected_dir = workflow_paths.examined_dir
+    special_out_root = workflow_paths.output_root
+    reference_txt_dir = workflow_paths.standards_txt_dir
+    inspected_txt_dir = workflow_paths.examined_txt_dir
+    initial_results_dir = workflow_paths.initial_results_dir
+    final_results_dir = workflow_paths.final_results_dir
+    checkpoint_dir = workflow_paths.checkpoint_dir
+
+    backend_ready = is_backend_available()
+    backend_client = get_backend_client() if backend_ready else None
+    job_state_key = f"special_symbols_job_id_{session_id}"
+    job_status: dict[str, object] | None = None
+    job_error: str | None = None
+    stream_state_key = f"special_symbols_stream_state_{session_id}"
+    if backend_ready and backend_client is not None:
+        stored_job_id = st.session_state.get(job_state_key)
+        if stored_job_id:
+            result = backend_client.get_special_symbols_job(stored_job_id)
+            if isinstance(result, dict) and result.get("job_id"):
+                job_status = result
+            elif isinstance(result, dict) and result.get("status") == "error":
+                job_error = str(result.get("message", "后台任务查询失败"))
+            elif isinstance(result, dict) and result.get("detail"):
+                job_error = str(result.get("detail"))
+                if result.get("detail") == "未找到任务":
+                    st.session_state.pop(job_state_key, None)
+        if job_status is None:
+            result = backend_client.list_special_symbols_jobs(session_id)
+            if isinstance(result, list) and result:
+                job_status = result[0]
+                if isinstance(job_status, dict) and job_status.get("job_id"):
+                    st.session_state[job_state_key] = job_status.get("job_id")
+            elif isinstance(result, dict) and result.get("status") == "error":
+                job_error = str(result.get("message", "后台任务列表查询失败"))
+    else:
+        job_error = "后台服务未连接"
+
+    status_str = str(job_status.get("status")) if job_status else ""
+    job_running = bool(job_status and status_str in {"queued", "running"})
+    job_paused = bool(job_status and status_str == "paused")
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
 
-    # Render the file/info column FIRST so file lists appear immediately after clicking buttons
     with col_info:
-        # Early bulk operations: handle clear-all before listing files so UI updates immediately
-        backend_available = is_backend_available()
-        sess_for_clear = get_user_session(session_id, 'special_symbols')
-        workflow_safe_for_clear = not sess_for_clear['process_started'] or sess_for_clear['analysis_completed']
-        if workflow_safe_for_clear:
-            col_clear_cp, col_clear_target, col_clear_graph = st.columns(3)
-            with col_clear_cp:
-                if st.button("🗑️ 清空控制计划文件", key=f"clear_cp_files_{session_id}"):
-                    if backend_available:
-                        try:
-                            client = get_backend_client()
-                            # No dedicated endpoint per bucket; list and delete
-                            result = client.list_files(session_id, file_type="cp")
-                            deleted = 0
-                            for fi in result.get("cp", []):
-                                del_res = client.delete_file(session_id, os.path.join(cp_session_dir, fi["name"]))
-                                if del_res.get("status") == "success":
-                                    deleted += 1
-                            st.success(f"已清空控制计划文件（{deleted} 个）")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-                    else:
-                        try:
-                            for file in os.listdir(cp_session_dir):
-                                file_path = os.path.join(cp_session_dir, file)
-                                if os.path.isfile(file_path):
-                                    os.remove(file_path)
-                            st.success("已清空控制计划文件")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-            with col_clear_target:
-                if st.button("🗑️ 清空基准源文件", key=f"clear_target_files_{session_id}"):
-                    if backend_available:
-                        try:
-                            client = get_backend_client()
-                            result = client.list_files(session_id, file_type="target")
-                            deleted = 0
-                            for fi in result.get("target", []):
-                                del_res = client.delete_file(session_id, os.path.join(target_session_dir, fi["name"]))
-                                if del_res.get("status") == "success":
-                                    deleted += 1
-                            st.success(f"已清空基准源文件（{deleted} 个）")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-                    else:
-                        try:
-                            for file in os.listdir(target_session_dir):
-                                file_path = os.path.join(target_session_dir, file)
-                                if os.path.isfile(file_path):
-                                    os.remove(file_path)
-                            st.success("已清空基准源文件")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-            with col_clear_graph:
-                if st.button("🗑️ 清空图纸文件", key=f"clear_graph_files_{session_id}"):
-                    if backend_available:
-                        try:
-                            client = get_backend_client()
-                            result = client.list_files(session_id, file_type="graph")
-                            deleted = 0
-                            for fi in result.get("graph", []):
-                                del_res = client.delete_file(session_id, os.path.join(graph_session_dir, fi["name"]))
-                                if del_res.get("status") == "success":
-                                    deleted += 1
-                            st.success(f"已清空图纸文件（{deleted} 个）")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-                    else:
-                        try:
-                            for file in os.listdir(graph_session_dir):
-                                file_path = os.path.join(graph_session_dir, file)
-                                if os.path.isfile(file_path):
-                                    os.remove(file_path)
-                            st.success("已清空图纸文件")
-                        except Exception as e:
-                            st.error(f"清空失败: {e}")
-        else:
-            st.info("🔄 分析进行中，请等待完成后再清空文件")
-            st.button("🗑️ 清空控制计划文件", key=f"clear_cp_files_disabled_{session_id}", disabled=True)
-            st.button("🗑️ 清空基准源文件", key=f"clear_target_files_disabled_{session_id}", disabled=True)
-            st.button("🗑️ 清空图纸文件", key=f"clear_graph_files_disabled_{session_id}", disabled=True)
-
-        # --- File Manager Module ---
+        # Right column intentionally limited to file manager and utilities only
+        # File manager utilities (mirroring completeness tab behavior)
         def get_file_list(folder):
-            # Always use FastAPI backend
-            try:
-                client = get_backend_client()
-                # Determine file type from folder path
-                if "CP_files" in folder:
-                    file_type = "cp"
-                elif "target_files" in folder:
-                    file_type = "target"
-                elif "graph_files" in folder:
-                    file_type = "graph"
-                else:
-                    # For other directories, return empty list
-                    return []
-                
-                # Get files from backend
-                result = client.list_files(session_id, file_type)
-                if file_type in result:
-                    files = []
-                    for file_info in result[file_type]:
-                        files.append({
-                            'name': file_info['name'],
-                            'size': file_info['size'],
-                            'modified': float(file_info['modified_time']),
-                            'path': os.path.join(folder, file_info['name'])
-                        })
-                    # Use stable sorting by name first, then by modification time
-                    return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
-                else:
-                    return []
-            except Exception as e:
-                st.error(f"后端连接失败: {e}")
-                return []
-        
-        def get_file_list_direct(folder):
-            """Direct file system access as fallback"""
-            if not os.path.exists(folder):
+            if not folder or not os.path.exists(folder):
                 return []
             files = []
+            
+            def _ts_from_name(name: str) -> tuple[int, int]:
+                # Extract timestamp at end of filename stem: yyyymmdd_hhmmss (or yyyymmddhhmmss)
+                stem, _ = os.path.splitext(name)
+                m = re.search(r"(\d{8})[_-]?(\d{6})$", stem)
+                if not m:
+                    return 0, 0  # (has_ts=0, ts_key=0)
+                try:
+                    ts_key = int(m.group(1) + m.group(2))  # yyyymmddhhmmss as integer
+                    return 1, ts_key
+                except Exception:
+                    return 0, 0
+
             for f in os.listdir(folder):
                 file_path = os.path.join(folder, f)
                 if os.path.isfile(file_path):
                     stat = os.stat(file_path)
+                    has_ts, ts_key = _ts_from_name(f)
                     files.append({
                         'name': f,
                         'size': stat.st_size,
                         'modified': stat.st_mtime,
-                        'path': file_path
+                        'path': file_path,
+                        'has_ts': has_ts,
+                        'ts_key': ts_key,
                     })
-            # Use stable sorting by name first, then by modification time
-            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']), reverse=False)
+            # Sort by: has_ts desc → ts_key desc → modified desc → name asc
+            return sorted(
+                files,
+                key=lambda x: (x['has_ts'], x['ts_key'], x['modified'], x['name'].lower()),
+                reverse=True
+            )
 
         def format_file_size(size_bytes):
-            """Convert bytes to human readable format."""
             if size_bytes == 0:
                 return "0 B"
             size_names = ["B", "KB", "MB", "GB"]
@@ -709,314 +130,577 @@ def render_special_symbols_check_tab(session_id):
             return f"{size_bytes:.1f} {size_names[i]}"
 
         def format_timestamp(timestamp):
-            """Convert timestamp to readable date."""
-            from datetime import datetime
             return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
 
         def truncate_filename(filename, max_length=40):
-            """Truncate filename if too long, preserving extension."""
             if len(filename) <= max_length:
                 return filename
-            
-            # Split filename and extension
             name, ext = os.path.splitext(filename)
-            # Calculate how much space we have for the name part
-            available_length = max_length - len(ext) - 3  # 3 for "..."
-            
+            available_length = max_length - len(ext) - 3
             if available_length <= 0:
-                # If extension is too long, just truncate the whole thing
                 return filename[:max_length-3] + "..."
-            
-            # Truncate name part and add ellipsis
             truncated_name = name[:available_length] + "..."
             return truncated_name + ext
 
-        # File Manager Tabs
-        tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "基准源文件", "图纸文件"])
-        
-        with tab_cp:
-            cp_files_list = get_file_list(cp_session_dir)
-            
-            if cp_files_list:
-                for i, file_info in enumerate(cp_files_list):
+        # Clear buttons
+        col_clear1, col_clear2, col_clear3 = st.columns(3)
+        with col_clear1:
+            if st.button("🗑️ 清空基准文件", key=f"clear_special_symbols_reference_{session_id}"):
+                try:
+                    for file in os.listdir(reference_dir):
+                        file_path = os.path.join(reference_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    st.success("已清空基准文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        with col_clear2:
+            if st.button("🗑️ 清空待检查文件", key=f"clear_special_symbols_exam_{session_id}"):
+                try:
+                    for file in os.listdir(inspected_dir):
+                        file_path = os.path.join(inspected_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    st.success("已清空待检查文件")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        with col_clear3:
+            if st.button("🗑️ 清空分析结果", key=f"clear_special_symbols_results_{session_id}"):
+                try:
+                    deleted_count = 0
+                    if os.path.isdir(final_results_dir):
+                        for fname in os.listdir(final_results_dir):
+                            fpath = os.path.join(final_results_dir, fname)
+                            if os.path.isfile(fpath):
+                                os.remove(fpath)
+                                deleted_count += 1
+                    st.success(f"已清空分析结果（{deleted_count} 个文件）")
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+
+        # File lists in tabs (fixed order)
+        tab_std, tab_exam, tab_results = st.tabs(["基准文件", "待检查文件", "分析结果"])
+        with tab_std:
+            reference_files = get_file_list(reference_dir)
+            if reference_files:
+                for file_info in reference_files:
                     display_name = truncate_filename(file_info['name'])
                     with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                        col_i, col_a = st.columns([3, 1])
+                        with col_i:
+                            st.write(f"**文件名:** {file_info['name']}")
                             st.write(f"**大小:** {format_file_size(file_info['size'])}")
                             st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            
-                            # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id, 'special_symbols')
-                            workflow_safe = not session['process_started'] or session['analysis_completed']
-                            
-                            if workflow_safe:
-                                if st.button("🗑️ 删除", key=delete_key):
-                                    try:
-                                        if is_backend_available():
-                                            # Use FastAPI backend
-                                            client = get_backend_client()
-                                            result = client.delete_file(session_id, file_info['path'])
-                                            if result.get("status") == "success":
-                                                st.success(f"已删除: {file_info['name']}")
-                                            else:
-                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                        else:
-                                            # Fallback to direct file system access
-                                            os.remove(file_info['path'])
-                                            st.success(f"已删除: {file_info['name']}")
-                                    except Exception as e:
-                                        st.error(f"删除失败: {e}")
-                            else:
-                                # Show disabled button during workflow
-                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
+                        with col_a:
+                            delete_key = f"del_reference_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
             else:
                 st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_cp_files = st.file_uploader("选择控制计划文件", type=None, accept_multiple_files=True, key=f"cp_uploader_tab_{session_id}")
-            if new_cp_files:
-                handle_file_upload(new_cp_files, cp_session_dir)
 
-        with tab_target:
-            target_files_list = get_file_list(target_session_dir)
-            
-            if target_files_list:
-                for i, file_info in enumerate(target_files_list):
+        with tab_exam:
+            exam_files = get_file_list(inspected_dir)
+            if exam_files:
+                for file_info in exam_files:
                     display_name = truncate_filename(file_info['name'])
                     with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
+                        col_i, col_a = st.columns([3, 1])
+                        with col_i:
+                            st.write(f"**文件名:** {file_info['name']}")
                             st.write(f"**大小:** {format_file_size(file_info['size'])}")
                             st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"delete_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            
-                            # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id, 'special_symbols')
-                            workflow_safe = not session['process_started'] or session['analysis_completed']
-                            
-                            if workflow_safe:
-                                if st.button("🗑️ 删除", key=delete_key):
-                                    try:
-                                        if is_backend_available():
-                                            # Use FastAPI backend
-                                            client = get_backend_client()
-                                            result = client.delete_file(session_id, file_info['path'])
-                                            if result.get("status") == "success":
-                                                st.success(f"已删除: {file_info['name']}")
-                                            else:
-                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                        else:
-                                            # Fallback to direct file system access
-                                            os.remove(file_info['path'])
-                                            st.success(f"已删除: {file_info['name']}")
-                                    except Exception as e:
-                                        st.error(f"删除失败: {e}")
-                            else:
-                                # Show disabled button during workflow
-                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
+                        with col_a:
+                            delete_key = f"del_exam_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
             else:
                 st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_target_files = st.file_uploader("选择基准源文件", type=None, accept_multiple_files=True, key=f"target_uploader_tab_{session_id}")
-            if new_target_files:
-                handle_file_upload(new_target_files, target_session_dir)
 
-        with tab_graph:
-            graph_files_list = get_file_list(graph_session_dir)
-            
-            if graph_files_list:
-                for i, file_info in enumerate(graph_files_list):
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_info, col_action = st.columns([3, 1])
-                        with col_info:
-                            st.write(f"**文件名:** {file_info['name']}")  # Show full name inside
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_action:
-                            # Use a more stable key for delete button
-                            delete_key = f"delete_graph_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            
-                            # Check if workflow is safe to interrupt
-                            session = get_user_session(session_id, 'special_symbols')
-                            workflow_safe = not session['process_started'] or session['analysis_completed']
-                            
-                            if workflow_safe:
+        with tab_results:
+            # List files under generated/<session>/special_symbols_standard_check/final_results
+            final_dir = final_results_dir
+            if os.path.isdir(final_dir):
+                final_files = get_file_list(final_dir)
+                if final_files:
+                    for file_info in final_files:
+                        display_name = truncate_filename(file_info['name'])
+                        with st.expander(f"📄 {display_name}", expanded=False):
+                            col_i, col_a = st.columns([4, 1])
+                            with col_i:
+                                st.write(f"**文件名:** {file_info['name']}")
+                                st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                                st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                            with col_a:
+                                try:
+                                    with open(file_info['path'], 'rb') as _fbin:
+                                        _data = _fbin.read()
+                                    st.download_button(
+                                        label="⬇️ 下载",
+                                        data=_data,
+                                        file_name=file_info['name'],
+                                        mime='application/octet-stream',
+                                        key=f"dl_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                                    )
+                                except Exception as e:
+                                    st.error(f"下载失败: {e}")
+                                delete_key = f"del_final_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                                 if st.button("🗑️ 删除", key=delete_key):
                                     try:
-                                        if is_backend_available():
-                                            # Use FastAPI backend
-                                            client = get_backend_client()
-                                            result = client.delete_file(session_id, file_info['path'])
-                                            if result.get("status") == "success":
-                                                st.success(f"已删除: {file_info['name']}")
-                                            else:
-                                                st.error(f"删除失败: {result.get('message', '未知错误')}")
-                                        else:
-                                            # Fallback to direct file system access
-                                            os.remove(file_info['path'])
-                                            st.success(f"已删除: {file_info['name']}")
+                                        os.remove(file_info['path'])
+                                        st.success(f"已删除: {file_info['name']}")
                                     except Exception as e:
                                         st.error(f"删除失败: {e}")
-                            else:
-                                # Show disabled button during workflow
-                                st.button("🗑️ 删除", key=f"{delete_key}_disabled", disabled=True)
+                else:
+                    st.write("（暂无分析结果）")
             else:
-                st.write("（未上传）")
-                
-            # Upload new files directly in this tab
-            st.markdown("---")
-            st.markdown("**上传新文件:**")
-            new_graph_files = st.file_uploader("选择图纸文件", type=None, accept_multiple_files=True, key=f"graph_uploader_tab_{session_id}")
-            if new_graph_files:
-                handle_file_upload(new_graph_files, graph_session_dir)
+                st.write("（暂无分析结果目录）")
 
-        # (Bulk operations moved earlier to avoid UI lag)
-
-    # Now render the MAIN column containing uploads, demo/start, and streaming analysis
     with col_main:
-
-        # Page subheader
         st.subheader("🔍 特殊特性符号检查")
         st.markdown(
-            "上传控制计划和基准源文件后点击开始，AI会比对二者中特殊特性符号不一致的地方，并输出结果。  \n"
-            "如果你上传的是控制计划和图纸文件，AI会比对CP和图纸中符号不一致的地方。  \n"
-            "以此类推，具体见帮助文档。  \n"
-            "审核时间取决于文件数量和长度，一般在10分钟到一小时之间。  \n"
-            )
+            "第1步：重要！在右侧文件列表清空上一轮任务残留（结果可按需保留）。  \n"
+            "第2步：上传特殊特性基准文件与待检查文件。  \n"
+            "第3步：点击开始，AI 会比对待检文件中的符号标注并定位与基准文件不一致的内容。  \n"
+            "第4步：在右侧文件列表下载分析结果。  \n"
+            "审核时间取决于文件数量与长度，通常约需 10~60 分钟。  \n"
+        )
 
-        # Get structured user session
-        session = get_user_session(session_id, 'special_symbols')
+        # Two uploaders side by side
+        col_std, col_exam = st.columns(2)
+        with col_std:
+            reference_uploads = st.file_uploader("点击上传基准文件", type=None, accept_multiple_files=True, key=f"special_symbols_reference_{session_id}")
+            if reference_uploads:
+                handle_file_upload(reference_uploads, reference_dir)
+                st.success(f"已上传 {len(reference_uploads)} 份基准文件")
+        with col_exam:
+            files_exam = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"special_symbols_exam_{session_id}")
+            if files_exam:
+                handle_file_upload(files_exam, inspected_dir)
+                st.success(f"已上传 {len(files_exam)} 个待检查文件")
 
-        # Always show file upload section
-        render_file_upload_section(session_dirs, session_id)
-        
-        # Start button - only show if process hasn't started
-        if not session['process_started']:
-            col_buttons = st.columns([1, 1])
-            with col_buttons[0]:
-                if st.button("开始", key=f"start_button_{session_id}"):
-                    # Clear any existing generated files to ensure fresh generation
-                    output_file = os.path.join(special_dir, "prompt_output.txt")
-                    result_file = os.path.join(special_dir, "2_symbol_check_result.txt")
-                    
-                    if os.path.exists(output_file):
-                        os.remove(output_file)
-                    if os.path.exists(result_file):
-                        os.remove(result_file)
-                    
-                    # Clear chat history for fresh analysis
-                    session['ollama_history'] = []
-                    session['openai_history'] = []
-                    session['analysis_completed'] = False
-                    # Ensure demo mode is off for normal Start flow
-                    session['demo_mode'] = False
-                    
-                    # Start the analysis process
-                    start_analysis(session_id, 'special_symbols')
-                    st.rerun()
-            with col_buttons[1]:
-                if st.button("演示", key=f"demo_button_{session_id}"):
-                    # Workflow-based approach: Start → Run → Finish
-                    
-                    # 2. Run demo workflow
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
-                    
-                    # Copy files from demonstration folders to session folders
-                    demo_folder_mapping = {
-                        "CP_files": "cp",
-                        "graph_files": "graph", 
-                        "target_files": "target"
-                    }
-                    
-                    files_copied = False
-                    for demo_folder, session_key in demo_folder_mapping.items():
-                        demo_folder_path = os.path.join(demo_base_dir, demo_folder)
-                        session_folder_path = session_dirs[session_key]
-                        
-                        if os.path.exists(demo_folder_path):
-                            # Copy all files from demo folder to session folder
-                            for file_name in os.listdir(demo_folder_path):
-                                demo_file_path = os.path.join(demo_folder_path, file_name)
-                                session_file_path = os.path.join(session_folder_path, file_name)
-                                
-                                if os.path.isfile(demo_file_path):
-                                    import shutil
-                                    shutil.copy2(demo_file_path, session_file_path)
-                                    files_copied = True
-                    
-                    # Copy pre-generated prompt file (but not result file)
-                    demo_prompt_file = os.path.join(demo_base_dir, "generated_files", "prompt_output.txt")
-                    session_prompt_file = os.path.join(special_dir, "prompt_output.txt")
-                    
-                    if os.path.exists(demo_prompt_file):
-                        import shutil
-                        shutil.copy2(demo_prompt_file, session_prompt_file)
-                    
-                    # Also copy pre-obtained outputs for fast demo
-                    demo_response_file = os.path.join(demo_base_dir, "generated_files", "response_output.txt")
-                    session_response_file = os.path.join(special_dir, "response_output.txt")
-                    if os.path.exists(demo_response_file):
-                        import shutil
-                        shutil.copy2(demo_response_file, session_response_file)
-                    
-                    demo_final_result_file = os.path.join(demo_base_dir, "generated_files", "3_special_symbols_check_result.txt")
-                    session_final_result_file = os.path.join(special_dir, "3_special_symbols_check_result.txt")
-                    if os.path.exists(demo_final_result_file):
-                        import shutil
-                        shutil.copy2(demo_final_result_file, session_final_result_file)
-                    
-                    demo_excel_file = os.path.join(demo_base_dir, "generated_files", "special_symbols_json_result_20250905_104850.xlsx")
-                    session_excel_file = os.path.join(special_dir, "special_symbols_json_result_20250905_104850.xlsx")
-                    if os.path.exists(demo_excel_file):
-                        import shutil
-                        shutil.copy2(demo_excel_file, session_excel_file)
-                    
-                    if files_copied:
-                        # Set up session for analysis
-                        session['analysis_completed'] = False
-                        session['process_started'] = True
-                        session['ollama_history'] = []
-                        session['openai_history'] = []
-                        # Flag demo mode so workflow bypasses LLM streaming for prompts
-                        session['demo_mode'] = True
-                        
-                        # Force page refresh to hide buttons and show analysis
-                        st.rerun()
-                    else:
-                        st.error("演示文件不存在，请检查演示文件夹")
-        
-        # Show status and reset button if process has started
-        if session['process_started']:
-            # Add a button to reset and clear history
-            if st.button("重新开始", key=f"reset_button_{session_id}"):
-                reset_user_session(session_id, 'special_symbols')
-                st.rerun()
-            
-            # Check if we need to run analysis
-            target_files_list = [f for f in os.listdir(target_session_dir) if os.path.isfile(os.path.join(target_session_dir, f))]
-            if target_files_list:
-                if session['process_started'] and not session['analysis_completed']:
-                    # Run the analysis workflow in full width within the main column
-                    run_analysis_workflow(session_id, session_dirs, prompt_generator)
-                    
-                    # Mark as completed
-                    session['analysis_completed'] = True
+        # Start / Stop / Demo buttons
+        btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
+        with btn_col1:
+            start_disabled = (not backend_ready) or job_running
+            if st.button("开始", key=f"special_symbols_start_button_{session_id}", disabled=start_disabled):
+                if not backend_ready or backend_client is None:
+                    st.error("后台服务不可用，无法启动特殊特性符号检查。")
                 else:
-                    # Files exist but process wasn't explicitly started
-                    st.info("检测到基准源文件，请点击\"开始\"按钮开始分析，或点击\"演示\"按钮使用演示文件。")
+                    # Before starting, clear examined text directories to avoid stale content
+                    try:
+                        # Examined raw txt dir
+                        if os.path.isdir(inspected_txt_dir):
+                            for fname in os.listdir(inspected_txt_dir):
+                                fpath = os.path.join(inspected_txt_dir, fname)
+                                if os.path.isfile(fpath):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                        # Examined filtered txt dir (under output root)
+                        examined_txt_filtered_dir = os.path.join(special_out_root, "examined_txt_filtered")
+                        if os.path.isdir(examined_txt_filtered_dir):
+                            for fname in os.listdir(examined_txt_filtered_dir):
+                                fpath = os.path.join(examined_txt_filtered_dir, fname)
+                                if os.path.isfile(fpath):
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                    response = backend_client.start_special_symbols_job(session_id)
+                    if isinstance(response, dict) and response.get("job_id"):
+                        st.session_state[job_state_key] = response["job_id"]
+                        st.success("已提交后台任务，刷新或稍后查看进度。")
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        else:
+                            st.experimental_rerun()
+                    else:
+                        detail = ""
+                        if isinstance(response, dict):
+                            detail = str(response.get("detail") or response.get("message") or "")
+                        if not detail:
+                            detail = str(response)
+                        st.error(f"提交任务失败：{detail}")
+                    
+        with btn_col_stop:
+            stop_disabled = (not backend_ready) or (not job_status) or job_paused
+            if st.button("停止", key=f"special_symbols_stop_button_{session_id}", disabled=stop_disabled):
+                if not backend_ready or backend_client is None or not job_status:
+                    st.error("后台服务不可用或暂无任务。")
+                else:
+                    resp = backend_client.pause_special_symbols_job(job_status.get("job_id"))
+                    if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"paused", "running", "stopping"}):
+                        st.success("已请求暂停任务。")
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        else:
+                            st.experimental_rerun()
+                    else:
+                        st.error(f"暂停失败：{str(resp)}")
+
+            cont_disabled = (not backend_ready) or (not job_status) or (not job_paused)
+            if st.button("继续", key=f"special_symbols_continue_button_{session_id}", disabled=cont_disabled):
+                if not backend_ready or backend_client is None or not job_status:
+                    st.error("后台服务不可用或暂无任务。")
+                else:
+                    resp = backend_client.resume_special_symbols_job(job_status.get("job_id"))
+                    if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"running", "queued"}):
+                        st.success("已请求恢复任务。")
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        else:
+                            st.experimental_rerun()
+                    else:
+                        st.error(f"恢复失败：{str(resp)}")
+
+        with btn_col2:
+            if st.button("演示", key=f"special_symbols_demo_button_{session_id}"):
+                # Copy demonstration files into the user's special_symbols folders (no processing here)
+                try:
+                    # Locate demonstration root (same convention as other tabs)
+                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_special_symbols = os.path.join(str(demo_base_dir), "special_symbols_files")
+                    # Subfolders to copy from → to
+                    pairs = [
+                        (os.path.join(demo_special_symbols, "reference"), reference_dir),
+                        (os.path.join(demo_special_symbols, "inspected"), inspected_dir),
+                        # New: copy demonstration prompt/response chunks into session special_symbols output
+                        # Entire folders copied under special_out_root
+                        (os.path.join(demo_special_symbols, "prompt_text_chunks"), os.path.join(special_out_root, "prompt_text_chunks")),
+                        (os.path.join(demo_special_symbols, "llm_responses"), os.path.join(special_out_root, "llm_responses")),
+                        # New: copy final_results for demo summary
+                        (os.path.join(demo_special_symbols, "final_results"), final_results_dir),
+                        # New: copy pre-made prompted responses and json outputs for demo
+                        (os.path.join(demo_special_symbols, "prompted_llm_responses_and_json"), os.path.join(special_out_root, "prompted_llm_responses_and_json")),
+                    ]
+                    files_copied = 0
+                    for src, dst in pairs:
+                        if not os.path.exists(src):
+                            continue
+                    # If source is a directory that we want to mirror (prompt_text_chunks / llm responses / final_results / prompted_llm responses_and_json)
+                        if os.path.isdir(src) and (
+                            src.endswith("prompt_text_chunks")
+                            or src.endswith("llm_responses")
+                            or src.endswith("final_results")
+                            or src.endswith("prompted_llm_responses_and_json")
+                        ):
+                            os.makedirs(os.path.dirname(dst), exist_ok=True)
+                            # Copy whole directory tree into special_out_root subfolder
+                            shutil.copytree(
+                                src,
+                                dst,
+                                dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(".gitkeep"),
+                            )
+                            for root, _, files in os.walk(src):
+                                files_copied += len(
+                                    [
+                                        f
+                                        for f in files
+                                        if f != ".gitkeep" and os.path.isfile(os.path.join(root, f))
+                                    ]
+                                )
+                            continue
+                        # Otherwise treat as file list copy (standards / examined_files)
+                        for name in os.listdir(src):
+                            if name == ".gitkeep":
+                                continue
+                            src_path = os.path.join(src, name)
+                            dst_path = os.path.join(dst, name)
+                            if os.path.isfile(src_path):
+                                os.makedirs(dst, exist_ok=True)
+                                shutil.copy2(src_path, dst_path)
+                                files_copied += 1
+                    # Trigger demo streaming phase
+                    st.session_state[f"special_symbols_demo_{session_id}"] = True
+                    st.success(f"已复制演示文件：{files_copied} 个，开始演示…")
+                except Exception as e:
+                    st.error(f"演示文件复制失败: {e}")
+                # Immediately rerun to render the demo streaming phase in main column
+                st.rerun()
+        
+        status_area = st.container()
+        with status_area:
+            if job_status:
+                status_value = str(job_status.get("status", "unknown"))
+                status_labels = {
+                    "queued": "排队中",
+                    "running": "运行中",
+                    "succeeded": "已完成",
+                    "failed": "失败",
+                }
+                stage = str(job_status.get("stage") or "")
+                message = str(job_status.get("message") or "")
+                pid = job_status.get("pid")
+                _label = status_labels.get(status_value, None)
+                if not _label:
+                    if status_value == "paused":
+                        _label = "已暂停"
+                    elif status_value == "stopping":
+                        _label = "停止中"
+                    else:
+                        _label = status_value
+                # st.markdown(f"**任务状态：{_label}**")
+                # if stage:
+                #     st.caption(f"当前阶段：{stage}")
+                if message:
+                    st.write(message)
+                # if pid:
+                #     st.caption(f"后台进程ID：{pid}")
+                total_chunks = int(job_status.get("total_chunks") or 0)
+                processed_chunks = int(job_status.get("processed_chunks") or 0)
+                with st.spinner(f"**任务状态：{_label}**"):
+                    if total_chunks > 0:
+                        progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
+                        st.progress(progress_value)
+                        st.caption(f"进度：{1 + int(progress_value*99)}% ")
+                    elif status_value in {"queued", "running"}:
+                        st.progress(0.0)
+                result_files = job_status.get("result_files") or []
+                if result_files and status_value == "succeeded":
+                    st.write("已生成结果文件，在右边文件列表处下载分析结果。")
+                logs = job_status.get("logs")
+                stream_events = job_status.get("stream_events")
+                if isinstance(stream_events, list) and stream_events:
+                    stream_state = st.session_state.get(stream_state_key)
+                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_status.get("job_id"):
+                        stream_state = {"job_id": job_status.get("job_id"), "rendered": []}
+                    rendered_raw = stream_state.get("rendered") or []
+                    rendered_set = set()
+                    for v in rendered_raw:
+                        try:
+                            rendered_set.add(int(v))
+                        except (TypeError, ValueError):
+                            pass
+                    events_sorted = sorted(
+                        [event for event in stream_events if isinstance(event, dict)],
+                        key=lambda item: int(item.get("sequence") or 0),
+                    )
+                    with st.expander("点击查看具体进展", expanded=False):
+                        current_group: tuple[str, int] | None = None
+                        for event in events_sorted:
+                            seq = int(event.get("sequence") or 0)
+                            is_new = seq not in rendered_set
+                            rendered_set.add(seq)
+                            file_name = str(event.get("file") or event.get("file_name") or "")
+                            part = int(event.get("part") or 0)
+                            total_parts = int(event.get("total_parts") or 0)
+                            kind = str(event.get("kind") or "info")
+                            header_key: tuple[str, int] | None = None
+                            if file_name and part:
+                                header_key = (file_name, part)
+                            if header_key and header_key != current_group:
+                                if total_parts > 0:
+                                    st.markdown(f"**{file_name} · 第{part}/{total_parts}段**")
+                                else:
+                                    st.markdown(f"**{file_name} · 第{part}段**")
+                                current_group = header_key
+                            role = "user" if kind == "prompt" else "assistant"
+                            message_text = str(event.get("text") or "")
+                            timestamp = event.get("ts")
+                            with st.chat_message(role):
+                                if timestamp:
+                                    st.caption(str(timestamp))
+                                if message_text:
+                                    if is_new:
+                                        placeholder = st.empty()
+                                        render_method = "text" if role == "user" else "write"
+                                        stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
+                                    else:
+                                        if role == "user":
+                                            st.text(message_text)
+                                        else:
+                                            st.write(message_text)
+                                else:
+                                    st.write("(无内容)")
+                    stream_state["rendered"] = sorted(rendered_set)
+                    st.session_state[stream_state_key] = stream_state
+                if isinstance(logs, list) and logs:
+                    expanded = status_value in {"queued", "running"}
+                    with st.expander("点击查看后台日志", expanded=False):
+                        for entry in logs[-50:]:
+                            if not isinstance(entry, dict):
+                                st.write(entry)
+                                continue
+                            ts = entry.get("ts") or ""
+                            level = entry.get("level") or "info"
+                            message = entry.get("message") or ""
+                            st.write(f"[{ts}] {level}: {message}")
+            elif job_error:
+                st.warning(job_error)
+                st.session_state.pop(stream_state_key, None)
+            elif backend_ready:
+                st.info("后台服务已连接，点击开始即可在后台运行特殊特性符号检查。")
+                st.session_state.pop(stream_state_key, None)
             else:
-                st.warning("请先上传基准源文件")
+                st.warning("后台服务不可用，请稍后重试。")
+                st.session_state.pop(stream_state_key, None)
+        
+        # Demo streaming phase (reads from prepared prompt/response chunks; no LLM calls)
+        if st.session_state.get(f"special_symbols_demo_{session_id}"):
+            # Directories prepared by demo button copy
+            prompt_dir = os.path.join(special_out_root, 'prompt_text_chunks')
+            resp_dir = os.path.join(special_out_root, 'llm_responses')
+            final_dir = final_results_dir
+            prompted_and_json_dir = os.path.join(special_out_root, 'prompted_llm responses_and_json')
+            # Collect prompt chunk files
+            prompt_files = []
+            try:
+                if os.path.isdir(prompt_dir):
+                    for f in os.listdir(prompt_dir):
+                        if f.lower().endswith('.txt'):
+                            prompt_files.append(f)
+            except Exception:
+                prompt_files = []
+            # Natural sort by base name and numeric part index
+            _prompt_entries = []
+            for _f in prompt_files:
+                _m = re.match(r"^(?P<base>.+)_pt(?P<idx>\d+)\.txt$", _f)
+                if _m:
+                    _prompt_entries.append((_m.group('base').lower(), int(_m.group('idx')), _f))
+                else:
+                    _prompt_entries.append(("", 0, _f))
+            _prompt_entries.sort(key=lambda t: (t[0], t[1]))
+            # Render each prompt/response pair in UI (original demo)
+            for _, _, fname in _prompt_entries:
+                m = re.match(r"^(?P<base>.+)_pt(?P<idx>\d+)\.txt$", fname)
+                if not m:
+                    continue
+                base = m.group('base')
+                idx = m.group('idx')
+                prompt_path = os.path.join(prompt_dir, fname)
+                resp_name = f"response_{base}_pt{idx}.txt"
+                resp_path = os.path.join(resp_dir, resp_name)
+                # Read prompt content
+                try:
+                    with open(prompt_path, 'r', encoding='utf-8') as f:
+                        prompt_text = f.read()
+                except Exception:
+                    prompt_text = ""
+                # Read response content (optional)
+                resp_text = None
+                if os.path.isfile(resp_path):
+                    try:
+                        with open(resp_path, 'r', encoding='utf-8') as f:
+                            resp_text = f.read()
+                    except Exception:
+                        resp_text = None
+                col_prompt, col_response = st.columns([1, 1])
+                with col_prompt:
+                    st.markdown(f"提示词（{base} - 第{idx}部分）")
+                    prompt_container = st.container(height=400)
+                    with prompt_container:
+                        with st.chat_message("user"):
+                            prompt_placeholder = st.empty()
+                            stream_text(prompt_placeholder, prompt_text, render_method="text", delay=0.1)
+                        st.chat_input(placeholder="", disabled=True, key=f"special_symbols_demo_prompt_{session_id}_{base}_{idx}")
+                with col_response:
+                    st.markdown(f"示例比对结果（{base} - 第{idx}部分）")
+                    response_container = st.container(height=400)
+                    with response_container:
+                        with st.chat_message("assistant"):
+                            resp_placeholder = st.empty()
+                            if resp_text is None:
+                                resp_placeholder.info("未找到对应示例结果。")
+                            else:
+                                stream_text(resp_placeholder, resp_text, render_method="write", delay=0.1)
+                            st.chat_input(placeholder="", disabled=True, key=f"special_symbols_demo_resp_{session_id}_{base}_{idx}")
+            # (Removed hardcoded final report section for demo)
+            # End of demo streaming pass; reset the flag
+            st.session_state[f"special_symbols_demo_{session_id}"] = False
+
+            # New demo rendering: prompted_response_* and corresponding json_* from pre-made folder
+            try:
+                if os.path.isdir(prompted_and_json_dir):
+                    # Find prompted_response_*.txt files and for each, display prompt and its json_ response
+                    demo_parts = [f for f in os.listdir(prompted_and_json_dir) if f.startswith('prompted_response_') and f.lower().endswith('.txt')]
+                    # Natural sort by extracted name and numeric part index
+                    _entries = []
+                    for _pf in demo_parts:
+                        _m = re.match(r"^prompted_response_(?P<name>.+)_pt(?P<idx>\d+)\.txt$", _pf)
+                        if _m:
+                            _entries.append((_m.group('name').lower(), int(_m.group('idx')), _pf))
+                        else:
+                            _entries.append(("", 0, _pf))
+                    _entries.sort(key=lambda t: (t[0], t[1]))
+                    total_parts = len(_entries)
+                    for idx, (_, _, pf) in enumerate(_entries, start=1):
+                        p_path = os.path.join(prompted_and_json_dir, pf)
+                        # Map to json_<name>.txt in same folder
+                        json_name = f"json_{pf[len('prompted_response_'):] }"
+                        j_path = os.path.join(prompted_and_json_dir, json_name)
+                        # Read prompt
+                        try:
+                            with open(p_path, 'r', encoding='utf-8') as f:
+                                ptext = f.read()
+                        except Exception:
+                            ptext = ""
+                        # Read json response (text form)
+                        try:
+                            with open(j_path, 'r', encoding='utf-8') as f:
+                                jtext = f.read()
+                        except Exception:
+                            jtext = ""
+                        # Two column display
+                        col_lp, col_lr = st.columns([1, 1])
+                        with col_lp:
+                            st.markdown(f"生成汇总表格提示词（第{idx}部分，共{total_parts}部分）")
+                            pc = st.container(height=400)
+                            with pc:
+                                with st.chat_message("user"):
+                                    ph = st.empty()
+                                    stream_text(ph, ptext, render_method="text", delay=0.1)
+                            st.chat_input(placeholder="", disabled=True, key=f"special_symbols_demo_prompted_prompt_{session_id}_{idx}")
+                        with col_lr:
+                            st.markdown(f"生成汇总表格结果（第{idx}部分，共{total_parts}部分）")
+                            rc = st.container(height=400)
+                            with rc:
+                                with st.chat_message("assistant"):
+                                    ph2 = st.empty()
+                                    stream_text(ph2, jtext, render_method="write", delay=0.1)
+                            st.chat_input(placeholder="", disabled=True, key=f"special_symbols_demo_prompted_resp_{session_id}_{idx}")
+            except Exception:
+                pass
+
+            # Add demo download buttons for CSV/XLSX in final_results
+            try:
+                if os.path.isdir(final_dir):
+                    csv_files = [f for f in os.listdir(final_dir) if f.lower().endswith('.csv')]
+                    xlsx_files = [f for f in os.listdir(final_dir) if f.lower().endswith('.xlsx')]
+                    def _latest(path_list):
+                        if not path_list:
+                            return None
+                        paths = [os.path.join(final_dir, f) for f in path_list]
+                        paths.sort(key=lambda p: os.path.getmtime(p))
+                        return paths[-1]
+                    latest_csv = _latest(csv_files)
+                    latest_xlsx = _latest(xlsx_files)
+                    if latest_csv:
+                        with open(latest_csv, 'rb') as fcsv:
+                            st.download_button(label="下载CSV结果(演示)", data=fcsv.read(), file_name=os.path.basename(latest_csv), mime='text/csv', key=f"demo_download_csv_{session_id}")
+                    if latest_xlsx:
+                        with open(latest_xlsx, 'rb') as fxlsx:
+                            st.download_button(label="下载Excel结果(演示)", data=fxlsx.read(), file_name=os.path.basename(latest_xlsx), mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f"demo_download_xlsx_{session_id}")
+            except Exception:
+                pass
+
+    if job_running:
+        st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
+        time.sleep(5)
+        if hasattr(st, "rerun"):
+            st.rerun()
+        else:
+            st.experimental_rerun()
+
+# The end
