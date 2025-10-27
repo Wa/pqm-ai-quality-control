@@ -60,6 +60,8 @@ GPT_OSS_PROMPT_PREFIX = (
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
 
+GPT_OSS_HEADER_TEMPLATE = "以下是《{base}》文件包含的特殊特性符号："
+
 
 @dataclass
 class BackgroundJobContext:
@@ -116,6 +118,193 @@ def _list_txt_files(directory: str) -> List[str]:
         for name in os.listdir(directory)
         if os.path.isfile(os.path.join(directory, name)) and name.lower().endswith(".txt")
     ]
+
+
+def _clear_directory(directory: str) -> int:
+    if not os.path.isdir(directory):
+        return 0
+    cleared = 0
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                cleared += 1
+            except Exception:
+                continue
+    return cleared
+
+
+def _run_gpt_extraction(
+    emitter: ProgressEmitter,
+    publish: Callable[[Dict[str, object]], None],
+    client: Optional[OllamaClient],
+    model_name: str,
+    session_id: str,
+    output_root: str,
+    src_dir: str,
+    file_names: Iterable[str],
+    dest_dir: str,
+    stage_label: str,
+    stage_message: str,
+    clear_message_template: Optional[str],
+    client_unavailable_message: str,
+    header_builder: Callable[[str], str],
+    combined_prefix: str,
+    combined_log_template: str = "已生成汇总结果 {name}",
+) -> List[str]:
+    names = sorted(file_names, key=lambda value: value.lower())
+    if not names:
+        return []
+
+    emitter.set_stage(stage_label)
+    if client is None:
+        emitter.warning(client_unavailable_message)
+        return []
+
+    os.makedirs(dest_dir, exist_ok=True)
+    cleared = _clear_directory(dest_dir)
+    if cleared and clear_message_template:
+        try:
+            emitter.info(clear_message_template.format(cleared=cleared))
+        except Exception:
+            emitter.info(clear_message_template)  # type: ignore[arg-type]
+
+    outputs: List[str] = []
+    emitter.info(stage_message)
+
+    for name in names:
+        src_path = os.path.join(src_dir, name)
+        try:
+            with open(src_path, "r", encoding="utf-8") as handle:
+                doc_text = handle.read()
+        except Exception as error:
+            report_exception(f"读取文本失败({stage_label}:{name})", error, level="warning")
+            continue
+
+        prompt_text = f"{GPT_OSS_PROMPT_PREFIX}{doc_text}"
+        publish(
+            {
+                "stream": {
+                    "kind": "prompt",
+                    "file": name,
+                    "part": 1,
+                    "total_parts": 1,
+                    "engine": "gpt-oss",
+                    "text": prompt_text,
+                }
+            }
+        )
+        publish({"stage": stage_label, "message": f"调用 gpt-oss ({name})"})
+
+        start_ts = time.time()
+        response_text = ""
+        last_stats = None
+        try:
+            for chunk in client.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=True,
+            ):
+                piece = (
+                    chunk.get("message", {}).get("content")
+                    or chunk.get("response")
+                    or ""
+                )
+                if piece:
+                    response_text += piece
+                last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+        except Exception as error:
+            report_exception(f"调用 gpt-oss 失败({stage_label}:{name})", error, level="warning")
+            publish(
+                {
+                    "stream": {
+                        "kind": "response",
+                        "file": name,
+                        "part": 1,
+                        "total_parts": 1,
+                        "engine": "gpt-oss",
+                        "text": f"调用 gpt-oss 失败：{error}",
+                    }
+                }
+            )
+            continue
+
+        duration_ms = int((time.time() - start_ts) * 1000)
+        response_clean = response_text.strip() or "无"
+        publish(
+            {
+                "stream": {
+                    "kind": "response",
+                    "file": name,
+                    "part": 1,
+                    "total_parts": 1,
+                    "engine": "gpt-oss",
+                    "text": response_clean,
+                }
+            }
+        )
+
+        log_llm_metrics(
+            output_root,
+            session_id,
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "engine": "ollama",
+                "model": model_name,
+                "session_id": session_id,
+                "file": name,
+                "part": 1,
+                "phase": stage_label,
+                "prompt_chars": len(prompt_text),
+                "prompt_tokens": estimate_tokens(prompt_text),
+                "output_chars": len(response_clean),
+                "output_tokens": estimate_tokens(response_clean),
+                "duration_ms": duration_ms,
+                "success": 1 if response_clean else 0,
+                "stats": last_stats or {},
+                "error": "",
+            },
+        )
+
+        base_name = os.path.splitext(name)[0]
+        dst_path = os.path.join(dest_dir, name)
+        header = header_builder(base_name)
+        try:
+            with open(dst_path, "w", encoding="utf-8") as writer:
+                if header:
+                    writer.write(header.rstrip("\n") + "\n")
+                writer.write(response_clean)
+            outputs.append(dst_path)
+        except Exception as error:
+            report_exception(f"写入 gpt-oss 结果失败({stage_label}:{name})", error, level="warning")
+
+    if outputs:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        combined_name = f"{combined_prefix}_{timestamp}.txt"
+        combined_path = os.path.join(dest_dir, combined_name)
+        try:
+            with open(combined_path, "w", encoding="utf-8") as handle:
+                for idx, path in enumerate(sorted(outputs, key=lambda value: os.path.basename(value).lower())):
+                    try:
+                        with open(path, "r", encoding="utf-8") as reader:
+                            content = reader.read().rstrip()
+                    except Exception as error:
+                        report_exception(
+                            f"读取 gpt-oss 结果失败({stage_label}:{os.path.basename(path)})",
+                            error,
+                            level="warning",
+                        )
+                        continue
+                    if idx:
+                        handle.write("\n\n")
+                    handle.write(content)
+            outputs.append(combined_path)
+            emitter.info(combined_log_template.format(name=combined_name))
+        except Exception as error:
+            report_exception(f"汇总 gpt-oss 结果失败({stage_label})", error, level="warning")
+
+    return outputs
 
 
 def _build_run_manifest(
@@ -299,6 +488,21 @@ def run_special_symbols_job(
         report_exception("文本预处理失败", error, level="warning")
 
     reference_txt_files = _list_txt_files(reference_txt_dir)
+    standards_txt_filtered_dir = os.path.join(output_root, "standards_txt_filtered")
+    try:
+        standards_summary = run_filtering(
+            reference_txt_dir,
+            standards_txt_filtered_dir,
+            config_path=os.path.join(os.path.dirname(__file__), "filter_config.yml"),
+        )
+        emitter.info(
+            f"基准过滤完成 保留{standards_summary.get('kept', 0)} 排除{standards_summary.get('dropped', 0)} 清空{standards_summary.get('empty_after_filter', 0)}"
+        )
+    except Exception as error:
+        report_exception("过滤基准文本失败", error, level="warning")
+
+    standards_txt_filtered_files = _list_txt_files(standards_txt_filtered_dir)
+
     # Filter examined .txt files into a separate folder to reduce irrelevant content
     examined_txt_filtered_dir = os.path.join(output_root, "examined_txt_filtered")
     try:
@@ -308,172 +512,65 @@ def run_special_symbols_job(
             config_path=os.path.join(os.path.dirname(__file__), "filter_config.yml"),
         )
         emitter.info(
-            f"过滤完成 保留{summary.get('kept', 0)} 排除{summary.get('dropped', 0)} 清空{summary.get('empty_after_filter', 0)}"
+            f"待检过滤完成 保留{summary.get('kept', 0)} 排除{summary.get('dropped', 0)} 清空{summary.get('empty_after_filter', 0)}"
         )
     except Exception as error:
         report_exception("过滤待检文本失败", error, level="warning")
 
     exam_src_dir = examined_txt_filtered_dir if _list_txt_files(examined_txt_filtered_dir) else examined_txt_dir
     exam_txt_files = _list_txt_files(exam_src_dir)
+
+    model_name = CONFIG["llm"].get("ollama_model") or "gpt-oss:latest"
+    ollama_client: Optional[OllamaClient] = None
+    if standards_txt_filtered_files or exam_txt_files:
+        try:
+            host = resolve_ollama_host("ollama_9")
+            ollama_client = OllamaClient(host=host)
+        except Exception as error:
+            report_exception("初始化 gpt-oss 客户端失败", error, level="warning")
+
+    standards_txt_filtered_further_dir = os.path.join(output_root, "standards_txt_filtered_further")
+    if standards_txt_filtered_files:
+        _run_gpt_extraction(
+            emitter=emitter,
+            publish=publish,
+            client=ollama_client,
+            model_name=model_name,
+            session_id=session_id,
+            output_root=output_root,
+            src_dir=standards_txt_filtered_dir,
+            file_names=standards_txt_filtered_files,
+            dest_dir=standards_txt_filtered_further_dir,
+            stage_label="standards_gpt_oss",
+            stage_message="正在调用 gpt-oss 提取基准文件特殊特性标记",
+            clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
+            client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
+            header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
+            combined_prefix="standards_txt_filtered_final",
+        )
+
     if not exam_txt_files:
         publish({"status": "succeeded", "stage": "completed", "message": "未发现待检查文本"})
         return {"final_results": []}
 
     examined_txt_filtered_further_dir = os.path.join(output_root, "examined_txt_filtered_further")
-    os.makedirs(examined_txt_filtered_further_dir, exist_ok=True)
-    try:
-        cleared = 0
-        for name in os.listdir(examined_txt_filtered_further_dir):
-            path = os.path.join(examined_txt_filtered_further_dir, name)
-            if os.path.isfile(path):
-                try:
-                    os.remove(path)
-                    cleared += 1
-                except Exception:
-                    continue
-        if cleared:
-            emitter.info(f"已清空上次 GPT-OSS 结果 {cleared} 个文件")
-    except Exception:
-        pass
-
-    emitter.set_stage("gpt_oss")
-    emitter.info("正在调用 gpt-oss 提取特殊特性标记")
-    ollama_client = None
-    try:
-        host = resolve_ollama_host("ollama_9")
-        ollama_client = OllamaClient(host=host)
-    except Exception as error:
-        report_exception("初始化 gpt-oss 客户端失败", error, level="warning")
-
-    gpt_outputs: List[str] = []
-    if ollama_client is not None:
-        model_name = CONFIG["llm"].get("ollama_model") or "gpt-oss:latest"
-        for name in sorted(exam_txt_files, key=lambda value: value.lower()):
-            src_path = os.path.join(exam_src_dir, name)
-            try:
-                with open(src_path, "r", encoding="utf-8") as handle:
-                    doc_text = handle.read()
-            except Exception as error:
-                report_exception(f"读取待检查文本失败({name})", error, level="warning")
-                continue
-            prompt_text = f"{GPT_OSS_PROMPT_PREFIX}{doc_text}"
-            publish(
-                {
-                    "stream": {
-                        "kind": "prompt",
-                        "file": name,
-                        "part": 1,
-                        "total_parts": 1,
-                        "engine": "gpt-oss",
-                        "text": prompt_text,
-                    }
-                }
-            )
-            publish(
-                {
-                    "stage": "gpt_oss",
-                    "message": f"调用 gpt-oss ({name})",
-                }
-            )
-            start_ts = time.time()
-            response_text = ""
-            last_stats = None
-            try:
-                for chunk in ollama_client.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt_text}],
-                    stream=True,
-                ):
-                    piece = (
-                        chunk.get("message", {}).get("content")
-                        or chunk.get("response")
-                        or ""
-                    )
-                    if piece:
-                        response_text += piece
-                    last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-            except Exception as error:
-                report_exception(f"调用 gpt-oss 失败({name})", error, level="warning")
-                publish(
-                    {
-                        "stream": {
-                            "kind": "response",
-                            "file": name,
-                            "part": 1,
-                            "total_parts": 1,
-                            "engine": "gpt-oss",
-                            "text": f"调用 gpt-oss 失败：{error}",
-                        }
-                    }
-                )
-                continue
-            duration_ms = int((time.time() - start_ts) * 1000)
-            response_clean = response_text.strip() or "无"
-            publish(
-                {
-                    "stream": {
-                        "kind": "response",
-                        "file": name,
-                        "part": 1,
-                        "total_parts": 1,
-                        "engine": "gpt-oss",
-                        "text": response_clean,
-                    }
-                }
-            )
-            log_llm_metrics(
-                output_root,
-                session_id,
-                {
-                    "ts": datetime.now().isoformat(timespec="seconds"),
-                    "engine": "ollama",
-                    "model": model_name,
-                    "session_id": session_id,
-                    "file": name,
-                    "part": 1,
-                    "phase": "gpt_oss",
-                    "prompt_chars": len(prompt_text),
-                    "prompt_tokens": estimate_tokens(prompt_text),
-                    "output_chars": len(response_clean),
-                    "output_tokens": estimate_tokens(response_clean),
-                    "duration_ms": duration_ms,
-                    "success": 1 if response_clean else 0,
-                    "stats": last_stats or {},
-                    "error": "",
-                },
-            )
-            base_name = os.path.splitext(name)[0]
-            dst_path = os.path.join(examined_txt_filtered_further_dir, name)
-            try:
-                with open(dst_path, "w", encoding="utf-8") as writer:
-                    writer.write(f"以下是《{base_name}》文件包含的特殊特性符号：\n")
-                    writer.write(response_clean)
-                gpt_outputs.append(dst_path)
-            except Exception as error:
-                report_exception(f"写入 gpt-oss 结果失败({name})", error, level="warning")
-    else:
-        emitter.warning("gpt-oss 客户端不可用，已跳过符号提取")
-    combined_path = ""
-    if gpt_outputs:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        combined_name = f"examined_txt_filtered_final_{timestamp}.txt"
-        combined_path = os.path.join(examined_txt_filtered_further_dir, combined_name)
-        try:
-            with open(combined_path, "w", encoding="utf-8") as handle:
-                for idx, path in enumerate(sorted(gpt_outputs, key=lambda value: os.path.basename(value).lower())):
-                    try:
-                        with open(path, "r", encoding="utf-8") as reader:
-                            content = reader.read().rstrip()
-                    except Exception as error:
-                        report_exception(f"读取 gpt-oss 结果失败({os.path.basename(path)})", error, level="warning")
-                        continue
-                    if idx:
-                        handle.write("\n\n")
-                    handle.write(content)
-            gpt_outputs.append(combined_path)
-            emitter.info(f"已生成汇总结果 {combined_name}")
-        except Exception as error:
-            report_exception("汇总 gpt-oss 结果失败", error, level="warning")
+    _run_gpt_extraction(
+        emitter=emitter,
+        publish=publish,
+        client=ollama_client,
+        model_name=model_name,
+        session_id=session_id,
+        output_root=output_root,
+        src_dir=exam_src_dir,
+        file_names=exam_txt_files,
+        dest_dir=examined_txt_filtered_further_dir,
+        stage_label="gpt_oss",
+        stage_message="正在调用 gpt-oss 提取特殊特性标记",
+        clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
+        client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
+        header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
+        combined_prefix="examined_txt_filtered_final",
+    )
 
     manifest = _build_run_manifest(checkpoint_dir, exam_src_dir, exam_txt_files, publish)
     total_chunks = len(manifest.get("entries", []))

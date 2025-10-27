@@ -217,7 +217,7 @@ def filter_text_lines(lines: Iterable[str], sheet_name: str, config: FilterConfi
 
 
 def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] = None) -> dict:
-    """Filter .txt files from source_dir into target_dir based on heuristics.
+    """Filter .txt files from ``source_dir`` into ``target_dir`` based on heuristics.
 
     Returns a summary dict with keys: kept, dropped, empty_after_filter, log_path
     """
@@ -232,6 +232,8 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
     dropped = 0
     emptied = 0
     excluded: List[str] = []
+    candidates: List[Tuple[str, str]] = []
+
     for name in sorted(os.listdir(source_dir)):
         src_path = os.path.join(source_dir, name)
         if not os.path.isfile(src_path) or not name.lower().endswith(".txt"):
@@ -248,6 +250,21 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
             dropped += 1
             excluded.append(f"{name}\tno_special_stars")
             continue
+        candidates.append((name, content))
+
+    if candidates:
+        try:
+            for existing in os.listdir(target_dir):
+                existing_path = os.path.join(target_dir, existing)
+                if os.path.isfile(existing_path):
+                    try:
+                        os.remove(existing_path)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    for name, content in candidates:
         dst_path = os.path.join(target_dir, name)
         try:
             with open(dst_path, "w", encoding="utf-8") as writer:
@@ -256,7 +273,7 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
         except Exception:
             dropped += 1
             excluded.append(f"{name}\twrite_error")
-    # write log
+
     log_path = os.path.join(target_dir, "excluded_files.log")
     try:
         if excluded:
@@ -264,6 +281,7 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
                 log.write("\n".join(excluded))
     except Exception:
         log_path = ""
+
     return {"kept": kept, "dropped": dropped, "empty_after_filter": emptied, "log_path": log_path}
 
 
