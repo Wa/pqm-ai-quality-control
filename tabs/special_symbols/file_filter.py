@@ -223,7 +223,11 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
     """
 
     os.makedirs(target_dir, exist_ok=True)
-    cfg = load_config(config_path)
+    # Phase 1 redesign: retain only the symbol presence requirement while keeping
+    # the existing output handling & audit flow. Config loading is preserved for
+    # compatibility, though the gating heuristics defined there are no longer
+    # applied during this phase.
+    load_config(config_path)
     kept = 0
     dropped = 0
     emptied = 0
@@ -231,11 +235,6 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
     for name in sorted(os.listdir(source_dir)):
         src_path = os.path.join(source_dir, name)
         if not os.path.isfile(src_path) or not name.lower().endswith(".txt"):
-            continue
-        keep, sheet, reason = should_keep_txt(name, cfg)
-        if not keep:
-            dropped += 1
-            excluded.append(f"{name}\t{reason}")
             continue
         try:
             with open(src_path, "r", encoding="utf-8", errors="ignore") as handle:
@@ -249,16 +248,10 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
             dropped += 1
             excluded.append(f"{name}\tno_special_stars")
             continue
-        lines = content.splitlines(True)
-        filtered_lines = filter_text_lines(lines, sheet, cfg)
-        if not filtered_lines:
-            emptied += 1
-            excluded.append(f"{name}\tempty_after_filter")
-            continue
         dst_path = os.path.join(target_dir, name)
         try:
             with open(dst_path, "w", encoding="utf-8") as writer:
-                writer.writelines(filtered_lines)
+                writer.write(content)
             kept += 1
         except Exception:
             dropped += 1
