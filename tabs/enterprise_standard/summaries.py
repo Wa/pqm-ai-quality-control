@@ -278,11 +278,11 @@ def summarize_with_ollama(
                             "prompt_chars": len(prompt_text_all or ""),
                             "prompt_tokens": prompt_tokens
                             if isinstance(prompt_tokens, int)
-                            else estimate_tokens(prompt_text_all or ""),
+                            else estimate_tokens(prompt_text_all or "", model),
                             "output_chars": len(response_text or ""),
                             "output_tokens": output_tokens
                             if isinstance(output_tokens, int)
-                            else estimate_tokens(response_text or ""),
+                            else estimate_tokens(response_text or "", model),
                             "duration_ms": dur_ms,
                             "success": 1 if (response_text or "").strip() else 0,
                             "error": error_msg,

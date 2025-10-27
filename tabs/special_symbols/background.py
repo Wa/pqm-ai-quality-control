@@ -126,6 +126,7 @@ def _run_gpt_extraction(
     header_builder: Callable[[str], str],
     combined_prefix: str,
     combined_log_template: str = "已生成汇总结果 {name}",
+    progress_callback: Optional[Callable[[], None]] = None,
 ) -> List[str]:
     names = sorted(file_names, key=lambda value: value.lower())
     if not names:
@@ -154,6 +155,8 @@ def _run_gpt_extraction(
                 doc_text = handle.read()
         except Exception as error:
             report_exception(f"读取文本失败({stage_label}:{name})", error, level="warning")
+            if progress_callback:
+                progress_callback()
             continue
 
         prompt_text = f"{GPT_OSS_PROMPT_PREFIX}{doc_text}"
@@ -203,6 +206,8 @@ def _run_gpt_extraction(
                     }
                 }
             )
+            if progress_callback:
+                progress_callback()
             continue
 
         duration_ms = int((time.time() - start_ts) * 1000)
@@ -232,9 +237,9 @@ def _run_gpt_extraction(
                 "part": 1,
                 "phase": stage_label,
                 "prompt_chars": len(prompt_text),
-                "prompt_tokens": estimate_tokens(prompt_text),
+                "prompt_tokens": estimate_tokens(prompt_text, model_name),
                 "output_chars": len(response_clean),
-                "output_tokens": estimate_tokens(response_clean),
+                "output_tokens": estimate_tokens(response_clean, model_name),
                 "duration_ms": duration_ms,
                 "success": 1 if response_clean else 0,
                 "stats": last_stats or {},
@@ -253,6 +258,9 @@ def _run_gpt_extraction(
             outputs.append(dst_path)
         except Exception as error:
             report_exception(f"写入 gpt-oss 结果失败({stage_label}:{name})", error, level="warning")
+
+        if progress_callback:
+            progress_callback()
 
     if outputs:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -290,6 +298,15 @@ def run_special_symbols_job(
     """Run the special symbols workflow headlessly and report progress via ``publish``."""
 
     publish({"status": "running", "stage": "initializing", "message": "准备特殊特性符号会话目录"})
+
+    progress_value = 0.0
+
+    def publish_progress(value: float) -> None:
+        nonlocal progress_value
+        progress_value = max(0.0, min(value, 100.0))
+        publish({"progress": progress_value})
+
+    publish_progress(1.0)
 
     base_dirs = {"generated": str(CONFIG["directories"]["generated_files"])}
     session_dirs = ensure_session_dirs(base_dirs, session_id)
@@ -353,6 +370,8 @@ def run_special_symbols_job(
     except Exception as error:
         report_exception("文本预处理失败", error, level="warning")
 
+    publish_progress(10.0)
+
     standards_txt_filtered_dir = os.path.join(output_root, "standards_txt_filtered")
     try:
         standards_summary = run_filtering(
@@ -396,6 +415,19 @@ def run_special_symbols_job(
 
     standards_txt_filtered_further_dir = os.path.join(output_root, "standards_txt_filtered_further")
     standards_outputs: List[str] = []
+    progress_target_after_conversion = 10.0
+    ollama_progress_share = 85.0
+    ollama_target = progress_target_after_conversion + ollama_progress_share
+    gpt_task_total = len(standards_txt_filtered_files) + len(exam_txt_files)
+    if exam_txt_files:
+        gpt_task_total += 1  # final comparison
+    increment = ollama_progress_share / gpt_task_total if gpt_task_total else 0.0
+
+    def advance_ollama_progress() -> None:
+        if increment <= 0:
+            return
+        publish_progress(min(ollama_target, progress_value + increment))
+
     if standards_txt_filtered_files:
         standards_outputs = _run_gpt_extraction(
             emitter=emitter,
@@ -413,10 +445,19 @@ def run_special_symbols_job(
             client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
             header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
             combined_prefix="standards_txt_filtered_final",
+            progress_callback=advance_ollama_progress if increment else None,
         )
 
     if not exam_txt_files:
-        publish({"status": "succeeded", "stage": "completed", "message": "未发现待检查文本"})
+        publish_progress(99.0)
+        publish(
+            {
+                "status": "succeeded",
+                "stage": "completed",
+                "message": "未发现待检查文本",
+                "progress": progress_value,
+            }
+        )
         return {"final_results": []}
 
     examined_txt_filtered_further_dir = os.path.join(output_root, "examined_txt_filtered_further")
@@ -436,6 +477,7 @@ def run_special_symbols_job(
         client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
         header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
         combined_prefix="examined_txt_filtered_final",
+        progress_callback=advance_ollama_progress if increment else None,
     )
 
     exam_combined_path = next(
@@ -573,15 +615,18 @@ def run_special_symbols_job(
             "part": 1,
             "phase": "compare",
             "prompt_chars": len(combined_prompt),
-            "prompt_tokens": estimate_tokens(combined_prompt),
+            "prompt_tokens": estimate_tokens(combined_prompt, model_name),
             "output_chars": len(response_clean),
-            "output_tokens": estimate_tokens(response_clean),
+            "output_tokens": estimate_tokens(response_clean, model_name),
             "duration_ms": duration_ms,
             "success": 1 if response_clean else 0,
             "stats": last_stats or {},
             "error": "",
         },
     )
+
+    if increment:
+        advance_ollama_progress()
 
     processed_chunks = 1
     publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
@@ -607,6 +652,13 @@ def run_special_symbols_job(
     except Exception:
         pass
 
+    has_csv = any(path.lower().endswith(".csv") for path in result_files)
+    has_xlsx = any(path.lower().endswith(".xlsx") for path in result_files)
+    if has_csv and has_xlsx:
+        publish_progress(100.0)
+    elif progress_value < ollama_target:
+        publish_progress(min(ollama_target, progress_value))
+
     publish(
         {
             "status": "succeeded",
@@ -615,6 +667,7 @@ def run_special_symbols_job(
             "processed_chunks": processed_chunks,
             "total_chunks": total_chunks,
             "result_files": result_files,
+            "progress": progress_value,
         }
     )
     return {"final_results": result_files}
