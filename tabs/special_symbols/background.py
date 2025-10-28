@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime
@@ -45,9 +46,6 @@ GPT_OSS_PROMPT_PREFIX = (
     "5) 若整段文本中没有任何被上述分类列标记为★/☆/ /的行，则仅回复：无。\n\n"
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
-
-GPT_OSS_HEADER_TEMPLATE = "以下是《{base}》文件包含的特殊特性符号："
-
 
 class ProgressEmitter:
     """Adapter exposing Streamlit-like logging surface."""
@@ -123,7 +121,6 @@ def _run_gpt_extraction(
     stage_message: str,
     clear_message_template: Optional[str],
     client_unavailable_message: str,
-    header_builder: Callable[[str], str],
     combined_prefix: str,
     combined_log_template: str = "已生成汇总结果 {name}",
     progress_callback: Optional[Callable[[], None]] = None,
@@ -147,6 +144,8 @@ def _run_gpt_extraction(
 
     outputs: List[str] = []
     emitter.info(stage_message)
+
+    aggregate_data: List[Dict[str, object]] = []
 
     for name in names:
         src_path = os.path.join(src_dir, name)
@@ -249,39 +248,33 @@ def _run_gpt_extraction(
 
         base_name = os.path.splitext(name)[0]
         dst_path = os.path.join(dest_dir, name)
-        header = header_builder(base_name)
+        entries = [line.strip() for line in response_clean.splitlines() if line.strip()]
+        if not entries and response_clean.strip():
+            entries = [response_clean.strip()]
+        record: Dict[str, object] = {
+            "文件名": base_name,
+            "特殊特性符号": entries,
+        }
         try:
             with open(dst_path, "w", encoding="utf-8") as writer:
-                if header:
-                    writer.write(header.rstrip("\n") + "\n")
-                writer.write(response_clean)
+                json.dump(record, writer, ensure_ascii=False, indent=2)
+                writer.write("\n")
             outputs.append(dst_path)
+            aggregate_data.append(record)
         except Exception as error:
             report_exception(f"写入 gpt-oss 结果失败({stage_label}:{name})", error, level="warning")
 
         if progress_callback:
             progress_callback()
 
-    if outputs:
+    if aggregate_data:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         combined_name = f"{combined_prefix}_{timestamp}.txt"
         combined_path = os.path.join(dest_dir, combined_name)
         try:
             with open(combined_path, "w", encoding="utf-8") as handle:
-                for idx, path in enumerate(sorted(outputs, key=lambda value: os.path.basename(value).lower())):
-                    try:
-                        with open(path, "r", encoding="utf-8") as reader:
-                            content = reader.read().rstrip()
-                    except Exception as error:
-                        report_exception(
-                            f"读取 gpt-oss 结果失败({stage_label}:{os.path.basename(path)})",
-                            error,
-                            level="warning",
-                        )
-                        continue
-                    if idx:
-                        handle.write("\n\n")
-                    handle.write(content)
+                json.dump(aggregate_data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
             outputs.append(combined_path)
             emitter.info(combined_log_template.format(name=combined_name))
         except Exception as error:
@@ -456,7 +449,6 @@ def run_special_symbols_job(
             stage_message="正在调用 gpt-oss 提取基准文件特殊特性标记",
             clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
             client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
-            header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
             combined_prefix="standards_txt_filtered_final",
             progress_callback=advance_ollama_progress if increment else None,
         )
@@ -488,7 +480,6 @@ def run_special_symbols_job(
         stage_message="正在调用 gpt-oss 提取特殊特性标记",
         clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
         client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
-        header_builder=lambda base: GPT_OSS_HEADER_TEMPLATE.format(base=base),
         combined_prefix="examined_txt_filtered_final",
         progress_callback=advance_ollama_progress if increment else None,
     )
