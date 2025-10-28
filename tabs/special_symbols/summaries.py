@@ -414,7 +414,10 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
     xlsx_path: str | None = None
 
     if rows:
-        csv_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        csv_path = os.path.join(
+            final_dir,
+            f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
         try:
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
@@ -428,7 +431,10 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         if "pd" in locals() and pd is not None:
             try:
                 df = pd.DataFrame(rows, columns=columns)
-                xlsx_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+                xlsx_path = os.path.join(
+                    final_dir,
+                    f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                )
                 df.to_excel(xlsx_path, index=False)
             except Exception as error:
                 report_exception("写入Excel失败", error, level="warning")
@@ -483,7 +489,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             styles["Heading 2"].font.name = "宋体"
         except Exception:
             pass
-        doc.add_heading("企标检查全部分析过程", level=0)
+        doc.add_heading("特殊特性符号检查全部分析过程", level=0)
         doc.add_heading("目录", level=1)
         for _, _, base in pairs:
             paragraph = doc.add_paragraph()
@@ -536,7 +542,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                     continue
                 doc.add_paragraph(_to_plain_table(line))
         ts_doc = datetime.now().strftime("%Y%m%d_%H%M%S")
-        doc_path = os.path.join(final_dir, f"企标检查分析过程_{ts_doc}.docx")
+        doc_path = os.path.join(final_dir, f"特殊特性符号检查分析过程_{ts_doc}.docx")
         doc.save(doc_path)
         if _st_available():
             try:

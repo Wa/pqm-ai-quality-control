@@ -300,6 +300,7 @@ def run_special_symbols_job(
     publish({"status": "running", "stage": "initializing", "message": "准备特殊特性符号会话目录"})
 
     progress_value = 0.0
+    job_start_time = time.time()
 
     def publish_progress(value: float) -> None:
         nonlocal progress_value
@@ -324,6 +325,16 @@ def run_special_symbols_job(
 
     os.makedirs(initial_results_dir, exist_ok=True)
     os.makedirs(final_results_dir, exist_ok=True)
+
+    preexisting_final_files: set[str] = set()
+    try:
+        if os.path.isdir(final_results_dir):
+            for existing_name in os.listdir(final_results_dir):
+                existing_path = os.path.join(final_results_dir, existing_name)
+                if os.path.isfile(existing_path):
+                    preexisting_final_files.add(existing_path)
+    except Exception:
+        preexisting_final_files = set()
 
     try:
         removed_ref = cleanup_orphan_txts(reference_dir, reference_txt_dir, emitter)
@@ -649,8 +660,18 @@ def run_special_symbols_job(
     try:
         if os.path.isdir(final_results_dir):
             for fname in os.listdir(final_results_dir):
-                if os.path.isfile(os.path.join(final_results_dir, fname)):
-                    result_files.append(os.path.join(final_results_dir, fname))
+                fpath = os.path.join(final_results_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                if fpath in preexisting_final_files:
+                    continue
+                try:
+                    mtime = os.path.getmtime(fpath)
+                except OSError:
+                    mtime = None
+                if mtime is not None and mtime < job_start_time:
+                    continue
+                result_files.append(fpath)
     except Exception:
         pass
 
