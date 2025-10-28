@@ -63,12 +63,11 @@ def summarize_with_ollama(
         prompt_lines = [
             "你是一个严谨的结构化信息抽取助手。",
             "\n请将以下内容转换为 JSON 数组，每个对象包含如下几个键：",
-            "- 待检查文件名：",
-            "- 特征：与该条不一致点相关的待检查文件条目或特征",
-            "- 现有符号：待检查文件特殊特性分类（★、☆、/）",
-            "- 预期符号：基准文件特殊特性分类（★、☆、/）",
-            "- 说明：判断不一致的依据与简要解释（保持客观、可追溯）",
-            "- 基准文件出处：所述条目在基准文件中的位置",
+            "- 条目（即特征/特性/过程）",
+            "- 基准文件名和所述条目在基准文件中的位置",
+            "- 基准文件中的特殊特性分类（★、☆、/）",
+            "- 待检查文件名和所述条目在基准文件中的位置",
+            "- 待检查文件中的特殊特性分类（★、☆、/）",
             "\n要求：",
             "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本）；",
             "2) 若内容包含多处对比，按条目拆分为多条 JSON 对象；",
@@ -317,7 +316,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["待检查文件名", "特征", "现有符号", "预期符号", "说明", "基准文件出处"]
+    columns = ["条目", "基准文件及位置", "基准符号", "待检文件及位置", "待检符号"]
     rows = []
     try:
         import pandas as pd  # type: ignore
@@ -406,48 +405,53 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         for row in data:
             if not isinstance(row, dict):
                 continue
-            name_val = _pick(
+            item_val = _pick(
                 row,
-                "待检查文件名",
-                "技术文件名",
-                "technical_file_name",
-                "待检查文件",
-            ) or orig_name
-            feature_val = _pick(
-                row,
+                "条目",
                 "特征",
                 "技术文件内容",
                 "technical_file_content",
                 "特性",
             )
-            current_symbol_val = _pick(
+            standard_loc_val = _pick(
                 row,
-                "现有符号",
-                "不一致之处",
-                "current_symbol",
+                "基准文件名和所述条目在基准文件中的位置",
+                "基准文件出处",
+                "企业标准出处",
+                "standard_source",
             )
-            expected_symbol_val = _pick(
+            standard_symbol_val = _pick(
                 row,
+                "基准文件中的特殊特性分类（★、☆、/）",
                 "预期符号",
                 "企业标准",
                 "expected_symbol",
                 "enterprise_standard",
             )
-            description_val = _pick(row, "说明", "理由", "description", "reason")
-            source_val = _pick(
+            examined_loc_val = _pick(
                 row,
-                "基准文件出处",
-                "企业标准出处",
-                "standard_source",
+                "待检查文件名和所述条目在基准文件中的位置",
+                "待检查文件名",
+                "技术文件名",
+                "待检查文件",
+                "technical_file_name",
+            )
+            if not examined_loc_val:
+                examined_loc_val = orig_name
+            examined_symbol_val = _pick(
+                row,
+                "待检查文件中的特殊特性分类（★、☆、/）",
+                "现有符号",
+                "current_symbol",
+                "不一致之处",
             )
             rows.append(
                 [
-                    name_val,
-                    feature_val,
-                    current_symbol_val,
-                    expected_symbol_val,
-                    description_val,
-                    source_val,
+                    item_val,
+                    standard_loc_val,
+                    standard_symbol_val,
+                    examined_loc_val,
+                    examined_symbol_val,
                 ]
             )
 
@@ -536,7 +540,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             paragraph = doc.add_paragraph()
             paragraph.add_run(f"{base}")
         for prompt_path, response_path, base in pairs:
-            doc.add_heading(f"以下是《{base}》根据企业标准检查的分析过程：", level=1)
+            doc.add_heading(f"以下是《{base}》根据基准文件检查的分析过程：", level=1)
             try:
                 with open(prompt_path, "r", encoding="utf-8") as handle:
                     prompt_text = handle.read()
