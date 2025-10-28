@@ -378,6 +378,7 @@ def run_special_symbols_job(
             reference_txt_dir,
             standards_txt_filtered_dir,
             config_path=os.path.join(os.path.dirname(__file__), "filter_config.yml"),
+            name_exclude_substrings=["标准选项", "特殊特性符号对照表", "变更履历"],
         )
         emitter.info(
             f"基准过滤完成 保留{standards_summary.get('kept', 0)} 排除{standards_summary.get('dropped', 0)} 清空{standards_summary.get('empty_after_filter', 0)}"
@@ -394,6 +395,7 @@ def run_special_symbols_job(
             examined_txt_dir,
             examined_txt_filtered_dir,
             config_path=os.path.join(os.path.dirname(__file__), "filter_config.yml"),
+            name_exclude_substrings=["变更履历", "附图、附表", "封面"],
         )
         emitter.info(
             f"待检过滤完成 保留{summary.get('kept', 0)} 排除{summary.get('dropped', 0)} 清空{summary.get('empty_after_filter', 0)}"

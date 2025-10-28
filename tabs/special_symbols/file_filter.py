@@ -216,7 +216,12 @@ def filter_text_lines(lines: Iterable[str], sheet_name: str, config: FilterConfi
     return kept
 
 
-def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] = None) -> dict:
+def run_filtering(
+    source_dir: str,
+    target_dir: str,
+    config_path: Optional[str] = None,
+    name_exclude_substrings: Optional[Iterable[str]] = None,
+) -> dict:
     """Filter .txt files from ``source_dir`` into ``target_dir`` based on heuristics.
 
     Returns a summary dict with keys: kept, dropped, empty_after_filter, log_path
@@ -228,6 +233,9 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
     # compatibility, though the gating heuristics defined there are no longer
     # applied during this phase.
     load_config(config_path)
+    name_excludes: List[str] = []
+    if name_exclude_substrings:
+        name_excludes = [s for s in name_exclude_substrings if s]
     kept = 0
     dropped = 0
     emptied = 0
@@ -237,6 +245,18 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
     for name in sorted(os.listdir(source_dir)):
         src_path = os.path.join(source_dir, name)
         if not os.path.isfile(src_path) or not name.lower().endswith(".txt"):
+            continue
+        lowered = name.lower()
+        excluded_by_name = False
+        for needle in name_excludes:
+            # perform case-insensitive comparisons while keeping the original
+            # filename in the log for readability
+            if needle.lower() in lowered:
+                dropped += 1
+                excluded.append(f"{name}\tname_excluded:{needle}")
+                excluded_by_name = True
+                break
+        if excluded_by_name:
             continue
         try:
             with open(src_path, "r", encoding="utf-8", errors="ignore") as handle:
