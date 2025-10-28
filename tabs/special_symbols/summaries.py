@@ -61,21 +61,20 @@ def summarize_with_ollama(
     try:
         original_name = name_no_ext
         prompt_lines = [
-            "你是一个严谨的结构化信息抽取助手。以下内容来自一个基于 RAG 的大语言模型 (RAG-LLM) 系统，",
-            "用于将若干技术文件与企业标准进行逐条比对，输出发现的不符合项及其理由。本文件对应的原始技术文件名称为：",
-            f"{original_name}。",
-            "\n请将随后的全文内容转换为 JSON 数组（list of objects），每个对象包含如下五个键：",
-            f"- 技术文件名：\"{original_name}\"",
-            "- 技术文件内容：与该条不一致点相关的技术文件条目或段落名称/编号/摘要",
-            "- 企业标准：被对比的企业标准条款名称/编号/摘要",
-            "- 不一致之处：不符合或存在差异的具体点，尽量具体明确",
-            "- 理由：判断不一致的依据与简要解释（保持客观、可追溯）",
+            "你是一个严谨的结构化信息抽取助手。",
+            "\n请将以下内容转换为 JSON 数组，每个对象包含如下几个键：",
+            "- 待检查文件名：",
+            "- 特征：与该条不一致点相关的待检查文件条目或特征",
+            "- 现有符号：待检查文件特殊特性分类（★、☆、/）",
+            "- 预期符号：基准文件特殊特性分类（★、☆、/）",
+            "- 说明：判断不一致的依据与简要解释（保持客观、可追溯）",
+            "- 基准文件出处：所述条目在基准文件中的位置",
             "\n要求：",
-            "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本），键名使用上述中文；",
+            "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本）；",
             "2) 若内容包含多处对比，按条目拆分为多条 JSON 对象；",
             "3) 若某处信息缺失，请以空字符串 \"\" 占位，不要编造；",
-            "4) 尽量保留可用于追溯定位的原文线索（如编号、标题、页码等）于相应字段中。",
-            "\n下面是需要转换为 JSON 的原始比对输出：\n\n",
+            "4) 尽量保留可用于追溯定位的原文线索（如文件名、SHEET名、页码等）于相应字段中。",
+            "\n下面是需要转换为 JSON 的内容：\n\n",
         ]
         instruction = "".join(prompt_lines)
         text = full_out_text or ""
@@ -318,7 +317,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由"]
+    columns = ["待检查文件名", "特征", "现有符号", "预期符号", "说明", "基准文件出处"]
     rows = []
     try:
         import pandas as pd  # type: ignore
@@ -397,18 +396,60 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             continue
 
         # Helper: prefer Chinese keys, fallback to English
-        def _kv(d: dict, cn_key: str, en_key: str) -> str:
-            return str(d.get(cn_key) or d.get(en_key) or "")
+        def _pick(d: dict, *keys: str) -> str:
+            for key in keys:
+                value = d.get(key)
+                if value not in (None, ""):
+                    return str(value)
+            return ""
 
         for row in data:
             if not isinstance(row, dict):
                 continue
-            name_val = _kv(row, "技术文件名", "technical_file_name") or orig_name
-            content_val = _kv(row, "技术文件内容", "technical_file_content")
-            std_val = _kv(row, "企业标准", "enterprise_standard")
-            inconsistency_val = _kv(row, "不一致之处", "inconsistency")
-            reason_val = _kv(row, "理由", "reason")
-            rows.append([name_val, content_val, std_val, inconsistency_val, reason_val])
+            name_val = _pick(
+                row,
+                "待检查文件名",
+                "技术文件名",
+                "technical_file_name",
+                "待检查文件",
+            ) or orig_name
+            feature_val = _pick(
+                row,
+                "特征",
+                "技术文件内容",
+                "technical_file_content",
+                "特性",
+            )
+            current_symbol_val = _pick(
+                row,
+                "现有符号",
+                "不一致之处",
+                "current_symbol",
+            )
+            expected_symbol_val = _pick(
+                row,
+                "预期符号",
+                "企业标准",
+                "expected_symbol",
+                "enterprise_standard",
+            )
+            description_val = _pick(row, "说明", "理由", "description", "reason")
+            source_val = _pick(
+                row,
+                "基准文件出处",
+                "企业标准出处",
+                "standard_source",
+            )
+            rows.append(
+                [
+                    name_val,
+                    feature_val,
+                    current_symbol_val,
+                    expected_symbol_val,
+                    description_val,
+                    source_val,
+                ]
+            )
 
     csv_path: str | None = None
     xlsx_path: str | None = None
