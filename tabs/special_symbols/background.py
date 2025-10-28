@@ -246,28 +246,35 @@ def _run_gpt_extraction(
             },
         )
 
-        base_name = os.path.splitext(name)[0]
         dst_path = os.path.join(dest_dir, name)
         entries = [line.strip() for line in response_clean.splitlines() if line.strip()]
         if not entries and response_clean.strip():
             entries = [response_clean.strip()]
+        stem = os.path.splitext(name)[0]
+        file_name_value = stem
+        sheet_name_value: Optional[str] = None
+        if "_SHEET_" in stem:
+            file_name_value, sheet_name_value = stem.split("_SHEET_", 1)
         record: Dict[str, object] = {
-            "文件名": base_name,
+            "文件名": file_name_value,
             "特殊特性符号": entries,
         }
+        if sheet_name_value:
+            record["工作表名"] = sheet_name_value
         try:
             with open(dst_path, "w", encoding="utf-8") as writer:
                 json.dump(record, writer, ensure_ascii=False, indent=2)
                 writer.write("\n")
             outputs.append(dst_path)
-            aggregate_data.append(record)
+            if not (len(entries) == 1 and entries[0] == "无"):
+                aggregate_data.append(record)
         except Exception as error:
             report_exception(f"写入 gpt-oss 结果失败({stage_label}:{name})", error, level="warning")
 
         if progress_callback:
             progress_callback()
 
-    if aggregate_data:
+    if aggregate_data or outputs:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         combined_name = f"{combined_prefix}_{timestamp}.txt"
         combined_path = os.path.join(dest_dir, combined_name)
