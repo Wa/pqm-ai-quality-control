@@ -468,18 +468,18 @@ def render_special_symbols_check_tab(session_id):
                         progress_percent = float(progress_percent_raw)
                     except (TypeError, ValueError):
                         progress_percent = None
-                with st.spinner(f"**任务状态：{_label}**"):
-                    if progress_percent is not None:
-                        capped_percent = min(max(progress_percent, 0.0), 100.0)
-                        st.progress(capped_percent / 100.0)
-                        display_percent = max(1, int(round(capped_percent)))
-                        st.caption(f"进度：{display_percent}% ")
-                    elif total_chunks > 0:
-                        progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
-                        st.progress(progress_value)
-                        st.caption(f"进度：{1 + int(progress_value*99)}% ")
-                    elif status_value in {"queued", "running"}:
-                        st.progress(0.0)
+                st.markdown(f"**任务状态：{_label}**")
+                if progress_percent is not None:
+                    capped_percent = min(max(progress_percent, 0.0), 100.0)
+                    st.progress(capped_percent / 100.0)
+                    display_percent = max(1, int(round(capped_percent)))
+                    st.caption(f"进度：{display_percent}% ")
+                elif total_chunks > 0:
+                    progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
+                    st.progress(progress_value)
+                    st.caption(f"进度：{1 + int(progress_value*99)}% ")
+                elif status_value in {"queued", "running"}:
+                    st.progress(0.0)
                 result_files = job_status.get("result_files") or []
                 if result_files and status_value == "succeeded":
                     st.success("已生成结果文件，可直接下载：")

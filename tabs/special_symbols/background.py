@@ -47,6 +47,7 @@ GPT_OSS_PROMPT_PREFIX = (
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
 
+
 class ProgressEmitter:
     """Adapter exposing Streamlit-like logging surface."""
 
@@ -124,6 +125,7 @@ def _run_gpt_extraction(
     combined_prefix: str,
     combined_log_template: str = "已生成汇总结果 {name}",
     progress_callback: Optional[Callable[[], None]] = None,
+    control_handler: Optional[Callable[[str, str], bool]] = None,
 ) -> List[str]:
     names = sorted(file_names, key=lambda value: value.lower())
     if not names:
@@ -148,6 +150,8 @@ def _run_gpt_extraction(
     aggregate_data: List[Dict[str, object]] = []
 
     for name in names:
+        if control_handler and not control_handler(stage_label, f"{stage_message}（{name}）"):
+            return outputs
         src_path = os.path.join(src_dir, name)
         try:
             with open(src_path, "r", encoding="utf-8") as handle:
@@ -191,6 +195,8 @@ def _run_gpt_extraction(
                 if piece:
                     response_text += piece
                 last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+                if control_handler and not control_handler(stage_label, f"gpt-oss 流式响应（{name}）"):
+                    return outputs
         except Exception as error:
             report_exception(f"调用 gpt-oss 失败({stage_label}:{name})", error, level="warning")
             publish(
@@ -207,6 +213,8 @@ def _run_gpt_extraction(
             )
             if progress_callback:
                 progress_callback()
+            if control_handler and not control_handler(stage_label, f"已跳过（{name}）"):
+                return outputs
             continue
 
         duration_ms = int((time.time() - start_ts) * 1000)
@@ -273,6 +281,8 @@ def _run_gpt_extraction(
 
         if progress_callback:
             progress_callback()
+        if control_handler and not control_handler(stage_label, f"完成写入（{name}）"):
+            return outputs
 
     if aggregate_data or outputs:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -284,6 +294,8 @@ def _run_gpt_extraction(
                 handle.write("\n")
             outputs.append(combined_path)
             emitter.info(combined_log_template.format(name=combined_name))
+            if control_handler and not control_handler(stage_label, f"生成汇总（{combined_name}）"):
+                return outputs
         except Exception as error:
             report_exception(f"汇总 gpt-oss 结果失败({stage_label})", error, level="warning")
 
@@ -307,7 +319,68 @@ def run_special_symbols_job(
         progress_value = max(0.0, min(value, 100.0))
         publish({"progress": progress_value})
 
+    processed_chunks = 0
+    total_chunks = 0
+    stop_announced = False
+    control_state = "running"
+
+    def announce_stop(message: str) -> None:
+        nonlocal stop_announced
+        if stop_announced:
+            return
+        stop_announced = True
+        publish(
+            {
+                "status": "failed",
+                "stage": "stopped",
+                "message": message,
+                "processed_chunks": processed_chunks,
+                "total_chunks": total_chunks,
+                "progress": progress_value,
+            }
+        )
+
+    def ensure_running(stage: str, detail: str) -> bool:
+        nonlocal control_state
+        if not check_control:
+            return True
+        stage_value = stage or "running"
+        while True:
+            try:
+                status = check_control()
+            except Exception:
+                status = None
+            if not status:
+                if control_state != "running":
+                    control_state = "running"
+                    publish({"status": "running", "stage": stage_value, "message": detail})
+                return True
+            if status.get("stopped"):
+                announce_stop("任务已被用户停止")
+                return False
+            if status.get("paused"):
+                if control_state != "paused":
+                    control_state = "paused"
+                publish(
+                    {
+                        "status": "paused",
+                        "stage": "paused",
+                        "message": f"暂停中：等待恢复（{detail}）",
+                        "processed_chunks": processed_chunks,
+                        "total_chunks": total_chunks,
+                        "progress": progress_value,
+                    }
+                )
+                time.sleep(1)
+                continue
+            if control_state != "running":
+                control_state = "running"
+                publish({"status": "running", "stage": stage_value, "message": detail})
+            return True
+
     publish_progress(1.0)
+    if not ensure_running("initializing", "初始化特殊特性符号检查"):
+        return {"final_results": []}
 
     base_dirs = {"generated": str(CONFIG["directories"]["generated_files"])}
     session_dirs = ensure_session_dirs(base_dirs, session_id)
@@ -360,19 +433,43 @@ def run_special_symbols_job(
         pass
 
     emitter.set_stage("conversion")
+    if not ensure_running("conversion", "准备解析基准文件"):
+        return {"final_results": []}
     emitter.info("正在解析基准文件")
     process_pdf_folder(reference_dir, reference_txt_dir, emitter, annotate_sources=True)
+    if not ensure_running("conversion", "解析基准文件（PDF）"):
+        return {"final_results": []}
     process_word_ppt_folder(reference_dir, reference_txt_dir, emitter, annotate_sources=True)
+    if not ensure_running("conversion", "解析基准文件（Word/PPT）"):
+        return {"final_results": []}
     process_excel_folder(reference_dir, reference_txt_dir, emitter, annotate_sources=True)
+    if not ensure_running("conversion", "解析基准文件（Excel）"):
+        return {"final_results": []}
     process_textlike_folder(reference_dir, reference_txt_dir, emitter)
+    if not ensure_running("conversion", "解析基准文件（文本类）"):
+        return {"final_results": []}
     process_archives(reference_dir, reference_txt_dir, emitter)
+    if not ensure_running("conversion", "解析基准文件（压缩包）"):
+        return {"final_results": []}
 
+    if not ensure_running("conversion", "准备解析待检查文件"):
+        return {"final_results": []}
     emitter.info("正在解析待检查文件")
     process_pdf_folder(examined_dir, examined_txt_dir, emitter, annotate_sources=False)
+    if not ensure_running("conversion", "解析待检查文件（PDF）"):
+        return {"final_results": []}
     process_word_ppt_folder(examined_dir, examined_txt_dir, emitter, annotate_sources=False)
+    if not ensure_running("conversion", "解析待检查文件（Word/PPT）"):
+        return {"final_results": []}
     process_excel_folder(examined_dir, examined_txt_dir, emitter, annotate_sources=False)
+    if not ensure_running("conversion", "解析待检查文件（Excel）"):
+        return {"final_results": []}
     process_textlike_folder(examined_dir, examined_txt_dir, emitter)
+    if not ensure_running("conversion", "解析待检查文件（文本类）"):
+        return {"final_results": []}
     process_archives(examined_dir, examined_txt_dir, emitter)
+    if not ensure_running("conversion", "解析待检查文件（压缩包）"):
+        return {"final_results": []}
 
     try:
         updated_txts = preprocess_txt_directories(reference_txt_dir, examined_txt_dir)
@@ -384,6 +481,8 @@ def run_special_symbols_job(
     publish_progress(10.0)
 
     standards_txt_filtered_dir = os.path.join(output_root, "standards_txt_filtered")
+    if not ensure_running("filter", "准备过滤基准文本"):
+        return {"final_results": []}
     try:
         standards_summary = run_filtering(
             reference_txt_dir,
@@ -401,6 +500,8 @@ def run_special_symbols_job(
 
     # Filter examined .txt files into a separate folder to reduce irrelevant content
     examined_txt_filtered_dir = os.path.join(output_root, "examined_txt_filtered")
+    if not ensure_running("filter", "准备过滤待检文本"):
+        return {"final_results": []}
     try:
         summary = run_filtering(
             examined_txt_dir,
@@ -442,6 +543,8 @@ def run_special_symbols_job(
         publish_progress(min(ollama_target, progress_value + increment))
 
     if standards_txt_filtered_files:
+        if not ensure_running("standards_gpt_oss", "开始基准文件符号提取"):
+            return {"final_results": []}
         standards_outputs = _run_gpt_extraction(
             emitter=emitter,
             publish=publish,
@@ -458,7 +561,10 @@ def run_special_symbols_job(
             client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
             combined_prefix="standards_txt_filtered_final",
             progress_callback=advance_ollama_progress if increment else None,
+            control_handler=ensure_running,
         )
+        if stop_announced:
+            return {"final_results": []}
 
     if not exam_txt_files:
         publish_progress(99.0)
@@ -473,6 +579,8 @@ def run_special_symbols_job(
         return {"final_results": []}
 
     examined_txt_filtered_further_dir = os.path.join(output_root, "examined_txt_filtered_further")
+    if not ensure_running("gpt_oss", "开始待检文件符号提取"):
+        return {"final_results": []}
     exam_outputs = _run_gpt_extraction(
         emitter=emitter,
         publish=publish,
@@ -489,7 +597,10 @@ def run_special_symbols_job(
         client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
         combined_prefix="examined_txt_filtered_final",
         progress_callback=advance_ollama_progress if increment else None,
+        control_handler=ensure_running,
     )
+    if stop_announced:
+        return {"final_results": []}
 
     exam_combined_path = next(
         (
@@ -557,6 +668,8 @@ def run_special_symbols_job(
     comparison_base = os.path.basename(exam_combined_path) if exam_combined_path else "examined_txt_filtered_final"
     comparison_name = os.path.splitext(comparison_base)[0] + "_comparison"
 
+    if not ensure_running("compare", "准备执行对比分析"):
+        return {"final_results": []}
     publish(
         {
             "stream": {
@@ -601,6 +714,8 @@ def run_special_symbols_job(
                 }
             )
             last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+            if not ensure_running("compare", f"gpt-oss 对比分析（{comparison_name}）"):
+                return {"final_results": []}
     except Exception as error:
         publish(
             {
@@ -612,6 +727,8 @@ def run_special_symbols_job(
         raise
 
     duration_ms = int((time.time() - start_ts) * 1000)
+    if not ensure_running("compare", "对比分析完成"):
+        return {"final_results": []}
     response_clean = response_text.strip() or "无相关发现"
 
     log_llm_metrics(
@@ -643,6 +760,8 @@ def run_special_symbols_job(
     publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
 
     try:
+        if not ensure_running("aggregate", "保存对比与摘要结果"):
+            return {"final_results": []}
         persist_compare_outputs(initial_results_dir, comparison_name, [combined_prompt], response_clean)
         summarize_with_ollama(initial_results_dir, output_root, session_id, comparison_name, response_clean)
     except Exception as error:
@@ -650,6 +769,8 @@ def run_special_symbols_job(
 
     emitter.set_stage("aggregate")
     try:
+        if not ensure_running("aggregate", "生成导出文件"):
+            return {"final_results": []}
         aggregate_outputs(initial_results_dir, output_root, session_id)
     except Exception as error:
         report_exception("汇总导出失败", error, level="warning")
@@ -680,6 +801,8 @@ def run_special_symbols_job(
     elif progress_value < ollama_target:
         publish_progress(min(ollama_target, progress_value))
 
+    if not ensure_running("completed", "准备发布结果"):
+        return {"final_results": []}
     publish(
         {
             "status": "succeeded",
