@@ -13,7 +13,6 @@ from ollama import Client as OllamaClient
 
 from util import ensure_session_dirs, resolve_ollama_host
 
-from tabs.enterprise_standard.summaries import persist_compare_outputs
 from .file_filter import run_filtering
 
 from . import (
@@ -31,6 +30,7 @@ from . import (
     report_exception,
     summarize_with_ollama,
 )
+from .summaries import persist_compare_outputs
 from .workflow import SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX
 
 GPT_OSS_PROMPT_PREFIX = (
