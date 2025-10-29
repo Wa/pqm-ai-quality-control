@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - backend execution may not ship Streamlit
     import streamlit as st  # type: ignore
@@ -137,9 +137,36 @@ def summarize_with_ollama(
             report_exception("读取Ollama提示列表失败", error, level="warning")
         part_files.sort(key=lambda value: value.lower())
         total_parts = len(part_files)
-        host = resolve_ollama_host("ollama_9")
-        ollama_client = OllamaClient(host=host)
-        model = CONFIG["llm"].get("ollama_model")
+        local_model = CONFIG["llm"].get("ollama_model") or "gpt-oss:latest"
+        cloud_model = "gpt-oss:20b-cloud"
+        local_client: Optional[OllamaClient]
+        cloud_client: Optional[OllamaClient]
+        try:
+            host = resolve_ollama_host("ollama_9")
+            local_client = OllamaClient(host=host)
+        except Exception as error:
+            local_client = None
+            report_exception("初始化本地 gpt-oss 客户端失败", error, level="warning")
+        cloud_host = CONFIG["llm"].get("ollama_cloud_host")
+        cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
+        if cloud_host and cloud_api_key:
+            try:
+                cloud_client = OllamaClient(
+                    host=cloud_host,
+                    headers={"Authorization": f"Bearer {cloud_api_key}"},
+                )
+            except Exception as error:
+                cloud_client = None
+                report_exception("初始化云端 gpt-oss 客户端失败", error, level="warning")
+        else:
+            cloud_client = None
+        if local_client is None and cloud_client is None:
+            report_exception(
+                "未能初始化任何 gpt-oss 客户端，跳过汇总生成",
+                RuntimeError("no available ollama client"),
+                level="warning",
+            )
+            return
         temperature = 0.7
         top_p = 0.9
         top_k = 40
@@ -147,6 +174,10 @@ def summarize_with_ollama(
         num_ctx = 40001
         num_thread = 4
         show_ui = _st_available()
+        attempt_sequence: List[Tuple[str, Optional[OllamaClient], Optional[str]]] = [
+            ("本地 gpt-oss", local_client, local_model),
+            ("云端 gpt-oss", cloud_client, cloud_model),
+        ]
         for part_idx, pfname in enumerate(part_files, start=1):
             p_path = os.path.join(initial_dir, pfname)
             try:
@@ -210,100 +241,129 @@ def summarize_with_ollama(
                     st.caption("已载入之前生成的JSON结果，无需重新调用模型。")
             else:
                 start_ts = time.time()
+                used_model: Optional[str] = None
+                last_error: Optional[Exception] = None
+                response_text = ""
+                last_stats = None
+                generated_new = False
+                error_msg = ""
                 chunks_seen = 0
-                try:
-                    if show_ui and response_placeholder is not None:
-                        for chunk in ollama_client.chat(
-                            model=model,
-                            messages=[{"role": "user", "content": prompt_text_all}],
-                            stream=True,
-                            options={
-                                "temperature": temperature,
-                                "top_p": top_p,
-                                "top_k": top_k,
-                                "repeat_penalty": repeat_penalty,
-                                "num_ctx": num_ctx,
-                                "num_thread": num_thread,
-                            },
-                        ):
-                            chunks_seen += 1
-                            new_text = chunk.get("message", {}).get("content", "")
-                            response_text += new_text
-                            response_placeholder.write(response_text)
-                            last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-                        generated_new = True
-                    else:
-                        result = ollama_client.chat(
-                            model=model,
-                            messages=[{"role": "user", "content": prompt_text_all}],
-                            stream=False,
-                            options={
-                                "temperature": temperature,
-                                "top_p": top_p,
-                                "top_k": top_k,
-                                "repeat_penalty": repeat_penalty,
-                                "num_ctx": num_ctx,
-                                "num_thread": num_thread,
-                            },
-                        )
-                        if isinstance(result, dict):
-                            response_text = (
-                                result.get("message", {}).get("content")
-                                or result.get("response")
-                                or ""
-                            )
-                            last_stats = result.get("eval_info") or result.get("stats")
+
+                for attempt_label, attempt_client, attempt_model in attempt_sequence:
+                    if attempt_client is None or not attempt_model:
+                        continue
+
+                    chunks_seen = 0
+                    try:
+                        if show_ui and response_placeholder is not None:
+                            response_text = ""
+                            for chunk in attempt_client.chat(
+                                model=attempt_model,
+                                messages=[{"role": "user", "content": prompt_text_all}],
+                                stream=True,
+                                options={
+                                    "temperature": temperature,
+                                    "top_p": top_p,
+                                    "top_k": top_k,
+                                    "repeat_penalty": repeat_penalty,
+                                    "num_ctx": num_ctx,
+                                    "num_thread": num_thread,
+                                },
+                            ):
+                                new_text = chunk.get("message", {}).get("content", "")
+                                if new_text:
+                                    response_text += new_text
+                                chunks_seen += 1
+                                response_placeholder.write(response_text)
+                                last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
                             generated_new = True if response_text else False
-                except Exception as error:  # pragma: no cover - runtime safeguard
-                    error_msg = str(error)[:300]
-                finally:
-                    dur_ms = int((time.time() - start_ts) * 1000)
-                    prompt_tokens = (last_stats or {}).get("prompt_eval_count") if last_stats else None
-                    output_tokens = (last_stats or {}).get("eval_count") if last_stats else None
-                    if not error_msg and chunks_seen == 0 and not response_text:
-                        error_msg = "no_stream_chunks"
-                    log_llm_metrics(
-                        enterprise_out,
-                        session_id,
-                        {
-                            "ts": datetime.now().isoformat(timespec="seconds"),
-                            "engine": "ollama",
-                            "model": model,
-                            "session_id": "",
-                            "file": name_no_ext,
-                            "part": part_idx,
-                            "phase": "summarize",
-                            "prompt_chars": len(prompt_text_all or ""),
-                            "prompt_tokens": prompt_tokens
-                            if isinstance(prompt_tokens, int)
-                            else estimate_tokens(prompt_text_all or "", model),
-                            "output_chars": len(response_text or ""),
-                            "output_tokens": output_tokens
-                            if isinstance(output_tokens, int)
-                            else estimate_tokens(response_text or "", model),
-                            "duration_ms": dur_ms,
-                            "success": 1 if (response_text or "").strip() else 0,
-                            "error": error_msg,
-                        },
-                    )
-                    if generated_new and (response_text or error_msg):
-                        try:
-                            with tempfile.NamedTemporaryFile(
-                                "w",
-                                delete=False,
-                                encoding="utf-8",
-                                dir=initial_dir,
-                            ) as tmp:
-                                tmp.write(response_text)
-                                tmp_name = tmp.name
-                            shutil.move(tmp_name, json_path)
-                        except Exception as error:  # pragma: no cover - file IO failures
-                            report_exception("写入JSON汇总失败", error, level="warning")
+                        else:
+                            result = attempt_client.chat(
+                                model=attempt_model,
+                                messages=[{"role": "user", "content": prompt_text_all}],
+                                stream=False,
+                                options={
+                                    "temperature": temperature,
+                                    "top_p": top_p,
+                                    "top_k": top_k,
+                                    "repeat_penalty": repeat_penalty,
+                                    "num_ctx": num_ctx,
+                                    "num_thread": num_thread,
+                                },
+                            )
+                            if isinstance(result, dict):
+                                response_text = (
+                                    result.get("message", {}).get("content")
+                                    or result.get("response")
+                                    or ""
+                                )
+                                last_stats = result.get("eval_info") or result.get("stats")
+                                generated_new = True if response_text else False
+                        used_model = attempt_model
+                        error_msg = ""
+                        last_error = None
+                        break
+                    except Exception as error:  # pragma: no cover - runtime safeguard
+                        last_error = error
+                        report_exception(f"调用 {attempt_label} 生成汇总失败", error, level="warning")
+                        error_msg = str(error)[:300]
+                        response_text = ""
+                        last_stats = None
+                        generated_new = False
+                        if show_ui and response_placeholder is not None:
+                            response_placeholder.write(f"{attempt_label} 调用失败：{error}")
+                        continue
+
+                dur_ms = int((time.time() - start_ts) * 1000)
+                if used_model is None and last_error is not None and not error_msg:
+                    error_msg = str(last_error)[:300]
+                if not error_msg and chunks_seen == 0 and not response_text:
+                    error_msg = "no_stream_chunks"
+                prompt_tokens = (last_stats or {}).get("prompt_eval_count") if last_stats else None
+                output_tokens = (last_stats or {}).get("eval_count") if last_stats else None
+                model_for_logging = used_model or local_model
+                log_llm_metrics(
+                    enterprise_out,
+                    session_id,
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "engine": "ollama",
+                        "model": model_for_logging,
+                        "session_id": "",
+                        "file": name_no_ext,
+                        "part": part_idx,
+                        "phase": "summarize",
+                        "prompt_chars": len(prompt_text_all or ""),
+                        "prompt_tokens": prompt_tokens
+                        if isinstance(prompt_tokens, int)
+                        else estimate_tokens(prompt_text_all or "", model_for_logging),
+                        "output_chars": len(response_text or ""),
+                        "output_tokens": output_tokens
+                        if isinstance(output_tokens, int)
+                        else estimate_tokens(response_text or "", model_for_logging),
+                        "duration_ms": dur_ms,
+                        "success": 1 if (response_text or "").strip() else 0,
+                        "error": error_msg,
+                    },
+                )
+                if generated_new and response_text:
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            "w",
+                            delete=False,
+                            encoding="utf-8",
+                            dir=initial_dir,
+                        ) as tmp:
+                            tmp.write(response_text)
+                            tmp_name = tmp.name
+                        shutil.move(tmp_name, json_path)
+                    except Exception as error:  # pragma: no cover - file IO failures
+                        report_exception("写入JSON汇总失败", error, level="warning")
     except Exception as error:  # pragma: no cover - global safeguard
         report_exception("调用Ollama生成汇总失败", error)
 
 
-def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -> None:
+def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -> bool:
     final_dir = os.path.join(enterprise_out, "final_results")
     os.makedirs(final_dir, exist_ok=True)
     try:
@@ -316,8 +376,8 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["条目", "基准文件及位置", "基准符号", "待检文件及位置", "待检符号"]
-    rows = []
+    columns: list[str] = []
+    rows: list[dict[str, str]] = []
     try:
         import pandas as pd  # type: ignore
     except ImportError as error:
@@ -376,14 +436,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             report_exception(f"读取JSON失败({os.path.basename(jf)})", error, level="warning")
             continue
 
-        # Derive original file name from json_*.txt for fallback when JSON omits it
-        try:
-            base_name = os.path.basename(jf)
-            orig_name = base_name[5:] if base_name.startswith("json_") else base_name
-            orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
-        except Exception:
-            orig_name = ""
-
         parsed_text = _extract_json_text(raw)
         try:
             data = json.loads(parsed_text)
@@ -394,71 +446,35 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         if not isinstance(data, list):
             continue
 
-        # Helper: prefer Chinese keys, fallback to English
-        def _pick(d: dict, *keys: str) -> str:
-            for key in keys:
-                value = d.get(key)
-                if value not in (None, ""):
+        def _stringify(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                try:
+                    return json.dumps(value, ensure_ascii=False)
+                except Exception:
                     return str(value)
-            return ""
+            return str(value)
 
         for row in data:
-            if not isinstance(row, dict):
-                continue
-            item_val = _pick(
-                row,
-                "条目",
-                "特征",
-                "技术文件内容",
-                "technical_file_content",
-                "特性",
-            )
-            standard_loc_val = _pick(
-                row,
-                "基准文件名和所述条目在基准文件中的位置",
-                "基准文件出处",
-                "企业标准出处",
-                "standard_source",
-            )
-            standard_symbol_val = _pick(
-                row,
-                "基准文件中的特殊特性分类（★、☆、/）",
-                "预期符号",
-                "企业标准",
-                "expected_symbol",
-                "enterprise_standard",
-            )
-            examined_loc_val = _pick(
-                row,
-                "待检查文件名和所述条目在基准文件中的位置",
-                "待检查文件名",
-                "技术文件名",
-                "待检查文件",
-                "technical_file_name",
-            )
-            if not examined_loc_val:
-                examined_loc_val = orig_name
-            examined_symbol_val = _pick(
-                row,
-                "待检查文件中的特殊特性分类（★、☆、/）",
-                "现有符号",
-                "current_symbol",
-                "不一致之处",
-            )
-            rows.append(
-                [
-                    item_val,
-                    standard_loc_val,
-                    standard_symbol_val,
-                    examined_loc_val,
-                    examined_symbol_val,
-                ]
-            )
+            normalized: dict[str, str] = {}
+            if isinstance(row, dict):
+                items = row.items()
+            else:
+                items = [("值", row)]
+            for key, value in items:
+                column_name = str(key).strip() or "值"
+                value_str = _stringify(value)
+                normalized[column_name] = value_str
+                if column_name not in columns:
+                    columns.append(column_name)
+            rows.append(normalized)
 
     csv_path: str | None = None
     xlsx_path: str | None = None
 
-    if rows:
+    if rows and columns:
+        table_rows = [{column: row.get(column, "") for column in columns} for row in rows]
         csv_path = os.path.join(
             final_dir,
             f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
@@ -467,15 +483,15 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
 
-                writer = csv.writer(handle)
-                writer.writerow(columns)
-                writer.writerows(rows)
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(table_rows)
         except Exception as error:
             report_exception("写入CSV失败", error, level="warning")
 
         if "pd" in locals() and pd is not None:
             try:
-                df = pd.DataFrame(rows, columns=columns)
+                df = pd.DataFrame(table_rows, columns=columns)
                 xlsx_path = os.path.join(
                     final_dir,
                     f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
@@ -507,6 +523,8 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             except Exception as error:
                 report_exception("生成下载链接失败", error, level="warning")
 
+    has_rows = bool(rows)
+
     try:
         pairs = []
         for fname in os.listdir(initial_dir):
@@ -517,7 +535,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 if os.path.isfile(resp_path):
                     pairs.append((os.path.join(initial_dir, fname), resp_path, base))
         if not pairs:
-            return
+            return has_rows
         try:
             from docx import Document  # type: ignore
         except ImportError as error:
@@ -525,7 +543,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 st.info("未安装 python-docx，暂无法生成Word文档。请安装 python-docx 后重试。")
             else:
                 report_exception("缺少 python-docx 依赖，跳过生成Word文档", error, level="warning")
-            return
+            return has_rows
         doc = Document()
         try:
             styles = doc.styles
@@ -604,5 +622,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
     except Exception as error:
         report_exception("生成分析过程Word失败", error, level="warning")
 
+    return has_rows
 
 __all__ = ["aggregate_outputs", "persist_compare_outputs", "summarize_with_ollama"]

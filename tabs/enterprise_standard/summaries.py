@@ -318,8 +318,8 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由"]
-    rows = []
+    columns: list[str] = []
+    rows: list[dict[str, str]] = []
     try:
         import pandas as pd  # type: ignore
     except ImportError as error:
@@ -378,14 +378,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             report_exception(f"读取JSON失败({os.path.basename(jf)})", error, level="warning")
             continue
 
-        # Derive original file name from json_*.txt for fallback when JSON omits it
-        try:
-            base_name = os.path.basename(jf)
-            orig_name = base_name[5:] if base_name.startswith("json_") else base_name
-            orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
-        except Exception:
-            orig_name = ""
-
         parsed_text = _extract_json_text(raw)
         try:
             data = json.loads(parsed_text)
@@ -396,38 +388,49 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         if not isinstance(data, list):
             continue
 
-        # Helper: prefer Chinese keys, fallback to English
-        def _kv(d: dict, cn_key: str, en_key: str) -> str:
-            return str(d.get(cn_key) or d.get(en_key) or "")
+        def _stringify(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                try:
+                    return json.dumps(value, ensure_ascii=False)
+                except Exception:
+                    return str(value)
+            return str(value)
 
         for row in data:
-            if not isinstance(row, dict):
-                continue
-            name_val = _kv(row, "技术文件名", "technical_file_name") or orig_name
-            content_val = _kv(row, "技术文件内容", "technical_file_content")
-            std_val = _kv(row, "企业标准", "enterprise_standard")
-            inconsistency_val = _kv(row, "不一致之处", "inconsistency")
-            reason_val = _kv(row, "理由", "reason")
-            rows.append([name_val, content_val, std_val, inconsistency_val, reason_val])
+            normalized: dict[str, str] = {}
+            if isinstance(row, dict):
+                items = row.items()
+            else:
+                items = [("值", row)]
+            for key, value in items:
+                column_name = str(key).strip() or "值"
+                value_str = _stringify(value)
+                normalized[column_name] = value_str
+                if column_name not in columns:
+                    columns.append(column_name)
+            rows.append(normalized)
 
     csv_path: str | None = None
     xlsx_path: str | None = None
 
-    if rows:
+    if rows and columns:
+        table_rows = [{column: row.get(column, "") for column in columns} for row in rows]
         csv_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         try:
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
 
-                writer = csv.writer(handle)
-                writer.writerow(columns)
-                writer.writerows(rows)
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(table_rows)
         except Exception as error:
             report_exception("写入CSV失败", error, level="warning")
 
         if "pd" in locals() and pd is not None:
             try:
-                df = pd.DataFrame(rows, columns=columns)
+                df = pd.DataFrame(table_rows, columns=columns)
                 xlsx_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
                 df.to_excel(xlsx_path, index=False)
             except Exception as error:

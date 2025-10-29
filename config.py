@@ -23,6 +23,8 @@ CONFIG = {
         "ollama_host_127": "http://10.31.60.127:11434",
         "ollama_host_9": "http://10.31.60.9:11434",
         "ollama_model": "gpt-oss:latest",
+        "ollama_cloud_host": "https://ollama.com",
+        "ollama_cloud_api_key": "ef86226e2d604f8b97e242ec41fa5258.etwvXKu049SpW5N_o1iswlwa",
         "openai_base_url": "https://sg.uiuiapi.com/v1",
         "openai_api_key": "sk-dDG9UBQHLshfb8Z5FYQQXFOZAe6FtUxltMwIxg0KNCSsGKjh",
         "openai_model": "gpt-3.5-turbo"

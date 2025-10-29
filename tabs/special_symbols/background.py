@@ -6,7 +6,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from config import CONFIG
 
@@ -111,8 +111,8 @@ def _clear_directory(directory: str) -> int:
 def _run_gpt_extraction(
     emitter: ProgressEmitter,
     publish: Callable[[Dict[str, object]], None],
-    client: Optional[OllamaClient],
-    model_name: str,
+    primary_client: Optional[OllamaClient],
+    primary_model_name: str,
     session_id: str,
     output_root: str,
     src_dir: str,
@@ -126,13 +126,17 @@ def _run_gpt_extraction(
     combined_log_template: str = "已生成汇总结果 {name}",
     progress_callback: Optional[Callable[[], None]] = None,
     control_handler: Optional[Callable[[str, str], bool]] = None,
+    fallback_client: Optional[OllamaClient] = None,
+    fallback_model_name: Optional[str] = None,
+    primary_label: str = "本地 gpt-oss",
+    fallback_label: str = "云端 gpt-oss",
 ) -> List[str]:
     names = sorted(file_names, key=lambda value: value.lower())
     if not names:
         return []
 
     emitter.set_stage(stage_label)
-    if client is None:
+    if primary_client is None and fallback_client is None:
         emitter.warning(client_unavailable_message)
         return []
 
@@ -175,42 +179,68 @@ def _run_gpt_extraction(
                 }
             }
         )
-        publish({"stage": stage_label, "message": f"调用 gpt-oss ({name})"})
-
-        start_ts = time.time()
+        attempts: List[Tuple[str, Optional[OllamaClient], Optional[str]]] = [
+            (primary_label, primary_client, primary_model_name),
+            (fallback_label, fallback_client, fallback_model_name or primary_model_name),
+        ]
         response_text = ""
         last_stats = None
-        try:
-            for chunk in client.chat(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt_text}],
-                stream=True,
-                options={"num_ctx": 40001},
-            ):
-                piece = (
-                    chunk.get("message", {}).get("content")
-                    or chunk.get("response")
-                    or ""
+        start_ts = 0.0
+        used_model_name = primary_model_name
+        call_success = False
+
+        for attempt_label, attempt_client, attempt_model in attempts:
+            if attempt_client is None or not attempt_model:
+                continue
+
+            publish({"stage": stage_label, "message": f"调用 {attempt_label} ({name})"})
+            start_ts = time.time()
+            response_text = ""
+            last_stats = None
+
+            try:
+                for chunk in attempt_client.chat(
+                    model=attempt_model,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    stream=True,
+                    options={"num_ctx": 40001},
+                ):
+                    piece = (
+                        chunk.get("message", {}).get("content")
+                        or chunk.get("response")
+                        or ""
+                    )
+                    if piece:
+                        response_text += piece
+                    last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+                    if control_handler and not control_handler(stage_label, f"{attempt_label} 流式响应（{name}）"):
+                        return outputs
+                used_model_name = attempt_model
+                call_success = True
+                break
+            except Exception as error:
+                report_exception(
+                    f"调用 {attempt_label} 失败({stage_label}:{name})",
+                    error,
+                    level="warning",
                 )
-                if piece:
-                    response_text += piece
-                last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-                if control_handler and not control_handler(stage_label, f"gpt-oss 流式响应（{name}）"):
-                    return outputs
-        except Exception as error:
-            report_exception(f"调用 gpt-oss 失败({stage_label}:{name})", error, level="warning")
-            publish(
-                {
-                    "stream": {
-                        "kind": "response",
-                        "file": name,
-                        "part": 1,
-                        "total_parts": 1,
-                        "engine": "gpt-oss",
-                        "text": f"调用 gpt-oss 失败：{error}",
+                publish(
+                    {
+                        "stream": {
+                            "kind": "response",
+                            "file": name,
+                            "part": 1,
+                            "total_parts": 1,
+                            "engine": attempt_model,
+                            "text": f"调用 {attempt_label} 失败：{error}",
+                        }
                     }
-                }
-            )
+                )
+                if fallback_client and attempt_client is primary_client:
+                    emitter.warning(f"{attempt_label} 调用失败，尝试 {fallback_label}")
+                continue
+
+        if not call_success:
             if progress_callback:
                 progress_callback()
             if control_handler and not control_handler(stage_label, f"已跳过（{name}）"):
@@ -226,7 +256,7 @@ def _run_gpt_extraction(
                     "file": name,
                     "part": 1,
                     "total_parts": 1,
-                    "engine": "gpt-oss",
+                    "engine": used_model_name,
                     "text": response_clean,
                 }
             }
@@ -238,15 +268,15 @@ def _run_gpt_extraction(
             {
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "engine": "ollama",
-                "model": model_name,
+                "model": used_model_name,
                 "session_id": session_id,
                 "file": name,
                 "part": 1,
                 "phase": stage_label,
                 "prompt_chars": len(prompt_text),
-                "prompt_tokens": estimate_tokens(prompt_text, model_name),
+                "prompt_tokens": estimate_tokens(prompt_text, used_model_name),
                 "output_chars": len(response_clean),
-                "output_tokens": estimate_tokens(response_clean, model_name),
+                "output_tokens": estimate_tokens(response_clean, used_model_name),
                 "duration_ms": duration_ms,
                 "success": 1 if response_clean else 0,
                 "stats": last_stats or {},
@@ -518,14 +548,29 @@ def run_special_symbols_job(
     exam_src_dir = examined_txt_filtered_dir if _list_txt_files(examined_txt_filtered_dir) else examined_txt_dir
     exam_txt_files = _list_txt_files(exam_src_dir)
 
-    model_name = CONFIG["llm"].get("ollama_model") or "gpt-oss:latest"
-    ollama_client: Optional[OllamaClient] = None
+    local_model_name = CONFIG["llm"].get("ollama_model") or "gpt-oss:latest"
+    cloud_extraction_model = "gpt-oss:20b-cloud"
+    cloud_comparison_model = "deepseek-v3.1:671b-cloud"
+    local_ollama_client: Optional[OllamaClient] = None
+    cloud_ollama_client: Optional[OllamaClient] = None
     if standards_txt_filtered_files or exam_txt_files:
         try:
             host = resolve_ollama_host("ollama_9")
-            ollama_client = OllamaClient(host=host)
+            local_ollama_client = OllamaClient(host=host)
         except Exception as error:
-            report_exception("初始化 gpt-oss 客户端失败", error, level="warning")
+            report_exception("初始化本地 gpt-oss 客户端失败", error, level="warning")
+        cloud_host = CONFIG["llm"].get("ollama_cloud_host")
+        cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
+        if cloud_host and cloud_api_key:
+            try:
+                cloud_ollama_client = OllamaClient(
+                    host=cloud_host,
+                    headers={"Authorization": f"Bearer {cloud_api_key}"},
+                )
+            except Exception as error:
+                report_exception("初始化云端 gpt-oss 客户端失败", error, level="warning")
+        else:
+            emitter.warning("未配置云端 gpt-oss，无法启用云端备份")
 
     standards_txt_filtered_further_dir = os.path.join(output_root, "standards_txt_filtered_further")
     standards_outputs: List[str] = []
@@ -548,8 +593,8 @@ def run_special_symbols_job(
         standards_outputs = _run_gpt_extraction(
             emitter=emitter,
             publish=publish,
-            client=ollama_client,
-            model_name=model_name,
+            primary_client=local_ollama_client,
+            primary_model_name=local_model_name,
             session_id=session_id,
             output_root=output_root,
             src_dir=standards_txt_filtered_dir,
@@ -562,6 +607,8 @@ def run_special_symbols_job(
             combined_prefix="standards_txt_filtered_final",
             progress_callback=advance_ollama_progress if increment else None,
             control_handler=ensure_running,
+            fallback_client=cloud_ollama_client,
+            fallback_model_name=cloud_extraction_model,
         )
         if stop_announced:
             return {"final_results": []}
@@ -584,8 +631,8 @@ def run_special_symbols_job(
     exam_outputs = _run_gpt_extraction(
         emitter=emitter,
         publish=publish,
-        client=ollama_client,
-        model_name=model_name,
+        primary_client=local_ollama_client,
+        primary_model_name=local_model_name,
         session_id=session_id,
         output_root=output_root,
         src_dir=exam_src_dir,
@@ -598,6 +645,8 @@ def run_special_symbols_job(
         combined_prefix="examined_txt_filtered_final",
         progress_callback=advance_ollama_progress if increment else None,
         control_handler=ensure_running,
+        fallback_client=cloud_ollama_client,
+        fallback_model_name=cloud_extraction_model,
     )
     if stop_announced:
         return {"final_results": []}
@@ -625,7 +674,7 @@ def run_special_symbols_job(
 
     emitter.set_stage("compare")
 
-    if ollama_client is None:
+    if cloud_ollama_client is None and local_ollama_client is None:
         emitter.error("gpt-oss 客户端不可用，无法执行对比分析")
         publish(
             {
@@ -670,6 +719,15 @@ def run_special_symbols_job(
 
     if not ensure_running("compare", "准备执行对比分析"):
         return {"final_results": []}
+    attempt_sequence: List[Tuple[str, Optional[OllamaClient], Optional[str]]] = [
+        ("云端 deepseek", cloud_ollama_client, cloud_comparison_model),
+        ("本地 gpt-oss", local_ollama_client, local_model_name),
+    ]
+
+    first_engine = next(
+        (attempt_model for _, attempt_client, attempt_model in attempt_sequence if attempt_client and attempt_model),
+        cloud_comparison_model,
+    )
     publish(
         {
             "stream": {
@@ -677,54 +735,77 @@ def run_special_symbols_job(
                 "file": f"{comparison_name}.txt",
                 "part": 1,
                 "total_parts": 1,
-                "engine": "gpt-oss",
+                "engine": first_engine,
                 "text": combined_prompt,
             }
         }
     )
-    emitter.info("正在调用 gpt-oss 进行对比分析")
 
-    start_ts = time.time()
     response_text = ""
     last_stats = None
-    try:
-        for chunk in ollama_client.chat(
-            model=model_name,
-            messages=[{"role": "user", "content": combined_prompt}],
-            stream=True,
-            options={"num_ctx": 40001},
-        ):
-            piece = (
-                chunk.get("message", {}).get("content")
-                or chunk.get("response")
-                or ""
-            )
-            if piece:
-                response_text += piece
+    used_model_name: Optional[str] = None
+    start_ts = 0.0
+    last_error: Optional[Exception] = None
+
+    for attempt_label, attempt_client, attempt_model in attempt_sequence:
+        if attempt_client is None or not attempt_model:
+            continue
+
+        emitter.info(f"正在调用 {attempt_label} 进行对比分析")
+        start_ts = time.time()
+        response_text = ""
+        last_stats = None
+        try:
+            for chunk in attempt_client.chat(
+                model=attempt_model,
+                messages=[{"role": "user", "content": combined_prompt}],
+                stream=True,
+                options={"num_ctx": 40001},
+            ):
+                piece = (
+                    chunk.get("message", {}).get("content")
+                    or chunk.get("response")
+                    or ""
+                )
+                if piece:
+                    response_text += piece
+                publish(
+                    {
+                        "stream": {
+                            "kind": "response",
+                            "file": f"{comparison_name}.txt",
+                            "part": 1,
+                            "total_parts": 1,
+                            "engine": attempt_model,
+                            "text": response_text,
+                        }
+                    }
+                )
+                last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+                if not ensure_running("compare", f"{attempt_label} 对比分析（{comparison_name}）"):
+                    return {"final_results": []}
+            used_model_name = attempt_model
+            last_error = None
+            break
+        except Exception as error:
+            last_error = error
+            report_exception(f"调用 {attempt_label} 对比分析失败", error, level="warning")
             publish(
                 {
-                    "stream": {
-                        "kind": "response",
-                        "file": f"{comparison_name}.txt",
-                        "part": 1,
-                        "total_parts": 1,
-                        "engine": "gpt-oss",
-                        "text": response_text,
-                    }
+                    "stage": "compare",
+                    "message": f"调用 {attempt_label} 失败: {error}",
+                    "error": str(error),
                 }
             )
-            last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-            if not ensure_running("compare", f"gpt-oss 对比分析（{comparison_name}）"):
-                return {"final_results": []}
-    except Exception as error:
-        publish(
-            {
-                "stage": "compare",
-                "message": f"调用 gpt-oss 失败: {error}",
-                "error": str(error),
-            }
-        )
-        raise
+            emitter.warning(f"{attempt_label} 调用失败，尝试备用通道")
+            continue
+
+    if used_model_name is None:
+        message = "云端与本地 gpt-oss 均不可用，无法执行对比分析"
+        if last_error:
+            message = f"{message}：{last_error}"
+        publish({"status": "failed", "stage": "compare", "message": message})
+        return {"final_results": []}
 
     duration_ms = int((time.time() - start_ts) * 1000)
     if not ensure_running("compare", "对比分析完成"):
@@ -734,23 +815,23 @@ def run_special_symbols_job(
     log_llm_metrics(
         output_root,
         session_id,
-        {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "engine": "ollama",
-            "model": model_name,
-            "session_id": session_id,
-            "file": comparison_name,
-            "part": 1,
-            "phase": "compare",
-            "prompt_chars": len(combined_prompt),
-            "prompt_tokens": estimate_tokens(combined_prompt, model_name),
-            "output_chars": len(response_clean),
-            "output_tokens": estimate_tokens(response_clean, model_name),
-            "duration_ms": duration_ms,
-            "success": 1 if response_clean else 0,
-            "stats": last_stats or {},
-            "error": "",
-        },
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "engine": "ollama",
+                "model": used_model_name,
+                "session_id": session_id,
+                "file": comparison_name,
+                "part": 1,
+                "phase": "compare",
+                "prompt_chars": len(combined_prompt),
+                "prompt_tokens": estimate_tokens(combined_prompt, used_model_name),
+                "output_chars": len(response_clean),
+                "output_tokens": estimate_tokens(response_clean, used_model_name),
+                "duration_ms": duration_ms,
+                "success": 1 if response_clean else 0,
+                "stats": last_stats or {},
+                "error": "",
+            },
     )
 
     if increment:
@@ -771,9 +852,10 @@ def run_special_symbols_job(
     try:
         if not ensure_running("aggregate", "生成导出文件"):
             return {"final_results": []}
-        aggregate_outputs(initial_results_dir, output_root, session_id)
+        has_comparison_rows = aggregate_outputs(initial_results_dir, output_root, session_id)
     except Exception as error:
         report_exception("汇总导出失败", error, level="warning")
+        has_comparison_rows = False
 
     result_files: List[str] = []
     try:
@@ -796,10 +878,19 @@ def run_special_symbols_job(
 
     has_csv = any(path.lower().endswith(".csv") for path in result_files)
     has_xlsx = any(path.lower().endswith(".xlsx") for path in result_files)
+    no_differences = not has_comparison_rows
     if has_csv and has_xlsx:
         publish_progress(100.0)
+        progress_value = 100.0
+    elif no_differences:
+        publish_progress(100.0)
+        progress_value = 100.0
     elif progress_value < ollama_target:
         publish_progress(min(ollama_target, progress_value))
+
+    final_message = "特殊特性符号检查完成"
+    if no_differences:
+        final_message = "已完成比对，但未发现独特性符号不一致的地方。点击下方下载分析过程。"
 
     if not ensure_running("completed", "准备发布结果"):
         return {"final_results": []}
@@ -807,11 +898,12 @@ def run_special_symbols_job(
         {
             "status": "succeeded",
             "stage": "completed",
-            "message": "特殊特性符号检查完成",
+            "message": final_message,
             "processed_chunks": processed_chunks,
             "total_chunks": total_chunks,
             "result_files": result_files,
             "progress": progress_value,
+            "no_differences": no_differences,
         }
     )
     return {"final_results": result_files}

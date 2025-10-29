@@ -267,11 +267,12 @@ def render_special_symbols_check_tab(session_id):
     with col_main:
         st.subheader("🔍 特殊特性符号检查")
         st.markdown(
-            "第1步：重要！在右侧文件列表清空上一轮任务残留（结果可按需保留）。  \n"
-            "第2步：上传特殊特性基准文件与待检查文件。  \n"
-            "第3步：点击开始，AI 会比对待检文件中的符号标注并定位与基准文件不一致的内容。  \n"
-            "第4步：在右侧文件列表下载分析结果。  \n"
+            "第1步：重要！在右侧文件列表清空上一轮任务的文件（可保留分析结果）。  \n"
+            "第2步：上传基准文件与待检查文件，一次可上传多份文件。  \n"
+            "第3步：点击开始，AI 会比对待检文件中的符号与基准文件不一致的地方。  \n"
+            "第4步：在下方或右侧文件列表下载分析结果。  \n"
             "审核时间取决于文件数量与长度，通常约需 10~60 分钟。  \n"
+            "可点击演示按钮，快速了解检查过程。  \n"
         )
 
         # Two uploaders side by side
@@ -455,8 +456,6 @@ def render_special_symbols_check_tab(session_id):
                 # st.markdown(f"**任务状态：{_label}**")
                 # if stage:
                 #     st.caption(f"当前阶段：{stage}")
-                if message:
-                    st.write(message)
                 # if pid:
                 #     st.caption(f"后台进程ID：{pid}")
                 total_chunks = int(job_status.get("total_chunks") or 0)
@@ -481,8 +480,16 @@ def render_special_symbols_check_tab(session_id):
                 elif status_value in {"queued", "running"}:
                     st.progress(0.0)
                 result_files = job_status.get("result_files") or []
-                if result_files and status_value == "succeeded":
-                    st.success("已生成结果文件，可直接下载：")
+                no_differences = bool(job_status.get("no_differences"))
+                no_diff_message = "已完成比对，但未发现独特性符号不一致的地方。点击下方下载分析过程。"
+                if message and not (no_differences and message.strip() == no_diff_message):
+                    st.write(message)
+                if status_value == "succeeded":
+                    if no_differences:
+                        st.success(no_diff_message)
+                    elif result_files:
+                        st.success("已生成结果文件，可直接下载：")
+                if status_value == "succeeded" and result_files:
                     for idx, result_path in enumerate(result_files):
                         if not isinstance(result_path, str):
                             continue
