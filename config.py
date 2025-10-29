@@ -63,6 +63,22 @@ CONFIG = {
                     "RetrievalQA-f0f31": {},
                     "CombineDocsChain-2f68e": {}
                 }
+            },
+            "parameters_check": {
+                "workflow_id": "",
+                "flow_id": "0f14f0e3adc34ecb8a649bf5135e32b7",
+                "flow_input_node_id": "RetrievalQA-f0f31",
+                "flow_milvus_node_id": "Milvus-cyR5W",
+                "flow_es_node_id": "ElasticKeywordsSearch-1c80e",
+                "tweaks": {
+                    "MixEsVectorRetriever-J35CZ": {},
+                    "Milvus-cyR5W": {},
+                    "PromptTemplate-bs0vj": {},
+                    "BishengLLM-768ac": {},
+                    "ElasticKeywordsSearch-1c80e": {},
+                    "RetrievalQA-f0f31": {},
+                    "CombineDocsChain-2f68e": {}
+                }
             }
         }
     },
