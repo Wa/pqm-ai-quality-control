@@ -376,8 +376,8 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["条目", "基准文件及位置", "基准符号", "待检文件及位置", "待检符号"]
-    rows = []
+    columns: list[str] = ["源文件"]
+    rows: list[dict[str, str]] = []
     try:
         import pandas as pd  # type: ignore
     except ImportError as error:
@@ -454,71 +454,35 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         if not isinstance(data, list):
             continue
 
-        # Helper: prefer Chinese keys, fallback to English
-        def _pick(d: dict, *keys: str) -> str:
-            for key in keys:
-                value = d.get(key)
-                if value not in (None, ""):
+        def _stringify(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                try:
+                    return json.dumps(value, ensure_ascii=False)
+                except Exception:
                     return str(value)
-            return ""
+            return str(value)
 
         for row in data:
-            if not isinstance(row, dict):
-                continue
-            item_val = _pick(
-                row,
-                "条目",
-                "特征",
-                "技术文件内容",
-                "technical_file_content",
-                "特性",
-            )
-            standard_loc_val = _pick(
-                row,
-                "基准文件名和所述条目在基准文件中的位置",
-                "基准文件出处",
-                "企业标准出处",
-                "standard_source",
-            )
-            standard_symbol_val = _pick(
-                row,
-                "基准文件中的特殊特性分类（★、☆、/）",
-                "预期符号",
-                "企业标准",
-                "expected_symbol",
-                "enterprise_standard",
-            )
-            examined_loc_val = _pick(
-                row,
-                "待检查文件名和所述条目在基准文件中的位置",
-                "待检查文件名",
-                "技术文件名",
-                "待检查文件",
-                "technical_file_name",
-            )
-            if not examined_loc_val:
-                examined_loc_val = orig_name
-            examined_symbol_val = _pick(
-                row,
-                "待检查文件中的特殊特性分类（★、☆、/）",
-                "现有符号",
-                "current_symbol",
-                "不一致之处",
-            )
-            rows.append(
-                [
-                    item_val,
-                    standard_loc_val,
-                    standard_symbol_val,
-                    examined_loc_val,
-                    examined_symbol_val,
-                ]
-            )
+            normalized: dict[str, str] = {"源文件": orig_name}
+            if isinstance(row, dict):
+                items = row.items()
+            else:
+                items = [("值", row)]
+            for key, value in items:
+                column_name = str(key).strip() or "值"
+                value_str = _stringify(value)
+                normalized[column_name] = value_str
+                if column_name not in columns:
+                    columns.append(column_name)
+            rows.append(normalized)
 
     csv_path: str | None = None
     xlsx_path: str | None = None
 
-    if rows:
+    if rows and columns:
+        table_rows = [{column: row.get(column, "") for column in columns} for row in rows]
         csv_path = os.path.join(
             final_dir,
             f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
@@ -527,15 +491,15 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
 
-                writer = csv.writer(handle)
-                writer.writerow(columns)
-                writer.writerows(rows)
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(table_rows)
         except Exception as error:
             report_exception("写入CSV失败", error, level="warning")
 
         if "pd" in locals() and pd is not None:
             try:
-                df = pd.DataFrame(rows, columns=columns)
+                df = pd.DataFrame(table_rows, columns=columns)
                 xlsx_path = os.path.join(
                     final_dir,
                     f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
