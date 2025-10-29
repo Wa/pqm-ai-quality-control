@@ -363,7 +363,7 @@ def summarize_with_ollama(
         report_exception("调用Ollama生成汇总失败", error)
 
 
-def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -> None:
+def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) -> bool:
     final_dir = os.path.join(enterprise_out, "final_results")
     os.makedirs(final_dir, exist_ok=True)
     try:
@@ -376,7 +376,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns: list[str] = ["源文件"]
+    columns: list[str] = []
     rows: list[dict[str, str]] = []
     try:
         import pandas as pd  # type: ignore
@@ -436,14 +436,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             report_exception(f"读取JSON失败({os.path.basename(jf)})", error, level="warning")
             continue
 
-        # Derive original file name from json_*.txt for fallback when JSON omits it
-        try:
-            base_name = os.path.basename(jf)
-            orig_name = base_name[5:] if base_name.startswith("json_") else base_name
-            orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
-        except Exception:
-            orig_name = ""
-
         parsed_text = _extract_json_text(raw)
         try:
             data = json.loads(parsed_text)
@@ -465,7 +457,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             return str(value)
 
         for row in data:
-            normalized: dict[str, str] = {"源文件": orig_name}
+            normalized: dict[str, str] = {}
             if isinstance(row, dict):
                 items = row.items()
             else:
@@ -531,6 +523,8 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             except Exception as error:
                 report_exception("生成下载链接失败", error, level="warning")
 
+    has_rows = bool(rows)
+
     try:
         pairs = []
         for fname in os.listdir(initial_dir):
@@ -541,7 +535,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 if os.path.isfile(resp_path):
                     pairs.append((os.path.join(initial_dir, fname), resp_path, base))
         if not pairs:
-            return
+            return has_rows
         try:
             from docx import Document  # type: ignore
         except ImportError as error:
@@ -549,7 +543,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                 st.info("未安装 python-docx，暂无法生成Word文档。请安装 python-docx 后重试。")
             else:
                 report_exception("缺少 python-docx 依赖，跳过生成Word文档", error, level="warning")
-            return
+            return has_rows
         doc = Document()
         try:
             styles = doc.styles
@@ -628,5 +622,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
     except Exception as error:
         report_exception("生成分析过程Word失败", error, level="warning")
 
+    return has_rows
 
 __all__ = ["aggregate_outputs", "persist_compare_outputs", "summarize_with_ollama"]

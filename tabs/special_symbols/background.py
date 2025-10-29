@@ -852,9 +852,10 @@ def run_special_symbols_job(
     try:
         if not ensure_running("aggregate", "生成导出文件"):
             return {"final_results": []}
-        aggregate_outputs(initial_results_dir, output_root, session_id)
+        has_comparison_rows = aggregate_outputs(initial_results_dir, output_root, session_id)
     except Exception as error:
         report_exception("汇总导出失败", error, level="warning")
+        has_comparison_rows = False
 
     result_files: List[str] = []
     try:
@@ -877,10 +878,19 @@ def run_special_symbols_job(
 
     has_csv = any(path.lower().endswith(".csv") for path in result_files)
     has_xlsx = any(path.lower().endswith(".xlsx") for path in result_files)
+    no_differences = not has_comparison_rows
     if has_csv and has_xlsx:
         publish_progress(100.0)
+        progress_value = 100.0
+    elif no_differences:
+        publish_progress(100.0)
+        progress_value = 100.0
     elif progress_value < ollama_target:
         publish_progress(min(ollama_target, progress_value))
+
+    final_message = "特殊特性符号检查完成"
+    if no_differences:
+        final_message = "已完成比对，但未发现独特性符号不一致的地方。点击下方下载分析过程。"
 
     if not ensure_running("completed", "准备发布结果"):
         return {"final_results": []}
@@ -888,11 +898,12 @@ def run_special_symbols_job(
         {
             "status": "succeeded",
             "stage": "completed",
-            "message": "特殊特性符号检查完成",
+            "message": final_message,
             "processed_chunks": processed_chunks,
             "total_chunks": total_chunks,
             "result_files": result_files,
             "progress": progress_value,
+            "no_differences": no_differences,
         }
     )
     return {"final_results": result_files}

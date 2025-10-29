@@ -318,7 +318,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns: list[str] = ["源文件"]
+    columns: list[str] = []
     rows: list[dict[str, str]] = []
     try:
         import pandas as pd  # type: ignore
@@ -378,14 +378,6 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             report_exception(f"读取JSON失败({os.path.basename(jf)})", error, level="warning")
             continue
 
-        # Derive original file name from json_*.txt for fallback when JSON omits it
-        try:
-            base_name = os.path.basename(jf)
-            orig_name = base_name[5:] if base_name.startswith("json_") else base_name
-            orig_name = re.sub(r"_pt\d+\.txt$", "", orig_name)
-        except Exception:
-            orig_name = ""
-
         parsed_text = _extract_json_text(raw)
         try:
             data = json.loads(parsed_text)
@@ -407,7 +399,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             return str(value)
 
         for row in data:
-            normalized: dict[str, str] = {"源文件": orig_name}
+            normalized: dict[str, str] = {}
             if isinstance(row, dict):
                 items = row.items()
             else:
