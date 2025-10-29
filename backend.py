@@ -73,6 +73,7 @@ class EnterpriseJobStatus(BaseModel):
     message: Optional[str] = None
     processed_chunks: int = 0
     total_chunks: int = 0
+    progress: float = 0.0
     result_files: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     logs: List[Dict[str, Any]] = Field(default_factory=list)
@@ -94,6 +95,7 @@ class JobRecord:
     message: Optional[str] = None
     processed_chunks: int = 0
     total_chunks: int = 0
+    progress: float = 0.0
     result_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
     logs: List[Dict[str, Any]] = field(default_factory=list)
@@ -147,6 +149,7 @@ def _record_to_status(record: JobRecord) -> EnterpriseJobStatus:
         message=record.message,
         processed_chunks=record.processed_chunks,
         total_chunks=record.total_chunks,
+        progress=record.progress,
         result_files=record.result_files,
         error=record.error,
         logs=record.logs,
@@ -179,6 +182,11 @@ def _update_job(job_id: str, update: Dict[str, Any]) -> None:
         if "total_chunks" in update:
             try:
                 record.total_chunks = int(update["total_chunks"])  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                pass
+        if "progress" in update:
+            try:
+                record.progress = float(update["progress"])  # type: ignore[arg-type]
             except (ValueError, TypeError):
                 pass
         if "result_files" in update:

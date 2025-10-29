@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import mimetypes
 import re
 import shutil
 import time
@@ -460,16 +461,63 @@ def render_special_symbols_check_tab(session_id):
                 #     st.caption(f"后台进程ID：{pid}")
                 total_chunks = int(job_status.get("total_chunks") or 0)
                 processed_chunks = int(job_status.get("processed_chunks") or 0)
-                with st.spinner(f"**任务状态：{_label}**"):
-                    if total_chunks > 0:
-                        progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
-                        st.progress(progress_value)
-                        st.caption(f"进度：{1 + int(progress_value*99)}% ")
-                    elif status_value in {"queued", "running"}:
-                        st.progress(0.0)
+                progress_percent_raw = job_status.get("progress")
+                progress_percent = None
+                if progress_percent_raw is not None:
+                    try:
+                        progress_percent = float(progress_percent_raw)
+                    except (TypeError, ValueError):
+                        progress_percent = None
+                st.markdown(f"**任务状态：{_label}**")
+                if progress_percent is not None:
+                    capped_percent = min(max(progress_percent, 0.0), 100.0)
+                    st.progress(capped_percent / 100.0)
+                    display_percent = max(1, int(round(capped_percent)))
+                    st.caption(f"进度：{display_percent}% ")
+                elif total_chunks > 0:
+                    progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
+                    st.progress(progress_value)
+                    st.caption(f"进度：{1 + int(progress_value*99)}% ")
+                elif status_value in {"queued", "running"}:
+                    st.progress(0.0)
                 result_files = job_status.get("result_files") or []
                 if result_files and status_value == "succeeded":
-                    st.write("已生成结果文件，在右边文件列表处下载分析结果。")
+                    st.success("已生成结果文件，可直接下载：")
+                    for idx, result_path in enumerate(result_files):
+                        if not isinstance(result_path, str):
+                            continue
+                        file_path = result_path
+                        if not os.path.isfile(file_path):
+                            continue
+                        file_name = os.path.basename(file_path)
+                        mime_type, _ = mimetypes.guess_type(file_name)
+                        if mime_type is None:
+                            if file_name.lower().endswith(".docx"):
+                                mime_type = (
+                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                )
+                            elif file_name.lower().endswith(".xlsx"):
+                                mime_type = (
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                            elif file_name.lower().endswith(".csv"):
+                                mime_type = "text/csv"
+                            elif file_name.lower().endswith(".txt"):
+                                mime_type = "text/plain"
+                            else:
+                                mime_type = "application/octet-stream"
+                        try:
+                            with open(file_path, "rb") as handle:
+                                file_bytes = handle.read()
+                        except OSError:
+                            continue
+                        st.download_button(
+                            label=f"下载 {file_name}",
+                            data=file_bytes,
+                            file_name=file_name,
+                            mime=mime_type,
+                            key=f"special_symbols_result_{session_id}_{idx}",
+                        )
                 logs = job_status.get("logs")
                 stream_events = job_status.get("stream_events")
                 if isinstance(stream_events, list) and stream_events:

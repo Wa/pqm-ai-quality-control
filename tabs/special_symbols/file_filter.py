@@ -216,26 +216,47 @@ def filter_text_lines(lines: Iterable[str], sheet_name: str, config: FilterConfi
     return kept
 
 
-def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] = None) -> dict:
-    """Filter .txt files from source_dir into target_dir based on heuristics.
+def run_filtering(
+    source_dir: str,
+    target_dir: str,
+    config_path: Optional[str] = None,
+    name_exclude_substrings: Optional[Iterable[str]] = None,
+) -> dict:
+    """Filter .txt files from ``source_dir`` into ``target_dir`` based on heuristics.
 
     Returns a summary dict with keys: kept, dropped, empty_after_filter, log_path
     """
 
     os.makedirs(target_dir, exist_ok=True)
-    cfg = load_config(config_path)
+    # Phase 1 redesign: retain only the symbol presence requirement while keeping
+    # the existing output handling & audit flow. Config loading is preserved for
+    # compatibility, though the gating heuristics defined there are no longer
+    # applied during this phase.
+    load_config(config_path)
+    name_excludes: List[str] = []
+    if name_exclude_substrings:
+        name_excludes = [s for s in name_exclude_substrings if s]
     kept = 0
     dropped = 0
     emptied = 0
     excluded: List[str] = []
+    candidates: List[Tuple[str, str]] = []
+
     for name in sorted(os.listdir(source_dir)):
         src_path = os.path.join(source_dir, name)
         if not os.path.isfile(src_path) or not name.lower().endswith(".txt"):
             continue
-        keep, sheet, reason = should_keep_txt(name, cfg)
-        if not keep:
-            dropped += 1
-            excluded.append(f"{name}\t{reason}")
+        lowered = name.lower()
+        excluded_by_name = False
+        for needle in name_excludes:
+            # perform case-insensitive comparisons while keeping the original
+            # filename in the log for readability
+            if needle.lower() in lowered:
+                dropped += 1
+                excluded.append(f"{name}\tname_excluded:{needle}")
+                excluded_by_name = True
+                break
+        if excluded_by_name:
             continue
         try:
             with open(src_path, "r", encoding="utf-8", errors="ignore") as handle:
@@ -249,21 +270,30 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
             dropped += 1
             excluded.append(f"{name}\tno_special_stars")
             continue
-        lines = content.splitlines(True)
-        filtered_lines = filter_text_lines(lines, sheet, cfg)
-        if not filtered_lines:
-            emptied += 1
-            excluded.append(f"{name}\tempty_after_filter")
-            continue
+        candidates.append((name, content))
+
+    if candidates:
+        try:
+            for existing in os.listdir(target_dir):
+                existing_path = os.path.join(target_dir, existing)
+                if os.path.isfile(existing_path):
+                    try:
+                        os.remove(existing_path)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    for name, content in candidates:
         dst_path = os.path.join(target_dir, name)
         try:
             with open(dst_path, "w", encoding="utf-8") as writer:
-                writer.writelines(filtered_lines)
+                writer.write(content)
             kept += 1
         except Exception:
             dropped += 1
             excluded.append(f"{name}\twrite_error")
-    # write log
+
     log_path = os.path.join(target_dir, "excluded_files.log")
     try:
         if excluded:
@@ -271,6 +301,7 @@ def run_filtering(source_dir: str, target_dir: str, config_path: Optional[str] =
                 log.write("\n".join(excluded))
     except Exception:
         log_path = ""
+
     return {"kept": kept, "dropped": dropped, "empty_after_filter": emptied, "log_path": log_path}
 
 

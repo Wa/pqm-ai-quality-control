@@ -1,4 +1,4 @@
-"""Post-processing helpers for enterprise standard comparisons."""
+"""Post-processing helpers for the special symbols workflow."""
 from __future__ import annotations
 
 import json
@@ -61,21 +61,19 @@ def summarize_with_ollama(
     try:
         original_name = name_no_ext
         prompt_lines = [
-            "你是一个严谨的结构化信息抽取助手。以下内容来自一个基于 RAG 的大语言模型 (RAG-LLM) 系统，",
-            "用于将若干技术文件与企业标准进行逐条比对，输出发现的不符合项及其理由。本文件对应的原始技术文件名称为：",
-            f"{original_name}。",
-            "\n请将随后的全文内容转换为 JSON 数组（list of objects），每个对象包含如下五个键：",
-            f"- 技术文件名：\"{original_name}\"",
-            "- 技术文件内容：与该条不一致点相关的技术文件条目或段落名称/编号/摘要",
-            "- 企业标准：被对比的企业标准条款名称/编号/摘要",
-            "- 不一致之处：不符合或存在差异的具体点，尽量具体明确",
-            "- 理由：判断不一致的依据与简要解释（保持客观、可追溯）",
+            "你是一个严谨的结构化信息抽取助手。",
+            "\n请将以下内容转换为 JSON 数组，每个对象包含如下几个键：",
+            "- 条目（即特征/特性/过程）",
+            "- 基准文件名和所述条目在基准文件中的位置",
+            "- 基准文件中的特殊特性分类（★、☆、/）",
+            "- 待检查文件名和所述条目在基准文件中的位置",
+            "- 待检查文件中的特殊特性分类（★、☆、/）",
             "\n要求：",
-            "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本），键名使用上述中文；",
+            "1) 仅输出严格的 JSON（UTF-8，无注释、无多余文本）；",
             "2) 若内容包含多处对比，按条目拆分为多条 JSON 对象；",
             "3) 若某处信息缺失，请以空字符串 \"\" 占位，不要编造；",
-            "4) 尽量保留可用于追溯定位的原文线索（如编号、标题、页码等）于相应字段中。",
-            "\n下面是需要转换为 JSON 的原始比对输出：\n\n",
+            "4) 尽量保留可用于追溯定位的原文线索（如文件名、SHEET名、页码等）于相应字段中。",
+            "\n下面是需要转换为 JSON 的内容：\n\n",
         ]
         instruction = "".join(prompt_lines)
         text = full_out_text or ""
@@ -318,7 +316,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         report_exception("读取初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["技术文件名", "技术文件内容", "企业标准", "不一致之处", "理由"]
+    columns = ["条目", "基准文件及位置", "基准符号", "待检文件及位置", "待检符号"]
     rows = []
     try:
         import pandas as pd  # type: ignore
@@ -397,24 +395,74 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             continue
 
         # Helper: prefer Chinese keys, fallback to English
-        def _kv(d: dict, cn_key: str, en_key: str) -> str:
-            return str(d.get(cn_key) or d.get(en_key) or "")
+        def _pick(d: dict, *keys: str) -> str:
+            for key in keys:
+                value = d.get(key)
+                if value not in (None, ""):
+                    return str(value)
+            return ""
 
         for row in data:
             if not isinstance(row, dict):
                 continue
-            name_val = _kv(row, "技术文件名", "technical_file_name") or orig_name
-            content_val = _kv(row, "技术文件内容", "technical_file_content")
-            std_val = _kv(row, "企业标准", "enterprise_standard")
-            inconsistency_val = _kv(row, "不一致之处", "inconsistency")
-            reason_val = _kv(row, "理由", "reason")
-            rows.append([name_val, content_val, std_val, inconsistency_val, reason_val])
+            item_val = _pick(
+                row,
+                "条目",
+                "特征",
+                "技术文件内容",
+                "technical_file_content",
+                "特性",
+            )
+            standard_loc_val = _pick(
+                row,
+                "基准文件名和所述条目在基准文件中的位置",
+                "基准文件出处",
+                "企业标准出处",
+                "standard_source",
+            )
+            standard_symbol_val = _pick(
+                row,
+                "基准文件中的特殊特性分类（★、☆、/）",
+                "预期符号",
+                "企业标准",
+                "expected_symbol",
+                "enterprise_standard",
+            )
+            examined_loc_val = _pick(
+                row,
+                "待检查文件名和所述条目在基准文件中的位置",
+                "待检查文件名",
+                "技术文件名",
+                "待检查文件",
+                "technical_file_name",
+            )
+            if not examined_loc_val:
+                examined_loc_val = orig_name
+            examined_symbol_val = _pick(
+                row,
+                "待检查文件中的特殊特性分类（★、☆、/）",
+                "现有符号",
+                "current_symbol",
+                "不一致之处",
+            )
+            rows.append(
+                [
+                    item_val,
+                    standard_loc_val,
+                    standard_symbol_val,
+                    examined_loc_val,
+                    examined_symbol_val,
+                ]
+            )
 
     csv_path: str | None = None
     xlsx_path: str | None = None
 
     if rows:
-        csv_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        csv_path = os.path.join(
+            final_dir,
+            f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
         try:
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
@@ -428,7 +476,10 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
         if "pd" in locals() and pd is not None:
             try:
                 df = pd.DataFrame(rows, columns=columns)
-                xlsx_path = os.path.join(final_dir, f"企标检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+                xlsx_path = os.path.join(
+                    final_dir,
+                    f"特殊特性符号检查对比结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                )
                 df.to_excel(xlsx_path, index=False)
             except Exception as error:
                 report_exception("写入Excel失败", error, level="warning")
@@ -483,13 +534,13 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
             styles["Heading 2"].font.name = "宋体"
         except Exception:
             pass
-        doc.add_heading("企标检查全部分析过程", level=0)
+        doc.add_heading("特殊特性符号检查全部分析过程", level=0)
         doc.add_heading("目录", level=1)
         for _, _, base in pairs:
             paragraph = doc.add_paragraph()
             paragraph.add_run(f"{base}")
         for prompt_path, response_path, base in pairs:
-            doc.add_heading(f"以下是《{base}》根据企业标准检查的分析过程：", level=1)
+            doc.add_heading(f"以下是《{base}》根据基准文件检查的分析过程：", level=1)
             try:
                 with open(prompt_path, "r", encoding="utf-8") as handle:
                     prompt_text = handle.read()
@@ -536,7 +587,7 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                     continue
                 doc.add_paragraph(_to_plain_table(line))
         ts_doc = datetime.now().strftime("%Y%m%d_%H%M%S")
-        doc_path = os.path.join(final_dir, f"企标检查分析过程_{ts_doc}.docx")
+        doc_path = os.path.join(final_dir, f"特殊特性符号检查分析过程_{ts_doc}.docx")
         doc.save(doc_path)
         if _st_available():
             try:

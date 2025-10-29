@@ -437,13 +437,13 @@ def render_enterprise_standard_check_tab(session_id):
                 #     st.caption(f"后台进程ID：{pid}")
                 total_chunks = int(job_status.get("total_chunks") or 0)
                 processed_chunks = int(job_status.get("processed_chunks") or 0)
-                with st.spinner(f"**任务状态：{_label}**"):
-                    if total_chunks > 0:
-                        progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
-                        st.progress(progress_value)
-                        st.caption(f"进度：{1 + int(progress_value*99)}% ")
-                    elif status_value in {"queued", "running"}:
-                        st.progress(0.0)
+                st.markdown(f"**任务状态：{_label}**")
+                if total_chunks > 0:
+                    progress_value = min(max(processed_chunks / total_chunks, 0.0), 1.0)
+                    st.progress(progress_value)
+                    st.caption(f"进度：{1 + int(progress_value*99)}% ")
+                elif status_value in {"queued", "running"}:
+                    st.progress(0.0)
                 result_files = job_status.get("result_files") or []
                 if result_files and status_value == "succeeded":
                     st.write("已生成结果文件，在右边文件列表处下载分析结果。")

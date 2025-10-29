@@ -1,9 +1,8 @@
 """Special symbols check workflow package."""
 
-from tabs.enterprise_standard import (
+from tabs.shared import (
     WorkflowPaths,
     WorkflowSurface,
-    aggregate_outputs,
     annotate_txt_file_inplace,
     cleanup_orphan_txts,
     estimate_tokens,
@@ -17,8 +16,8 @@ from tabs.enterprise_standard import (
     process_word_ppt_folder,
     report_exception,
     stream_text,
-    summarize_with_ollama,
 )
+from .summaries import aggregate_outputs, persist_compare_outputs, summarize_with_ollama
 
 from .settings import (
     BishengSettings,
@@ -52,6 +51,7 @@ __all__ = [
     "insert_source_markers",
     "summarize_with_ollama",
     "aggregate_outputs",
+    "persist_compare_outputs",
     "log_llm_metrics",
     "SPECIAL_SYMBOLS_WORKFLOW_SURFACE",
     "run_special_symbols_job",
