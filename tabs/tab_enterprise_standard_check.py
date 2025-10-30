@@ -346,7 +346,7 @@ def render_enterprise_standard_check_tab(session_id):
                 # Copy demonstration files into the user's enterprise folders (no processing here)
                 try:
                     # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = CONFIG["directories"]["reference_files"].parent / "demonstration"
                     demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
                     # Subfolders to copy from → to
                     pairs = [

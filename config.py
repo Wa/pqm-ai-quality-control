@@ -6,8 +6,8 @@ PROJECT_ROOT = Path(__file__).parent.absolute()
 # Define all file paths relative to project root
 CONFIG = {
     "directories": {
-        "cp_files": PROJECT_ROOT / "CP_files",
-        "target_files": PROJECT_ROOT / "target_files", 
+        "reference_files": PROJECT_ROOT / "reference_files",
+        "target_files": PROJECT_ROOT / "target_files",
         "graph_files": PROJECT_ROOT / "graph_files",
         "generated_files": PROJECT_ROOT / "generated_files",
         "apqp_files": PROJECT_ROOT / "APQP_files",
@@ -53,6 +53,22 @@ CONFIG = {
             "special_symbols_check": {
                 "workflow_id": "",
                 "flow_id": "edfbfc1b82db49c5b87e38ac2aaf2b65",
+                "flow_input_node_id": "RetrievalQA-f0f31",
+                "flow_milvus_node_id": "Milvus-cyR5W",
+                "flow_es_node_id": "ElasticKeywordsSearch-1c80e",
+                "tweaks": {
+                    "MixEsVectorRetriever-J35CZ": {},
+                    "Milvus-cyR5W": {},
+                    "PromptTemplate-bs0vj": {},
+                    "BishengLLM-768ac": {},
+                    "ElasticKeywordsSearch-1c80e": {},
+                    "RetrievalQA-f0f31": {},
+                    "CombineDocsChain-2f68e": {}
+                }
+            },
+            "parameters_check": {
+                "workflow_id": "",
+                "flow_id": "0f14f0e3adc34ecb8a649bf5135e32b7",
                 "flow_input_node_id": "RetrievalQA-f0f31",
                 "flow_milvus_node_id": "Milvus-cyR5W",
                 "flow_es_node_id": "ElasticKeywordsSearch-1c80e",

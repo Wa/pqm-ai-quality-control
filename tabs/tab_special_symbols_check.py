@@ -371,7 +371,7 @@ def render_special_symbols_check_tab(session_id):
                 # Copy demonstration files into the user's special_symbols folders (no processing here)
                 try:
                     # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = CONFIG["directories"]["reference_files"].parent / "demonstration"
                     demo_special_symbols = os.path.join(str(demo_base_dir), "special_symbols_files")
                     # Subfolders to copy from → to
                     pairs = [

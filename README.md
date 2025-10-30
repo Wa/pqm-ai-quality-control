@@ -123,7 +123,7 @@ PQM_AI/
 ├── tab_help_documentation.py        # Help and documentation
 ├── requirements.txt                 # Python dependencies
 ├── demonstration/                   # Demo files (Git LFS tracked)
-├── CP_files/                        # Control plan files
+├── reference_files/                 # Benchmark/reference files
 ├── target_files/                    # Target files for analysis
 ├── graph_files/                     # Graph/drawing files
 ├── APQP_files/                      # APQP stage files
@@ -139,7 +139,7 @@ All settings are managed in `config.py` for easy maintenance:
 ```python
 CONFIG = {
     "directories": {
-        "cp_files": PROJECT_ROOT / "CP_files",
+        "reference_files": PROJECT_ROOT / "reference_files",
         "target_files": PROJECT_ROOT / "target_files",
         "graph_files": PROJECT_ROOT / "graph_files",
         "apqp_files": PROJECT_ROOT / "APQP_files",
