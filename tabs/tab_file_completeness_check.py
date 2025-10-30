@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import shutil
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, complete_analysis, resolve_ollama_host
 from config import CONFIG
 from ollama import Client as OllamaClient
@@ -81,10 +82,30 @@ def get_stage_requirements(stage_name):
             "设备停机率统计表&设备故障记录表", "工艺验证报告", "外观标准书", "PV测试报告"
         ]
     }
-    
+
     return stage_requirements.get(stage_name, [])
 
-def create_completeness_excel(all_stage_data, session_id, generated_session_dir):
+def clear_folder_contents(folder_path):
+    """Remove all files and subdirectories within a folder."""
+    if not os.path.isdir(folder_path):
+        return 0
+
+    removed = 0
+    for entry in os.listdir(folder_path):
+        entry_path = os.path.join(folder_path, entry)
+        try:
+            if os.path.isfile(entry_path) or os.path.islink(entry_path):
+                os.remove(entry_path)
+                removed += 1
+            elif os.path.isdir(entry_path):
+                shutil.rmtree(entry_path)
+                removed += 1
+        except Exception:
+            # Best-effort cleanup; ignore individual failures
+            continue
+    return removed
+
+def create_completeness_excel(all_stage_data, session_id, final_results_dir):
     """Create and save Excel file with completeness results in normalized format.
     Columns: [Stage, Deliverable, Exists, FileName, Notes]
     """
@@ -107,22 +128,23 @@ def create_completeness_excel(all_stage_data, session_id, generated_session_dir)
         # Generate timestamped filename
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"file_completeness_results_{session_id}_{timestamp}.xlsx"
-        filepath = os.path.join(generated_session_dir, filename)
-        
+        os.makedirs(final_results_dir, exist_ok=True)
+        filepath = os.path.join(final_results_dir, filename)
+
         # Save to Excel
         df.to_excel(filepath, index=False, engine='openpyxl')
-        
+
         return filepath, filename
         
     except Exception as e:
         st.error(f"Excel导出失败: {e}")
         return None, None
 
-def export_completeness_results(session_id, stage_responses, generated_session_dir):
+def export_completeness_results(session_id, stage_responses, final_results_dir):
     """Main function to export completeness results to Excel."""
     try:
         all_stage_data = {}
-        
+
         # Process each stage response
         for stage_name, response_text in stage_responses.items():
             if response_text:
@@ -217,7 +239,7 @@ def export_completeness_results(session_id, stage_responses, generated_session_d
                 ]
         
         # Create Excel file
-        filepath, filename = create_completeness_excel(all_stage_data, session_id, generated_session_dir)
+        filepath, filename = create_completeness_excel(all_stage_data, session_id, final_results_dir)
         
         if filepath:
             st.success(f"✅ 文件齐套性检查结果已导出到: {filename}")
@@ -323,6 +345,10 @@ def render_file_completeness_check_tab(session_id):
     generated_session_dir = session_dirs["generated"]
     completeness_dir = session_dirs.get("generated_file_completeness_check", os.path.join(generated_session_dir, "file_completeness_check"))
     os.makedirs(completeness_dir, exist_ok=True)
+    initial_results_dir = os.path.join(completeness_dir, "initial_results")
+    final_results_dir = os.path.join(completeness_dir, "final_results")
+    os.makedirs(initial_results_dir, exist_ok=True)
+    os.makedirs(final_results_dir, exist_ok=True)
 
     # Get structured user session
     session = get_user_session(session_id, 'completeness')
@@ -395,7 +421,7 @@ def render_file_completeness_check_tab(session_id):
             return truncated_name + ext
 
         # File Manager Tabs
-        tab_initial, tab_a, tab_b, tab_c = st.tabs(["立项阶段", "A样阶段", "B样阶段", "C样阶段"])
+        tab_initial, tab_a, tab_b, tab_c, tab_results = st.tabs(["立项阶段", "A样阶段", "B样阶段", "C样阶段", "分析结果"])
         
         with tab_initial:
             initial_files_list = get_file_list(session_dirs["Stage_Initial"])
@@ -504,6 +530,42 @@ def render_file_completeness_check_tab(session_id):
             new_c_files = st.file_uploader("选择C样阶段文件", type=None, accept_multiple_files=True, key=f"c_uploader_tab_{session_id}")
             if new_c_files:
                 handle_file_upload(new_c_files, session_dirs["Stage_C"])
+        with tab_results:
+            if os.path.isdir(final_results_dir):
+                results_files = get_file_list(final_results_dir)
+                if results_files:
+                    for file_info in results_files:
+                        display_name = truncate_filename(file_info['name'])
+                        with st.expander(f"📄 {display_name}", expanded=False):
+                            col_info, col_action = st.columns([3, 1])
+                            with col_info:
+                                st.write(f"**文件名:** {file_info['name']}")
+                                st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                                st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                            with col_action:
+                                try:
+                                    with open(file_info['path'], "rb") as fbin:
+                                        file_bytes = fbin.read()
+                                    st.download_button(
+                                        label="⬇️ 下载",
+                                        data=file_bytes,
+                                        file_name=file_info['name'],
+                                        mime='application/octet-stream',
+                                        key=f"download_completeness_result_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                                    )
+                                except Exception as e:
+                                    st.error(f"下载失败: {e}")
+                                delete_key = f"delete_completeness_result_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                                if st.button("🗑️ 删除", key=delete_key):
+                                    try:
+                                        os.remove(file_info['path'])
+                                        st.success(f"已删除: {file_info['name']}")
+                                    except Exception as e:
+                                        st.error(f"删除失败: {e}")
+                else:
+                    st.write("（暂无分析结果）")
+            else:
+                st.write("（暂无分析结果目录）")
     # Render MAIN column content: uploaders and controls
     with col_main:
         # File uploads directly in col_main (no nested columns)
@@ -534,22 +596,24 @@ def render_file_completeness_check_tab(session_id):
             col_buttons = st.columns([1, 1])
             with col_buttons[0]:
                 if st.button("开始", key=f"file_completeness_start_button_{session_id}"):
+                    # Clear previous prompts before starting a new run
+                    clear_folder_contents(initial_results_dir)
                     # Start the analysis process
                     start_analysis(session_id, 'completeness')
                     st.rerun()
             with col_buttons[1]:
                 if st.button("演示", key=f"file_completeness_demo_button_{session_id}"):
+                    clear_folder_contents(initial_results_dir)
                     # Demo feature: copy demonstration files to current session
                     demo_base_dir = CONFIG["directories"]["demonstration"]
 
                     # Copy files from demonstration APQP_files to session folders
                     demo_apqp_path = os.path.join(str(demo_base_dir), "APQP_files")
                     if os.path.exists(demo_apqp_path):
-                        import shutil
                         for stage_folder in ["Stage_Initial", "Stage_A", "Stage_B", "Stage_C"]:
                             demo_stage_path = os.path.join(demo_apqp_path, stage_folder)
                             session_stage_path = session_dirs[stage_folder]
-                            
+
                             if os.path.exists(demo_stage_path):
                                 # Copy all files from demo stage folder to session stage folder
                                 for file_name in os.listdir(demo_stage_path):
@@ -673,7 +737,7 @@ def render_file_completeness_check_tab(session_id):
                         prompt = generate_stage_prompt(stage_name, stage_folder, stage_requirements[stage_name])
                         
                         # Save prompt to file
-                        prompt_file = os.path.join(completeness_dir, f"prompt_{stage_name}.txt")
+                        prompt_file = os.path.join(initial_results_dir, f"prompt_{stage_name}.txt")
                         with open(prompt_file, "w", encoding="utf-8") as f:
                             f.write(prompt)
                         
@@ -749,7 +813,7 @@ def render_file_completeness_check_tab(session_id):
                 
                 # Export results to Excel after all stages are processed
                 if stage_responses:
-                    export_completeness_results(session_id, stage_responses, completeness_dir)
+                    export_completeness_results(session_id, stage_responses, final_results_dir)
 
 
         # (Bulk operations moved earlier to avoid duplicate keys and to update UI promptly)
