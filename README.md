@@ -123,10 +123,7 @@ PQM_AI/
 ├── tab_help_documentation.py        # Help and documentation
 ├── requirements.txt                 # Python dependencies
 ├── demonstration/                   # Demo files (Git LFS tracked)
-├── reference_files/                 # Benchmark/reference files
-├── target_files/                    # Target files for analysis
-├── graph_files/                     # Graph/drawing files
-├── APQP_files/                      # APQP stage files
+├── uploads/                         # User uploads (per session/tab)
 ├── generated_files/                 # Generated outputs
 └── media/                          # Media files (images, videos)
 ```
@@ -139,12 +136,10 @@ All settings are managed in `config.py` for easy maintenance:
 ```python
 CONFIG = {
     "directories": {
-        "reference_files": PROJECT_ROOT / "reference_files",
-        "target_files": PROJECT_ROOT / "target_files",
-        "graph_files": PROJECT_ROOT / "graph_files",
-        "apqp_files": PROJECT_ROOT / "APQP_files",
+        "uploads": PROJECT_ROOT / "uploads",
         "generated_files": PROJECT_ROOT / "generated_files",
-        "media": PROJECT_ROOT / "media"
+        "media": PROJECT_ROOT / "media",
+        "demonstration": PROJECT_ROOT / "demonstration",
     },
     "llm": {
         "ollama_host": "http://localhost:11434",

@@ -76,10 +76,12 @@ def render_parameters_check_tab(session_id: str | None) -> None:
         st.warning("请先登录以使用此功能。")
         return
 
+    uploads_root = str(CONFIG["directories"]["uploads"])
+    parameters_base = os.path.join(uploads_root, "{session_id}", "parameters")
     base_dirs = {
-        "reference": str(CONFIG["directories"]["reference_files"]),
-        "target": str(CONFIG["directories"]["target_files"]),
-        "graph": str(CONFIG["directories"]["graph_files"]),
+        "reference": os.path.join(parameters_base, "reference"),
+        "target": os.path.join(parameters_base, "target"),
+        "graph": os.path.join(parameters_base, "graph"),
         "generated": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)

@@ -6,12 +6,10 @@ PROJECT_ROOT = Path(__file__).parent.absolute()
 # Define all file paths relative to project root
 CONFIG = {
     "directories": {
-        "reference_files": PROJECT_ROOT / "reference_files",
-        "target_files": PROJECT_ROOT / "target_files",
-        "graph_files": PROJECT_ROOT / "graph_files",
+        "uploads": PROJECT_ROOT / "uploads",
         "generated_files": PROJECT_ROOT / "generated_files",
-        "apqp_files": PROJECT_ROOT / "APQP_files",
-        "media": PROJECT_ROOT / "media"
+        "media": PROJECT_ROOT / "media",
+        "demonstration": PROJECT_ROOT / "demonstration",
     },
     "files": {
         "apqp_image": PROJECT_ROOT / "media" / "APQP3.png",

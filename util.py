@@ -205,10 +205,22 @@ def ensure_session_dirs(base_dirs, session_id):
     """Ensure session directories exist."""
     import os
 
+    uploads_root = str(CONFIG["directories"].get("uploads", Path(__file__).resolve().parent / "uploads"))
+    os.makedirs(uploads_root, exist_ok=True)
+    session_root = os.path.join(uploads_root, str(session_id))
+    os.makedirs(session_root, exist_ok=True)
+
     # Create session-specific directories
     session_dirs = {}
     for dir_type, base_dir in base_dirs.items():
-        session_dir = os.path.join(base_dir, str(session_id))
+        template = base_dir(session_id) if callable(base_dir) else base_dir
+        if isinstance(template, (list, tuple)):
+            template = os.path.join(*map(str, template))
+        base_dir_str = str(template)
+        if "{session_id}" in base_dir_str:
+            session_dir = base_dir_str.format(session_id=session_id)
+        else:
+            session_dir = os.path.join(base_dir_str, str(session_id))
         os.makedirs(session_dir, exist_ok=True)
         session_dirs[dir_type] = session_dir
 
@@ -230,49 +242,19 @@ def ensure_session_dirs(base_dirs, session_id):
             session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
             session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
 
-    # Ensure enterprise standard directories exist under project root:
-    # ./PQM_AI/enterprise_standard_files/standards/<username>
-    # ./PQM_AI/enterprise_standard_files/examined_files/<username>
-    try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        enterprise_root = os.path.join(project_root, "enterprise_standard_files")
-        standards_dir = os.path.join(enterprise_root, "standards", str(session_id))
-        examined_dir = os.path.join(enterprise_root, "examined_files", str(session_id))
-        os.makedirs(standards_dir, exist_ok=True)
-        os.makedirs(examined_dir, exist_ok=True)
-        # Expose convenience keys regardless of input base_dirs
-        session_dirs.setdefault("enterprise_standards", standards_dir)
-        session_dirs.setdefault("enterprise_examined", examined_dir)
-    except Exception:
-        # Fail-safe: do not break callers if path operations fail
-        pass
+    # Ensure enterprise, special symbols, and history issue directories live under uploads/<session>/<tab>
+    def _ensure_upload_subdir(key: str, *parts: str) -> None:
+        path = os.path.join(session_root, *parts)
+        os.makedirs(path, exist_ok=True)
+        session_dirs.setdefault(key, path)
 
-    # Ensure special symbols directories exist under project root
     try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        special_root = os.path.join(project_root, "special_symbols_files")
-        reference_dir = os.path.join(special_root, "reference", str(session_id))
-        inspected_dir = os.path.join(special_root, "inspected", str(session_id))
-        os.makedirs(reference_dir, exist_ok=True)
-        os.makedirs(inspected_dir, exist_ok=True)
-        session_dirs.setdefault("special_reference", reference_dir)
-        session_dirs.setdefault("special_examined", inspected_dir)
-    except Exception:
-        pass
-
-    # Ensure history issues avoidance directories exist under project root:
-    # ./PQM_AI/history_issues_avoidance_files/issue_lists/<username>
-    # ./PQM_AI/history_issues_avoidance_files/target_files/<username>
-    try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        history_root = os.path.join(project_root, "history_issues_avoidance_files")
-        issue_lists_dir = os.path.join(history_root, "issue_lists", str(session_id))
-        target_files_dir = os.path.join(history_root, "target_files", str(session_id))
-        os.makedirs(issue_lists_dir, exist_ok=True)
-        os.makedirs(target_files_dir, exist_ok=True)
-        # Expose convenience keys regardless of input base_dirs
-        session_dirs.setdefault("history_issue_lists", issue_lists_dir)
-        session_dirs.setdefault("history_target_files", target_files_dir)
+        _ensure_upload_subdir("enterprise_standards", "enterprise_standard", "standards")
+        _ensure_upload_subdir("enterprise_examined", "enterprise_standard", "examined")
+        _ensure_upload_subdir("special_reference", "special_symbols", "reference")
+        _ensure_upload_subdir("special_examined", "special_symbols", "examined")
+        _ensure_upload_subdir("history_issue_lists", "history_issues", "issue_lists")
+        _ensure_upload_subdir("history_target_files", "history_issues", "target_files")
     except Exception:
         # Fail-safe: do not break callers if path operations fail
         pass

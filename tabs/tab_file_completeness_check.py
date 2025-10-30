@@ -310,12 +310,13 @@ def render_file_completeness_check_tab(session_id):
     
     
     # Define APQP stage directories (with session subfolders) - using centralized config
-    base_dir = str(CONFIG["directories"]["apqp_files"])
+    uploads_root = str(CONFIG["directories"]["uploads"])
+    stage_base = os.path.join(uploads_root, "{session_id}", "file_completeness")
     base_dirs = {
-        "Stage_Initial": os.path.join(base_dir, "Stage_Initial"),
-        "Stage_A": os.path.join(base_dir, "Stage_A"),
-        "Stage_B": os.path.join(base_dir, "Stage_B"),
-        "Stage_C": os.path.join(base_dir, "Stage_C"),
+        "Stage_Initial": os.path.join(stage_base, "Stage_Initial"),
+        "Stage_A": os.path.join(stage_base, "Stage_A"),
+        "Stage_B": os.path.join(stage_base, "Stage_B"),
+        "Stage_C": os.path.join(stage_base, "Stage_C"),
         "generated": str(CONFIG["directories"]["generated_files"])
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
@@ -539,10 +540,10 @@ def render_file_completeness_check_tab(session_id):
             with col_buttons[1]:
                 if st.button("演示", key=f"file_completeness_demo_button_{session_id}"):
                     # Demo feature: copy demonstration files to current session
-                    demo_base_dir = CONFIG["directories"]["apqp_files"].parent / "demonstration"
-                    
+                    demo_base_dir = CONFIG["directories"]["demonstration"]
+
                     # Copy files from demonstration APQP_files to session folders
-                    demo_apqp_path = os.path.join(demo_base_dir, "APQP_files")
+                    demo_apqp_path = os.path.join(str(demo_base_dir), "APQP_files")
                     if os.path.exists(demo_apqp_path):
                         import shutil
                         for stage_folder in ["Stage_Initial", "Stage_A", "Stage_B", "Stage_C"]:

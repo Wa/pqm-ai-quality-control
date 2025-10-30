@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from config import CONFIG
 from tabs.enterprise_standard.background import run_enterprise_standard_job
 from tabs.parameters.background import run_parameters_job
 from tabs.special_symbols.background import run_special_symbols_job
@@ -403,14 +404,16 @@ def _start_job(job_type: str, session_id: str) -> JobRecord:
     monitor_thread.start()
     return record
 # Base directories
-BASE_DIR = ""  # Use root directory instead of "user_sessions"
+BASE_DIR = str(CONFIG["directories"]["uploads"])
+os.makedirs(BASE_DIR, exist_ok=True)
 
 def get_session_dirs(session_id: str) -> Dict[str, str]:
     """Get session directories for a user"""
+    session_root = os.path.join(BASE_DIR, session_id, "parameters")
     return {
-        "reference": os.path.join(BASE_DIR, "reference_files", session_id),
-        "target": os.path.join(BASE_DIR, "target_files", session_id),
-        "graph": os.path.join(BASE_DIR, "graph_files", session_id)
+        "reference": os.path.join(session_root, "reference"),
+        "target": os.path.join(session_root, "target"),
+        "graph": os.path.join(session_root, "graph"),
     }
 
 def ensure_session_dirs(session_id: str):

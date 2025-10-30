@@ -211,10 +211,12 @@ def run_parameters_job(
     settings = get_bisheng_settings()
     publish({"status": "running", "stage": "initializing", "message": "准备会话目录"})
 
+    uploads_root = str(CONFIG["directories"]["uploads"])
+    parameters_base = os.path.join(uploads_root, "{session_id}", "parameters")
     base_dirs = {
-        "reference": str(CONFIG["directories"]["reference_files"]),
-        "target": str(CONFIG["directories"]["target_files"]),
-        "graph": str(CONFIG["directories"]["graph_files"]),
+        "reference": os.path.join(parameters_base, "reference"),
+        "target": os.path.join(parameters_base, "target"),
+        "graph": os.path.join(parameters_base, "graph"),
         "generated": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)

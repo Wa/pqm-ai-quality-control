@@ -13,7 +13,7 @@ This document records the steps taken while rebuilding the Special Symbols tab s
 
 ## 3. Prepare for Enterprise Workflow Mirroring
 - Confirmed that the enterprise tab (`tabs/tab_enterprise_standard_check.py`) is the reference for the new design.
-- Verified that enterprise session folders live under `enterprise_standard_files/` and that helper utilities prepare them automatically.
+- Verified that enterprise session folders live under `uploads/<session_id>/enterprise_standard/` and that helper utilities prepare them automatically.
 - Identified that the upcoming rebuild needs:
   - A workflow surface module that encapsulates file handling, backend orchestration, and streaming (mirroring `tabs/enterprise_standard/workflow.py`).
   - Frontend tab code that delegates to the workflow surface instead of issuing direct LLM calls.
