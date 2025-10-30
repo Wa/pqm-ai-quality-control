@@ -7,8 +7,9 @@ import shutil
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from threading import Lock, Thread
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 import tempfile
 
@@ -16,8 +17,10 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from config import CONFIG
 from tabs.enterprise_standard.background import run_enterprise_standard_job
 from tabs.special_symbols.background import run_special_symbols_job
+from uploads_migration import maybe_run_legacy_uploads_migration
 
 
 JOB_DEFINITIONS = {
@@ -29,6 +32,13 @@ JOB_DEFINITIONS = {
         "runner": run_special_symbols_job,
         "label": "特殊特性符号检查",
     },
+}
+
+PARAMETER_UPLOADS = CONFIG["uploads"]["parameters"]
+PARAMETER_BASE_DIRS = {
+    "cp": Path(PARAMETER_UPLOADS["reference"]),
+    "target": Path(PARAMETER_UPLOADS["target"]),
+    "graph": Path(PARAMETER_UPLOADS["graph"]),
 }
 
 
@@ -397,22 +407,31 @@ def _start_job(job_type: str, session_id: str) -> JobRecord:
     monitor_thread = Thread(target=_monitor_process, args=(job_id, process), daemon=True)
     monitor_thread.start()
     return record
-# Base directories
-BASE_DIR = ""  # Use root directory instead of "user_sessions"
+def get_session_dirs(session_id: str, keys: Optional[Iterable[str]] = None) -> Dict[str, str]:
+    """Return parameter upload directories for the given session."""
 
-def get_session_dirs(session_id: str) -> Dict[str, str]:
-    """Get session directories for a user"""
-    return {
-        "cp": os.path.join(BASE_DIR, "CP_files", session_id),
-        "target": os.path.join(BASE_DIR, "target_files", session_id), 
-        "graph": os.path.join(BASE_DIR, "graph_files", session_id)
-    }
+    maybe_run_legacy_uploads_migration()
 
-def ensure_session_dirs(session_id: str):
-    """Ensure session directories exist"""
-    dirs = get_session_dirs(session_id)
+    requested = list(keys) if keys is not None else list(PARAMETER_BASE_DIRS.keys())
+    session_dirs: Dict[str, str] = {}
+    fragment = str(session_id)
+
+    for key in requested:
+        base_path = PARAMETER_BASE_DIRS.get(key)
+        if base_path is None:
+            continue
+        session_dirs[key] = str(base_path / fragment)
+
+    return session_dirs
+
+
+def ensure_session_dirs(session_id: str, keys: Optional[Iterable[str]] = None) -> Dict[str, str]:
+    """Ensure the requested parameter directories exist and return them."""
+
+    dirs = get_session_dirs(session_id, keys)
     for dir_path in dirs.values():
-        os.makedirs(dir_path, exist_ok=True)
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
+    return dirs
 
 @app.get("/")
 async def root():
@@ -430,8 +449,7 @@ async def upload_file(
 ):
     """Upload a file to the specified session directory"""
     try:
-        ensure_session_dirs(session_id)
-        dirs = get_session_dirs(session_id)
+        dirs = ensure_session_dirs(session_id)
         
         if file_type not in dirs:
             raise HTTPException(status_code=400, detail=f"Invalid file type: {file_type}")
@@ -470,8 +488,7 @@ async def delete_file(operation: FileOperation):
 async def list_files(session_id: str, file_type: str = None):
     """List files in session directories"""
     try:
-        ensure_session_dirs(session_id)
-        dirs = get_session_dirs(session_id)
+        dirs = ensure_session_dirs(session_id)
         
         if file_type and file_type not in dirs:
             raise HTTPException(status_code=400, detail=f"Invalid file type: {file_type}")

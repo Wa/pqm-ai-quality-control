@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import json
+from pathlib import Path
 import pandas as pd
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, resolve_ollama_host
 from config import CONFIG
@@ -10,31 +11,46 @@ import openai
 
 def render_parameters_file_upload_section(session_dirs, session_id):
     """Render the file upload section for parameters check with unique keys."""
-    col_cp, col_target, col_graph = st.columns([1, 1, 1])
+    col_reference, col_target, col_graph = st.columns([1, 1, 1])
 
-    with col_cp:
-        cp_files = st.file_uploader("点击上传控制计划文件", type=None, accept_multiple_files=True, key=f"parameters_cp_uploader_{session_id}")
-        if cp_files:
-            handle_file_upload(cp_files, session_dirs["cp"])
+    with col_reference:
+        reference_files = st.file_uploader(
+            "点击上传控制计划文件",
+            type=None,
+            accept_multiple_files=True,
+            key=f"parameters_reference_uploader_{session_id}",
+        )
+        if reference_files:
+            handle_file_upload(reference_files, session_dirs["parameters_reference"])
 
     with col_target:
-        target_files = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"parameters_target_uploader_{session_id}")
+        target_files = st.file_uploader(
+            "点击上传待检查文件",
+            type=None,
+            accept_multiple_files=True,
+            key=f"parameters_target_uploader_{session_id}",
+        )
         if target_files:
-            handle_file_upload(target_files, session_dirs["target"])
+            handle_file_upload(target_files, session_dirs["parameters_target"])
 
     with col_graph:
-        graph_files = st.file_uploader("点击上传图纸文件", type=None, accept_multiple_files=True, key=f"parameters_graph_uploader_{session_id}")
+        graph_files = st.file_uploader(
+            "点击上传图纸文件",
+            type=None,
+            accept_multiple_files=True,
+            key=f"parameters_graph_uploader_{session_id}",
+        )
         if graph_files:
-            handle_file_upload(graph_files, session_dirs["graph"])
+            handle_file_upload(graph_files, session_dirs["parameters_graph"])
 
 def run_parameters_analysis_workflow(session_id, session_dirs):
     """Run the complete parameters analysis workflow."""
     # Get tab-specific session state
     session = get_user_session(session_id, 'parameters')
-    cp_session_dir = session_dirs["cp"]
-    target_session_dir = session_dirs["target"]
+    reference_session_dir = session_dirs["parameters_reference"]
+    target_session_dir = session_dirs["parameters_target"]
     generated_session_dir = session_dirs["generated"]
-    parameters_dir = session_dirs.get("generated_parameters_check", os.path.join(generated_session_dir, "parameters_check"))
+    parameters_dir = session_dirs.get("parameters_outputs", os.path.join(generated_session_dir, "parameters_check"))
     
     st.info("🔍 正在进行设计制程参数一致性分析…")
     
@@ -305,18 +321,22 @@ def render_parameters_check_tab(session_id):
     
     
     # Base directories for each upload box - using centralized config
+    parameter_uploads = CONFIG["uploads"]["parameters"]
     BASE_DIRS = {
-        "cp": str(CONFIG["directories"]["cp_files"]),
-        "target": str(CONFIG["directories"]["target_files"]),
-        "graph": str(CONFIG["directories"]["graph_files"]),
-        "generated": str(CONFIG["directories"]["generated_files"])
+        "parameters_reference": parameter_uploads["reference"],
+        "parameters_target": parameter_uploads["target"],
+        "parameters_graph": parameter_uploads["graph"],
+        "generated": {
+            "path": CONFIG["directories"]["generated_files"],
+            "subdirs": {"parameters_outputs": "parameters_check"},
+        },
     }
     session_dirs = ensure_session_dirs(BASE_DIRS, session_id)
-    cp_session_dir = session_dirs["cp"]
-    target_session_dir = session_dirs["target"]
-    graph_session_dir = session_dirs["graph"]
+    reference_session_dir = session_dirs["parameters_reference"]
+    target_session_dir = session_dirs["parameters_target"]
+    graph_session_dir = session_dirs["parameters_graph"]
     generated_session_dir = session_dirs["generated"]
-    parameters_dir = session_dirs.get("generated_parameters_check", os.path.join(generated_session_dir, "parameters_check"))
+    parameters_dir = session_dirs.get("parameters_outputs", os.path.join(generated_session_dir, "parameters_check"))
     os.makedirs(parameters_dir, exist_ok=True)
 
     # Layout: right column for info, left for main content
@@ -325,12 +345,12 @@ def render_parameters_check_tab(session_id):
     # Render the info/file column FIRST so lists appear immediately when demo starts
     with col_info:
         # Early scoped clear operations: three per-bucket buttons
-        col_clear_cp, col_clear_target, col_clear_graph = st.columns(3)
-        with col_clear_cp:
-            if st.button("🗑️ 清空控制计划文件", key=f"parameters_clear_cp_files_{session_id}"):
+        col_clear_reference, col_clear_target, col_clear_graph = st.columns(3)
+        with col_clear_reference:
+            if st.button("🗑️ 清空控制计划文件", key=f"parameters_clear_reference_files_{session_id}"):
                 try:
-                    for file in os.listdir(cp_session_dir):
-                        file_path = os.path.join(cp_session_dir, file)
+                    for file in os.listdir(reference_session_dir):
+                        file_path = os.path.join(reference_session_dir, file)
                         if os.path.isfile(file_path):
                             os.remove(file_path)
                     st.success("已清空控制计划文件")
@@ -405,7 +425,7 @@ def render_parameters_check_tab(session_id):
         tab_cp, tab_target, tab_graph = st.tabs(["控制计划文件", "待检查文件", "图纸文件"])
         
         with tab_cp:
-            cp_files_list = get_file_list(cp_session_dir)
+            cp_files_list = get_file_list(reference_session_dir)
             if cp_files_list:
                 for i, file_info in enumerate(cp_files_list):
                     display_name = truncate_filename(file_info['name'])
@@ -416,7 +436,7 @@ def render_parameters_check_tab(session_id):
                             st.write(f"**大小:** {format_file_size(file_info['size'])}")
                             st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
                         with col_action:
-                            delete_key = f"parameters_delete_cp_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            delete_key = f"parameters_delete_reference_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
                                     os.remove(file_info['path'])
@@ -427,9 +447,9 @@ def render_parameters_check_tab(session_id):
                 st.write("（未上传）")
             st.markdown("---")
             st.markdown("**上传新文件:**")
-            new_cp_files = st.file_uploader("选择控制计划文件", type=None, accept_multiple_files=True, key=f"parameters_cp_uploader_tab_{session_id}")
+            new_cp_files = st.file_uploader("选择控制计划文件", type=None, accept_multiple_files=True, key=f"parameters_reference_uploader_tab_{session_id}")
             if new_cp_files:
-                handle_file_upload(new_cp_files, cp_session_dir)
+                handle_file_upload(new_cp_files, reference_session_dir)
 
         with tab_target:
             target_files_list = get_file_list(target_session_dir)
@@ -511,9 +531,9 @@ def render_parameters_check_tab(session_id):
                         # Extract CP parameters JSON
                         json_output_path = os.path.join(parameters_dir, "extracted_data.json")
                         summary = extract_parameters_to_json(
-                            cp_session_dir=cp_session_dir,
+                            source_dir=reference_session_dir,
                             output_json_path=json_output_path,
-                            # Read config from parameters subfolder instead of CP_files/<user>
+                            # Read config from parameters subfolder instead of uploads/parameters/reference/<user>
                             config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
                         )
                         st.success(f"已生成参数JSON: {summary['output']} (表: {summary['sheets']}, 行: {summary['rows']})")
@@ -521,7 +541,7 @@ def render_parameters_check_tab(session_id):
                         # Extract Target parameters JSON
                         json_output_path_t = os.path.join(parameters_dir, "extracted_target_data.json")
                         summary_t = extract_parameters_to_json(
-                            cp_session_dir=target_session_dir,
+                            source_dir=target_session_dir,
                             output_json_path=json_output_path_t,
                             config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
                         )
@@ -568,12 +588,12 @@ def render_parameters_check_tab(session_id):
             with col_buttons[1]:
                 if st.button("演示", key=f"parameters_demo_button_{session_id}"):
                     # Copy demo files into this tab's session directories only (isolated)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = Path(CONFIG["directories"]["project_root"]) / "demonstration"
                     # Map demonstration folders to this tab's session directories
                     demo_folder_mapping = {
-                        "CP_files": "cp",
-                        "graph_files": "graph",
-                        "target_files": "target",
+                        "CP_files": "parameters_reference",
+                        "graph_files": "parameters_graph",
+                        "target_files": "parameters_target",
                     }
                     files_copied = False
                     for demo_folder, session_key in demo_folder_mapping.items():
@@ -601,14 +621,14 @@ def render_parameters_check_tab(session_id):
                             # CP JSON
                             json_output_path = os.path.join(parameters_dir, "extracted_data.json")
                             extract_parameters_to_json(
-                                cp_session_dir=cp_session_dir,
+                                source_dir=reference_session_dir,
                                 output_json_path=json_output_path,
                                 config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
                             )
                             # Target JSON
                             json_output_path_t = os.path.join(parameters_dir, "extracted_target_data.json")
                             extract_parameters_to_json(
-                                cp_session_dir=target_session_dir,
+                                source_dir=target_session_dir,
                                 output_json_path=json_output_path_t,
                                 config_csv_path=os.path.join(parameters_dir, "excel_sheets.csv"),
                             )

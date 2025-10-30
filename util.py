@@ -9,6 +9,9 @@ import time
 import hashlib
 import openpyxl
 import pandas as pd
+from typing import Mapping, MutableMapping, Union
+
+from uploads_migration import maybe_run_legacy_uploads_migration
 
 # --- LLM Host Resolution ---
 def resolve_ollama_host(llm_backend: str) -> str:
@@ -201,81 +204,39 @@ def is_admin(username: str) -> bool:
     return username in admins
 
 # --- Session Directory Utilities ---
-def ensure_session_dirs(base_dirs, session_id):
-    """Ensure session directories exist."""
-    import os
+DirectorySpec = Union[str, os.PathLike, Mapping[str, object]]
 
-    # Create session-specific directories
-    session_dirs = {}
-    for dir_type, base_dir in base_dirs.items():
-        session_dir = os.path.join(base_dir, str(session_id))
-        os.makedirs(session_dir, exist_ok=True)
-        session_dirs[dir_type] = session_dir
 
-    # Ensure standard subfolders inside generated/<session_id>
-    for gen_key in ("generated", "generated_files"):
-        if gen_key in session_dirs:
-            generated_root = session_dirs[gen_key]
-            subfolders = [
-                "parameters_check",
-                "file_elements_check",
-                "file_completeness_check",
-                "history_issues_avoidance",
-            ]
-            for name in subfolders:
-                os.makedirs(os.path.join(generated_root, name), exist_ok=True)
-            # Convenience keys
-            session_dirs["generated_parameters_check"] = os.path.join(generated_root, "parameters_check")
-            session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
-            session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
-            session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
+def _normalize_spec(spec: DirectorySpec) -> tuple[Path, Mapping[str, str]]:
+    """Return the base path and optional subdirectory mapping from a spec."""
 
-    # Ensure enterprise standard directories exist under project root:
-    # ./PQM_AI/enterprise_standard_files/standards/<username>
-    # ./PQM_AI/enterprise_standard_files/examined_files/<username>
-    try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        enterprise_root = os.path.join(project_root, "enterprise_standard_files")
-        standards_dir = os.path.join(enterprise_root, "standards", str(session_id))
-        examined_dir = os.path.join(enterprise_root, "examined_files", str(session_id))
-        os.makedirs(standards_dir, exist_ok=True)
-        os.makedirs(examined_dir, exist_ok=True)
-        # Expose convenience keys regardless of input base_dirs
-        session_dirs.setdefault("enterprise_standards", standards_dir)
-        session_dirs.setdefault("enterprise_examined", examined_dir)
-    except Exception:
-        # Fail-safe: do not break callers if path operations fail
-        pass
+    if isinstance(spec, Mapping):
+        path = Path(spec.get("path") or spec.get("base") or "")
+        if not path:
+            raise KeyError("Directory specification missing 'path'")
+        subdirs = spec.get("subdirs") or {}
+        return path, {str(k): str(v) for k, v in subdirs.items()}
+    return Path(spec), {}
 
-    # Ensure special symbols directories exist under project root
-    try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        special_root = os.path.join(project_root, "special_symbols_files")
-        reference_dir = os.path.join(special_root, "reference", str(session_id))
-        inspected_dir = os.path.join(special_root, "inspected", str(session_id))
-        os.makedirs(reference_dir, exist_ok=True)
-        os.makedirs(inspected_dir, exist_ok=True)
-        session_dirs.setdefault("special_reference", reference_dir)
-        session_dirs.setdefault("special_examined", inspected_dir)
-    except Exception:
-        pass
 
-    # Ensure history issues avoidance directories exist under project root:
-    # ./PQM_AI/history_issues_avoidance_files/issue_lists/<username>
-    # ./PQM_AI/history_issues_avoidance_files/target_files/<username>
-    try:
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        history_root = os.path.join(project_root, "history_issues_avoidance_files")
-        issue_lists_dir = os.path.join(history_root, "issue_lists", str(session_id))
-        target_files_dir = os.path.join(history_root, "target_files", str(session_id))
-        os.makedirs(issue_lists_dir, exist_ok=True)
-        os.makedirs(target_files_dir, exist_ok=True)
-        # Expose convenience keys regardless of input base_dirs
-        session_dirs.setdefault("history_issue_lists", issue_lists_dir)
-        session_dirs.setdefault("history_target_files", target_files_dir)
-    except Exception:
-        # Fail-safe: do not break callers if path operations fail
-        pass
+def ensure_session_dirs(base_dirs: Mapping[str, DirectorySpec], session_id: str) -> MutableMapping[str, str]:
+    """Ensure only the requested session directories exist."""
+
+    maybe_run_legacy_uploads_migration()
+
+    session_dirs: MutableMapping[str, str] = {}
+    session_fragment = str(session_id)
+
+    for key, spec in base_dirs.items():
+        base_path, subdirs = _normalize_spec(spec)
+        session_dir = base_path / session_fragment
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_dirs[str(key)] = str(session_dir)
+
+        for sub_key, relative in subdirs.items():
+            subdir_path = session_dir / relative
+            subdir_path.mkdir(parents=True, exist_ok=True)
+            session_dirs[sub_key] = str(subdir_path)
 
     return session_dirs
 
@@ -537,15 +498,15 @@ def _remove_fubiao_tables(data):
         i += 1
     return filtered_data
 
-def extract_parameters_to_json(cp_session_dir, output_json_path, config_csv_path=None):
-    cp_dir = Path(cp_session_dir)
-    if not cp_dir.exists():
-        raise FileNotFoundError(f"CP session dir not found: {cp_session_dir}")
+def extract_parameters_to_json(source_dir, output_json_path, config_csv_path=None):
+    source_dir_path = Path(source_dir)
+    if not source_dir_path.exists():
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
     if config_csv_path is None:
-        config_csv_path = str(cp_dir / "excel_sheets.csv")
+        config_csv_path = str(source_dir_path / "excel_sheets.csv")
     if not os.path.exists(config_csv_path):
         raise FileNotFoundError(
-            f"Configuration CSV not found: {config_csv_path}. Place 'excel_sheets.csv' under {cp_session_dir}."
+            f"Configuration CSV not found: {config_csv_path}. Place 'excel_sheets.csv' under {source_dir}."
         )
     df = pd.read_csv(config_csv_path)
     false_sheets = df[df['skip'].astype(str).str.upper() == 'FALSE']
@@ -554,7 +515,7 @@ def extract_parameters_to_json(cp_session_dir, output_json_path, config_csv_path
     for _, config in false_sheets.iterrows():
         file_name = str(config['file'])
         sheet_name = str(config['sheet']).strip()
-        file_path = cp_dir / file_name
+        file_path = source_dir_path / file_name
         if not file_path.exists():
             continue
         try:

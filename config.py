@@ -3,15 +3,41 @@ from pathlib import Path
 # Get the project root directory (where this script is located)
 PROJECT_ROOT = Path(__file__).parent.absolute()
 
+# Canonical uploads root shared across tabs
+UPLOADS_ROOT = PROJECT_ROOT / "uploads"
+
 # Define all file paths relative to project root
 CONFIG = {
     "directories": {
-        "cp_files": PROJECT_ROOT / "CP_files",
-        "target_files": PROJECT_ROOT / "target_files", 
-        "graph_files": PROJECT_ROOT / "graph_files",
+        "project_root": PROJECT_ROOT,
+        "uploads_root": UPLOADS_ROOT,
         "generated_files": PROJECT_ROOT / "generated_files",
-        "apqp_files": PROJECT_ROOT / "APQP_files",
         "media": PROJECT_ROOT / "media"
+    },
+    "uploads": {
+        "parameters": {
+            "reference": UPLOADS_ROOT / "parameters" / "reference",
+            "target": UPLOADS_ROOT / "parameters" / "target",
+            "graph": UPLOADS_ROOT / "parameters" / "graph",
+        },
+        "enterprise": {
+            "standards": UPLOADS_ROOT / "enterprise" / "standards",
+            "examined": UPLOADS_ROOT / "enterprise" / "examined",
+        },
+        "special_symbols": {
+            "reference": UPLOADS_ROOT / "special_symbols" / "reference",
+            "inspected": UPLOADS_ROOT / "special_symbols" / "inspected",
+        },
+        "file_completeness": {
+            "stage_initial": UPLOADS_ROOT / "file_completeness" / "stage_initial",
+            "stage_a": UPLOADS_ROOT / "file_completeness" / "stage_a",
+            "stage_b": UPLOADS_ROOT / "file_completeness" / "stage_b",
+            "stage_c": UPLOADS_ROOT / "file_completeness" / "stage_c",
+        },
+        "history_issues": {
+            "issue_lists": UPLOADS_ROOT / "history_issues" / "issue_lists",
+            "target": UPLOADS_ROOT / "history_issues" / "target",
+        },
     },
     "files": {
         "apqp_image": PROJECT_ROOT / "media" / "APQP3.png",
@@ -90,4 +116,4 @@ def get_directory(name):
 # Helper function to get a file path
 def get_file(name):
     """Get a file path from the configuration."""
-    return get_path("files", name) 
+    return get_path("files", name)

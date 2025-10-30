@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -25,8 +26,11 @@ def render_special_symbols_check_tab(session_id):
 
     # No CSS width overrides; rely on Streamlit columns like special symbols tab
     # Ensure special_symbols directories and a generated output root exist
+    special_uploads = CONFIG["uploads"]["special_symbols"]
     base_dirs = {
-        "generated": str(CONFIG["directories"]["generated_files"]),
+        "special_symbols_reference": special_uploads["reference"],
+        "special_symbols_inspected": special_uploads["inspected"],
+        "generated": {"path": CONFIG["directories"]["generated_files"]},
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     try:
@@ -371,7 +375,7 @@ def render_special_symbols_check_tab(session_id):
                 # Copy demonstration files into the user's special_symbols folders (no processing here)
                 try:
                     # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = Path(CONFIG["directories"]["project_root"]) / "demonstration"
                     demo_special_symbols = os.path.join(str(demo_base_dir), "special_symbols_files")
                     # Subfolders to copy from → to
                     pairs = [

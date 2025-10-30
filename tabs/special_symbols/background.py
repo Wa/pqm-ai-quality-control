@@ -412,7 +412,12 @@ def run_special_symbols_job(
     if not ensure_running("initializing", "初始化特殊特性符号检查"):
         return {"final_results": []}
 
-    base_dirs = {"generated": str(CONFIG["directories"]["generated_files"])}
+    special_uploads = CONFIG["uploads"]["special_symbols"]
+    base_dirs = {
+        "special_symbols_reference": special_uploads["reference"],
+        "special_symbols_inspected": special_uploads["inspected"],
+        "generated": {"path": CONFIG["directories"]["generated_files"]},
+    }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     paths = SPECIAL_SYMBOLS_WORKFLOW_SURFACE.prepare_paths(session_dirs)
 

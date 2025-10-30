@@ -683,10 +683,10 @@ def render_technical_docs_section(session_id):
     ```bash
     # 备份用户数据
     tar -czf pqm_backup_$(date +%Y%m%d).tar.gz \\
+      uploads/ \\
       generated_files/ \\
       user_sessions/ \\
-      user_settings/ \\
-      enterprise_standard_files/
+      user_settings/
     
     # 备份配置文件
     cp config.py config_backup_$(date +%Y%m%d).py

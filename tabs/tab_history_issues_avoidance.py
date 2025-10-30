@@ -7,6 +7,7 @@ import json
 import re
 import requests
 import shutil
+from pathlib import Path
 from util import ensure_session_dirs, handle_file_upload
 from config import CONFIG
 
@@ -269,12 +270,18 @@ def render_history_issues_avoidance_tab(session_id):
     st.subheader("📋 历史问题规避")
     
     # Ensure history issues avoidance directories exist
+    history_uploads = CONFIG["uploads"]["history_issues"]
     base_dirs = {
-        "generated": str(CONFIG["directories"]["generated_files"]),
+        "history_issues_issue_lists": history_uploads["issue_lists"],
+        "history_issues_target": history_uploads["target"],
+        "generated": {
+            "path": CONFIG["directories"]["generated_files"],
+            "subdirs": {"history_issues_outputs": "history_issues_avoidance"},
+        },
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
-    issue_lists_dir = session_dirs.get("history_issue_lists")
-    target_files_dir = session_dirs.get("history_target_files")
+    issue_lists_dir = session_dirs.get("history_issues_issue_lists")
+    target_files_dir = session_dirs.get("history_issues_target")
     generated_session_dir = session_dirs.get("generated")
     
     # Layout similar to enterprise standard check: left main content, right file manager
@@ -303,7 +310,7 @@ def render_history_issues_avoidance_tab(session_id):
                 area = st.container()
                 with area:
                     # Create output directories for parsed text files
-                    history_out_root = os.path.join(generated_session_dir, "history_issues_avoidance")
+                    history_out_root = session_dirs.get("history_issues_outputs", os.path.join(generated_session_dir, "history_issues_avoidance"))
                     issue_lists_txt_dir = os.path.join(history_out_root, "issue_lists_txt")
                     target_files_txt_dir = os.path.join(history_out_root, "target_files_txt")
                     os.makedirs(issue_lists_txt_dir, exist_ok=True)
@@ -326,7 +333,7 @@ def render_history_issues_avoidance_tab(session_id):
                 # Copy demonstration file to issue_lists directory
                 try:
                     # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = Path(CONFIG["directories"]["project_root"]) / "demonstration"
                     demo_file_path = os.path.join(str(demo_base_dir), "副本LL-lesson learn-历史问题规避-V9.4.xlsx")
                     if os.path.exists(demo_file_path):
                         dest_path = os.path.join(issue_lists_dir, "副本LL-lesson learn-历史问题规避-V9.4.xlsx")

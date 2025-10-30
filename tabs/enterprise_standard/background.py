@@ -214,7 +214,12 @@ def run_enterprise_standard_job(
     settings = get_bisheng_settings()
     publish({"status": "running", "stage": "initializing", "message": "准备会话目录"})
 
-    base_dirs = {"generated": str(CONFIG["directories"]["generated_files"])}
+    enterprise_uploads = CONFIG["uploads"]["enterprise"]
+    base_dirs = {
+        "enterprise_standards": enterprise_uploads["standards"],
+        "enterprise_examined": enterprise_uploads["examined"],
+        "generated": {"path": CONFIG["directories"]["generated_files"]},
+    }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     paths = ENTERPRISE_WORKFLOW_SURFACE.prepare_paths(session_dirs)
 

@@ -24,8 +24,8 @@ SPECIAL_SYMBOLS_WORKFLOW_SURFACE = WorkflowSurface(
     slug=TAB_SLUG,
     output_subdir="special_symbols_check",
     chunk_prompt_prefix=SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX,
-    standards_dir_key="special_reference",
-    examined_dir_key="special_examined",
+    standards_dir_key="special_symbols_reference",
+    examined_dir_key="special_symbols_inspected",
     warmup_prompt="预热：请回复 'ready for symbols'。",
 )
 

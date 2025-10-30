@@ -123,10 +123,25 @@ PQM_AI/
 ├── tab_help_documentation.py        # Help and documentation
 ├── requirements.txt                 # Python dependencies
 ├── demonstration/                   # Demo files (Git LFS tracked)
-├── CP_files/                        # Control plan files
-├── target_files/                    # Target files for analysis
-├── graph_files/                     # Graph/drawing files
-├── APQP_files/                      # APQP stage files
+├── uploads/                       # Session-scoped uploads (per tab)
+│   ├── parameters/
+│   │   ├── reference/
+│   │   ├── target/
+│   │   └── graph/
+│   ├── enterprise/
+│   │   ├── standards/
+│   │   └── examined/
+│   ├── special_symbols/
+│   │   ├── reference/
+│   │   └── inspected/
+│   ├── file_completeness/
+│   │   ├── stage_initial/
+│   │   ├── stage_a/
+│   │   ├── stage_b/
+│   │   └── stage_c/
+│   └── history_issues/
+│       ├── issue_lists/
+│       └── target/
 ├── generated_files/                 # Generated outputs
 └── media/                          # Media files (images, videos)
 ```
@@ -139,12 +154,35 @@ All settings are managed in `config.py` for easy maintenance:
 ```python
 CONFIG = {
     "directories": {
-        "cp_files": PROJECT_ROOT / "CP_files",
-        "target_files": PROJECT_ROOT / "target_files",
-        "graph_files": PROJECT_ROOT / "graph_files",
-        "apqp_files": PROJECT_ROOT / "APQP_files",
+        "project_root": PROJECT_ROOT,
+        "uploads_root": PROJECT_ROOT / "uploads",
         "generated_files": PROJECT_ROOT / "generated_files",
         "media": PROJECT_ROOT / "media"
+    },
+    "uploads": {
+        "parameters": {
+            "reference": PROJECT_ROOT / "uploads" / "parameters" / "reference",
+            "target": PROJECT_ROOT / "uploads" / "parameters" / "target",
+            "graph": PROJECT_ROOT / "uploads" / "parameters" / "graph",
+        },
+        "enterprise": {
+            "standards": PROJECT_ROOT / "uploads" / "enterprise" / "standards",
+            "examined": PROJECT_ROOT / "uploads" / "enterprise" / "examined",
+        },
+        "special_symbols": {
+            "reference": PROJECT_ROOT / "uploads" / "special_symbols" / "reference",
+            "inspected": PROJECT_ROOT / "uploads" / "special_symbols" / "inspected",
+        },
+        "file_completeness": {
+            "stage_initial": PROJECT_ROOT / "uploads" / "file_completeness" / "stage_initial",
+            "stage_a": PROJECT_ROOT / "uploads" / "file_completeness" / "stage_a",
+            "stage_b": PROJECT_ROOT / "uploads" / "file_completeness" / "stage_b",
+            "stage_c": PROJECT_ROOT / "uploads" / "file_completeness" / "stage_c",
+        },
+        "history_issues": {
+            "issue_lists": PROJECT_ROOT / "uploads" / "history_issues" / "issue_lists",
+            "target": PROJECT_ROOT / "uploads" / "history_issues" / "target",
+        },
     },
     "llm": {
         "ollama_host": "http://localhost:11434",

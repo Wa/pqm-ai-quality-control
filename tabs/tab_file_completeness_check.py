@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+from pathlib import Path
 from util import ensure_session_dirs, handle_file_upload, get_user_session, start_analysis, reset_user_session, complete_analysis, resolve_ollama_host
 from config import CONFIG
 from ollama import Client as OllamaClient
@@ -310,17 +311,24 @@ def render_file_completeness_check_tab(session_id):
     
     
     # Define APQP stage directories (with session subfolders) - using centralized config
-    base_dir = str(CONFIG["directories"]["apqp_files"])
+    completeness_uploads = CONFIG["uploads"]["file_completeness"]
     base_dirs = {
-        "Stage_Initial": os.path.join(base_dir, "Stage_Initial"),
-        "Stage_A": os.path.join(base_dir, "Stage_A"),
-        "Stage_B": os.path.join(base_dir, "Stage_B"),
-        "Stage_C": os.path.join(base_dir, "Stage_C"),
-        "generated": str(CONFIG["directories"]["generated_files"])
+        "file_completeness_stage_initial": completeness_uploads["stage_initial"],
+        "file_completeness_stage_a": completeness_uploads["stage_a"],
+        "file_completeness_stage_b": completeness_uploads["stage_b"],
+        "file_completeness_stage_c": completeness_uploads["stage_c"],
+        "generated": {
+            "path": CONFIG["directories"]["generated_files"],
+            "subdirs": {"file_completeness_outputs": "file_completeness_check"},
+        },
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
+    stage_initial_dir = session_dirs["file_completeness_stage_initial"]
+    stage_a_dir = session_dirs["file_completeness_stage_a"]
+    stage_b_dir = session_dirs["file_completeness_stage_b"]
+    stage_c_dir = session_dirs["file_completeness_stage_c"]
     generated_session_dir = session_dirs["generated"]
-    completeness_dir = session_dirs.get("generated_file_completeness_check", os.path.join(generated_session_dir, "file_completeness_check"))
+    completeness_dir = session_dirs.get("file_completeness_outputs", os.path.join(generated_session_dir, "file_completeness_check"))
     os.makedirs(completeness_dir, exist_ok=True)
 
     # Get structured user session
@@ -343,7 +351,7 @@ def render_file_completeness_check_tab(session_id):
         # Early bulk operations: handle clear-all before listing so UI updates immediately
         if st.button("🗑️ 清空所有文件", key=f"clear_all_files_completeness_{session_id}"):
             try:
-                for dir_path in [session_dirs["Stage_Initial"], session_dirs["Stage_A"], session_dirs["Stage_B"], session_dirs["Stage_C"]]:
+                for dir_path in [stage_initial_dir, stage_a_dir, stage_b_dir, stage_c_dir]:
                     for file in os.listdir(dir_path):
                         file_path = os.path.join(dir_path, file)
                         if os.path.isfile(file_path):
@@ -397,7 +405,7 @@ def render_file_completeness_check_tab(session_id):
         tab_initial, tab_a, tab_b, tab_c = st.tabs(["立项阶段", "A样阶段", "B样阶段", "C样阶段"])
         
         with tab_initial:
-            initial_files_list = get_file_list(session_dirs["Stage_Initial"])
+            initial_files_list = get_file_list(stage_initial_dir)
             if initial_files_list:
                 for i, file_info in enumerate(initial_files_list):
                     display_name = truncate_filename(file_info['name'])
@@ -421,10 +429,10 @@ def render_file_completeness_check_tab(session_id):
             st.markdown("**上传新文件:**")
             new_initial_files = st.file_uploader("选择立项阶段文件", type=None, accept_multiple_files=True, key=f"initial_uploader_tab_{session_id}")
             if new_initial_files:
-                handle_file_upload(new_initial_files, session_dirs["Stage_Initial"])
+                handle_file_upload(new_initial_files, stage_initial_dir)
 
         with tab_a:
-            a_files_list = get_file_list(session_dirs["Stage_A"])
+            a_files_list = get_file_list(stage_a_dir)
             if a_files_list:
                 for i, file_info in enumerate(a_files_list):
                     display_name = truncate_filename(file_info['name'])
@@ -448,10 +456,10 @@ def render_file_completeness_check_tab(session_id):
             st.markdown("**上传新文件:**")
             new_a_files = st.file_uploader("选择A样阶段文件", type=None, accept_multiple_files=True, key=f"a_uploader_tab_{session_id}")
             if new_a_files:
-                handle_file_upload(new_a_files, session_dirs["Stage_A"])
+                handle_file_upload(new_a_files, stage_a_dir)
 
         with tab_b:
-            b_files_list = get_file_list(session_dirs["Stage_B"])
+            b_files_list = get_file_list(stage_b_dir)
             if b_files_list:
                 for i, file_info in enumerate(b_files_list):
                     display_name = truncate_filename(file_info['name'])
@@ -475,10 +483,10 @@ def render_file_completeness_check_tab(session_id):
             st.markdown("**上传新文件:**")
             new_b_files = st.file_uploader("选择B样阶段文件", type=None, accept_multiple_files=True, key=f"b_uploader_tab_{session_id}")
             if new_b_files:
-                handle_file_upload(new_b_files, session_dirs["Stage_B"])
+                handle_file_upload(new_b_files, stage_b_dir)
 
         with tab_c:
-            c_files_list = get_file_list(session_dirs["Stage_C"])
+            c_files_list = get_file_list(stage_c_dir)
             if c_files_list:
                 for i, file_info in enumerate(c_files_list):
                     display_name = truncate_filename(file_info['name'])
@@ -502,7 +510,7 @@ def render_file_completeness_check_tab(session_id):
             st.markdown("**上传新文件:**")
             new_c_files = st.file_uploader("选择C样阶段文件", type=None, accept_multiple_files=True, key=f"c_uploader_tab_{session_id}")
             if new_c_files:
-                handle_file_upload(new_c_files, session_dirs["Stage_C"])
+                handle_file_upload(new_c_files, stage_c_dir)
     # Render MAIN column content: uploaders and controls
     with col_main:
         # File uploads directly in col_main (no nested columns)
@@ -510,22 +518,22 @@ def render_file_completeness_check_tab(session_id):
         with col_initial:
             files_initial = st.file_uploader("点击上传立项阶段文件", type=None, accept_multiple_files=True, key="stage_initial")
             if files_initial:
-                handle_file_upload(files_initial, session_dirs["Stage_Initial"])
+                handle_file_upload(files_initial, stage_initial_dir)
                 st.success(f"已上传 {len(files_initial)} 个立项阶段文件")
         with col_a:
             files_a = st.file_uploader("点击上传A样阶段文件", type=None, accept_multiple_files=True, key="stage_a")
             if files_a:
-                handle_file_upload(files_a, session_dirs["Stage_A"])
+                handle_file_upload(files_a, stage_a_dir)
                 st.success(f"已上传 {len(files_a)} 个A样阶段文件")
         with col_b:
             files_b = st.file_uploader("点击上传B样阶段文件", type=None, accept_multiple_files=True, key="stage_b")
             if files_b:
-                handle_file_upload(files_b, session_dirs["Stage_B"])
+                handle_file_upload(files_b, stage_b_dir)
                 st.success(f"已上传 {len(files_b)} 个B样阶段文件")
         with col_c:
             files_c = st.file_uploader("点击上传C样阶段文件", type=None, accept_multiple_files=True, key="stage_c")
             if files_c:
-                handle_file_upload(files_c, session_dirs["Stage_C"])
+                handle_file_upload(files_c, stage_c_dir)
                 st.success(f"已上传 {len(files_c)} 个C样阶段文件")
 
         # Start button - only show if process hasn't started
@@ -539,25 +547,31 @@ def render_file_completeness_check_tab(session_id):
             with col_buttons[1]:
                 if st.button("演示", key=f"file_completeness_demo_button_{session_id}"):
                     # Demo feature: copy demonstration files to current session
-                    demo_base_dir = CONFIG["directories"]["apqp_files"].parent / "demonstration"
-                    
+                    demo_base_dir = Path(CONFIG["directories"]["project_root"]) / "demonstration"
+
                     # Copy files from demonstration APQP_files to session folders
-                    demo_apqp_path = os.path.join(demo_base_dir, "APQP_files")
-                    if os.path.exists(demo_apqp_path):
+                    demo_apqp_path = demo_base_dir / "APQP_files"
+                    if demo_apqp_path.exists():
                         import shutil
-                        for stage_folder in ["Stage_Initial", "Stage_A", "Stage_B", "Stage_C"]:
-                            demo_stage_path = os.path.join(demo_apqp_path, stage_folder)
-                            session_stage_path = session_dirs[stage_folder]
-                            
-                            if os.path.exists(demo_stage_path):
-                                # Copy all files from demo stage folder to session stage folder
+
+                        stage_mapping = {
+                            "Stage_Initial": stage_initial_dir,
+                            "Stage_A": stage_a_dir,
+                            "Stage_B": stage_b_dir,
+                            "Stage_C": stage_c_dir,
+                        }
+
+                        for stage_folder, session_stage_path in stage_mapping.items():
+                            demo_stage_path = demo_apqp_path / stage_folder
+
+                            if demo_stage_path.exists():
                                 for file_name in os.listdir(demo_stage_path):
-                                    demo_file_path = os.path.join(demo_stage_path, file_name)
-                                    session_file_path = os.path.join(session_stage_path, file_name)
-                                    
-                                    if os.path.isfile(demo_file_path):
+                                    demo_file_path = demo_stage_path / file_name
+                                    session_file_path = Path(session_stage_path) / file_name
+
+                                    if demo_file_path.is_file():
                                         shutil.copy2(demo_file_path, session_file_path)
-                        
+
                         start_analysis(session_id, 'completeness')
                         st.success("演示已开始！正在分析演示文件...")
                         st.rerun()
@@ -655,10 +669,10 @@ def render_file_completeness_check_tab(session_id):
             
             # Generate prompts and run analysis for each stage
             stages = [
-                ("立项阶段", session_dirs["Stage_Initial"]),
-                ("A样阶段", session_dirs["Stage_A"]),
-                ("B样阶段", session_dirs["Stage_B"]),
-                ("C样阶段", session_dirs["Stage_C"])
+                ("立项阶段", stage_initial_dir),
+                ("A样阶段", stage_a_dir),
+                ("B样阶段", stage_b_dir),
+                ("C样阶段", stage_c_dir)
             ]
             
             # Dictionary to store all stage responses for Excel export

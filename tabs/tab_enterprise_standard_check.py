@@ -6,6 +6,7 @@ import re
 import shutil
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -24,8 +25,11 @@ def render_enterprise_standard_check_tab(session_id):
 
     # No CSS width overrides; rely on Streamlit columns like special symbols tab
     # Ensure enterprise directories and a generated output root exist
+    enterprise_uploads = CONFIG["uploads"]["enterprise"]
     base_dirs = {
-        "generated": str(CONFIG["directories"]["generated_files"]),
+        "enterprise_standards": enterprise_uploads["standards"],
+        "enterprise_examined": enterprise_uploads["examined"],
+        "generated": {"path": CONFIG["directories"]["generated_files"]},
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     try:
@@ -346,7 +350,7 @@ def render_enterprise_standard_check_tab(session_id):
                 # Copy demonstration files into the user's enterprise folders (no processing here)
                 try:
                     # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["cp_files"].parent / "demonstration"
+                    demo_base_dir = Path(CONFIG["directories"]["project_root"]) / "demonstration"
                     demo_enterprise = os.path.join(str(demo_base_dir), "enterprise_standard_files")
                     # Subfolders to copy from → to
                     pairs = [
