@@ -400,8 +400,8 @@ BASE_DIR = ""  # Use root directory instead of "user_sessions"
 def get_session_dirs(session_id: str) -> Dict[str, str]:
     """Get session directories for a user"""
     return {
-        "cp": os.path.join(BASE_DIR, "CP_files", session_id),
-        "target": os.path.join(BASE_DIR, "target_files", session_id), 
+        "reference": os.path.join(BASE_DIR, "reference_files", session_id),
+        "target": os.path.join(BASE_DIR, "target_files", session_id),
         "graph": os.path.join(BASE_DIR, "graph_files", session_id)
     }
 
@@ -422,7 +422,7 @@ async def health_check():
 @app.post("/upload-file")
 async def upload_file(
     session_id: str,
-    file_type: str,  # "cp", "target", or "graph"
+    file_type: str,  # "reference", "target", or "graph"
     file: UploadFile = File(...)
 ):
     """Upload a file to the specified session directory"""

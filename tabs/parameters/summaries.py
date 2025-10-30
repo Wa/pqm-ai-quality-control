@@ -41,12 +41,12 @@ def summarize_with_ollama(
         original_name = name_no_ext
         prompt_lines = [
             "你是一名严谨的参数差异整理助手。以下内容来自一个基于检索增强的大语言模型 (RAG-LLM) 系统，",
-            "用于分析待检文件/图纸与控制计划之间的参数一致性。该部分原始技术文件名称为：",
+            "用于分析待检文件/图纸与基准文件之间的参数一致性。该部分原始技术文件名称为：",
             f"{original_name}。",
             "\n请将后续全文内容转换为 JSON 数组（list of objects），每个对象应包含以下键：",
             "- parameter：参数或特性名称；",
             "- target_value：待检文件或图纸中的取值/范围（未知时留空字符串）；",
-            "- cp_value：控制计划中的取值/范围（未知时留空字符串）；",
+            "- reference_value：基准文件中的取值/范围（未知时留空字符串）；",
             "- location：用于追溯的定位信息，例如目标文件/图纸文件名、Sheet 名称、段落；",
             "- issue：一句话描述发现的不一致或风险；",
             "- suggestion：针对该问题的修订或沟通建议。",
@@ -231,7 +231,7 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
         report_exception("读取参数初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["parameter", "target_value", "cp_value", "location", "issue", "suggestion"]
+    columns = ["parameter", "target_value", "reference_value", "location", "issue", "suggestion"]
     rows = []
 
     try:
@@ -309,7 +309,7 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
                 [
                     str(row.get("parameter", "")),
                     str(row.get("target_value", "")),
-                    str(row.get("cp_value", "")),
+                    str(row.get("reference_value", "")),
                     str(row.get("location", "")),
                     str(row.get("issue", "")),
                     str(row.get("suggestion", "")),
@@ -326,7 +326,7 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
                 import csv
 
                 writer = csv.writer(handle)
-                writer.writerow(["参数名称", "目标取值", "控制计划取值", "定位信息", "问题描述", "整改建议"])
+                writer.writerow(["参数名称", "目标取值", "基准取值", "定位信息", "问题描述", "整改建议"])
                 writer.writerows(rows)
         except Exception as error:
             report_exception("写入参数检查CSV失败", error)
@@ -334,7 +334,7 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
 
     if rows and "pd" in locals() and pd is not None:
         try:
-            df = pd.DataFrame(rows, columns=["参数名称", "目标取值", "控制计划取值", "定位信息", "问题描述", "整改建议"])
+            df = pd.DataFrame(rows, columns=["参数名称", "目标取值", "基准取值", "定位信息", "问题描述", "整改建议"])
             xlsx_path = os.path.join(final_dir, f"设计制程参数检查结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
             df.to_excel(xlsx_path, index=False)
         except Exception as error:

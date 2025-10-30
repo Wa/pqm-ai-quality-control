@@ -77,7 +77,7 @@ def render_parameters_check_tab(session_id: str | None) -> None:
         return
 
     base_dirs = {
-        "cp": str(CONFIG["directories"]["cp_files"]),
+        "reference": str(CONFIG["directories"]["reference_files"]),
         "target": str(CONFIG["directories"]["target_files"]),
         "graph": str(CONFIG["directories"]["graph_files"]),
         "generated": str(CONFIG["directories"]["generated_files"]),
@@ -89,7 +89,7 @@ def render_parameters_check_tab(session_id: str | None) -> None:
         st.error(f"初始化会话目录失败：{error}")
         return
 
-    cp_dir = paths.standards_dir or session_dirs.get("cp", "")
+    reference_dir = paths.standards_dir or session_dirs.get("reference", "")
     target_dir = paths.examined_dir or session_dirs.get("target", "")
     graph_dir = session_dirs.get("graph", "")
     parameters_out_root = paths.output_root
@@ -100,12 +100,14 @@ def render_parameters_check_tab(session_id: str | None) -> None:
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
     job_state_key = f"parameters_job_id_{session_id}"
+    last_status_key = f"parameters_last_status_{session_id}"
     stream_state_key = f"parameters_stream_state_{session_id}"
     job_status: dict[str, object] | None = None
     job_error: str | None = None
 
+    stored_job_id = st.session_state.get(job_state_key)
+
     if backend_ready and backend_client is not None:
-        stored_job_id = st.session_state.get(job_state_key)
         if stored_job_id:
             result = backend_client.get_parameters_job(stored_job_id)
             if isinstance(result, dict) and result.get("job_id"):
@@ -122,10 +124,21 @@ def render_parameters_check_tab(session_id: str | None) -> None:
                 job_status = result[0]
                 if isinstance(job_status, dict) and job_status.get("job_id"):
                     st.session_state[job_state_key] = job_status.get("job_id")
+                    stored_job_id = job_status.get("job_id")
             elif isinstance(result, dict) and result.get("status") == "error":
                 job_error = str(result.get("message", "后台任务列表查询失败"))
     else:
         job_error = "后台服务未连接"
+
+    if job_status:
+        st.session_state[last_status_key] = job_status
+    elif stored_job_id:
+        cached_status = st.session_state.get(last_status_key)
+        if isinstance(cached_status, dict):
+            job_status = cached_status
+            job_error = None
+    else:
+        st.session_state.pop(last_status_key, None)
 
     status_str = str(job_status.get("status")) if job_status else ""
     job_running = bool(job_status and status_str in {"queued", "running"})
@@ -136,18 +149,18 @@ def render_parameters_check_tab(session_id: str | None) -> None:
     with col_info:
         st.subheader("📁 文件管理")
 
-        cp_files = _collect_files(cp_dir)
+        reference_files = _collect_files(reference_dir)
         target_files = _collect_files(target_dir)
         graph_files = _collect_files(graph_dir)
         result_files = _collect_files(final_results_dir)
 
         col_clear1, col_clear2, col_clear3, col_clear4 = st.columns(4)
         with col_clear1:
-            if st.button("🗑️ 清空控制计划", key=f"parameters_clear_cp_{session_id}"):
+            if st.button("🗑️ 清空基准文件", key=f"parameters_clear_reference_{session_id}"):
                 try:
-                    for info in cp_files:
+                    for info in reference_files:
                         os.remove(info["path"])
-                    st.success("已清空控制计划文件")
+                    st.success("已清空基准文件")
                     st.rerun()
                 except Exception as error:
                     st.error(f"清空失败: {error}")
@@ -179,8 +192,8 @@ def render_parameters_check_tab(session_id: str | None) -> None:
                 except Exception as error:
                     st.error(f"清空失败: {error}")
 
-        tab_cp, tab_target, tab_graph, tab_results = st.tabs([
-            "控制计划",
+        tab_reference, tab_target, tab_graph, tab_results = st.tabs([
+            "基准文件",
             "待检查文件",
             "图纸文件",
             "分析结果",
@@ -209,22 +222,22 @@ def render_parameters_check_tab(session_id: str | None) -> None:
                                 except Exception as error:
                                     st.error(f"删除失败: {error}")
 
-        _render_file_list(tab_cp, cp_files, "parameters_delete_cp")
+        _render_file_list(tab_reference, reference_files, "parameters_delete_reference")
         _render_file_list(tab_target, target_files, "parameters_delete_target")
         _render_file_list(tab_graph, graph_files, "parameters_delete_graph")
         _render_file_list(tab_results, result_files, "parameters_delete_result")
 
         st.markdown("---")
         st.markdown("**上传文件**")
-        cp_uploads = st.file_uploader(
-            "上传控制计划文件",
+        reference_uploads = st.file_uploader(
+            "上传基准文件",
             type=None,
             accept_multiple_files=True,
-            key=f"parameters_cp_uploader_{session_id}",
+            key=f"parameters_reference_uploader_{session_id}",
         )
-        if cp_uploads:
-            handle_file_upload(cp_uploads, cp_dir)
-            st.success(f"已上传 {len(cp_uploads)} 份控制计划文件")
+        if reference_uploads:
+            handle_file_upload(reference_uploads, reference_dir)
+            st.success(f"已上传 {len(reference_uploads)} 份基准文件")
 
         target_uploads = st.file_uploader(
             "上传待检查文件",
@@ -289,12 +302,23 @@ def render_parameters_check_tab(session_id: str | None) -> None:
                 if st.button("▶️ 开始", disabled=start_disabled, key=f"parameters_start_{session_id}"):
                     if backend_client is not None:
                         result = backend_client.start_parameters_job(session_id)
-                        if isinstance(result, dict) and result.get("job_id"):
-                            st.session_state[job_state_key] = result["job_id"]
+                        job_id = result.get("job_id") if isinstance(result, dict) else None
+                        if not job_id:
+                            fallback = backend_client.list_parameters_jobs(session_id)
+                            if isinstance(fallback, list) and fallback:
+                                latest_job = fallback[0]
+                                if isinstance(latest_job, dict) and latest_job.get("job_id"):
+                                    job_id = latest_job.get("job_id")
+                                    result = latest_job
+                        if job_id:
+                            st.session_state[job_state_key] = job_id
                             st.success("已启动后台任务")
                             st.rerun()
                         else:
-                            st.error(str(result.get("message", "任务启动失败")))
+                            message = "任务启动失败"
+                            if isinstance(result, dict):
+                                message = str(result.get("message", message))
+                            st.error(message)
             with col_pause:
                 if st.button("⏸ 暂停", disabled=not job_running, key=f"parameters_pause_{session_id}"):
                     if backend_client is not None and job_status:
@@ -391,9 +415,6 @@ def render_parameters_check_tab(session_id: str | None) -> None:
         else:
             st.error("后台服务不可用，请稍后重试。")
             st.session_state.pop(stream_state_key, None)
-
-        st.markdown("---")
-        st.caption(f"提示：控制计划文本会同步到 `{parameters_out_root}`，检查进度保存在 `{checkpoint_dir}`。")
 
     if job_running:
         st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")

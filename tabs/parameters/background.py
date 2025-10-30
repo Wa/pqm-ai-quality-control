@@ -212,7 +212,7 @@ def run_parameters_job(
     publish({"status": "running", "stage": "initializing", "message": "准备会话目录"})
 
     base_dirs = {
-        "cp": str(CONFIG["directories"]["cp_files"]),
+        "reference": str(CONFIG["directories"]["reference_files"]),
         "target": str(CONFIG["directories"]["target_files"]),
         "graph": str(CONFIG["directories"]["graph_files"]),
         "generated": str(CONFIG["directories"]["generated_files"]),
@@ -260,7 +260,7 @@ def run_parameters_job(
         pass
 
     emitter.set_stage("conversion")
-    emitter.info("正在解析控制计划文件")
+    emitter.info("正在解析基准文件")
     process_pdf_folder(standards_dir, standards_txt_dir, emitter, annotate_sources=True)
     process_word_ppt_folder(standards_dir, standards_txt_dir, emitter, annotate_sources=True)
     process_excel_folder(standards_dir, standards_txt_dir, emitter, annotate_sources=True)
@@ -329,7 +329,7 @@ def run_parameters_job(
         else:
             emitter.warning("KB 创建或查找失败，继续执行但可能影响检索效果")
     except Exception as error:
-        report_exception("控制计划KB同步失败", error, level="warning")
+        report_exception("基准文件KB同步失败", error, level="warning")
 
     emitter.set_stage("warmup")
     try:
