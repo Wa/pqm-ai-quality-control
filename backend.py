@@ -16,7 +16,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from config import CONFIG
 from tabs.enterprise_standard.background import run_enterprise_standard_job
+from tabs.file_completeness import run_file_completeness_job
 from tabs.parameters.background import run_parameters_job
 from tabs.special_symbols.background import run_special_symbols_job
 
@@ -33,6 +35,10 @@ JOB_DEFINITIONS = {
     "parameters": {
         "runner": run_parameters_job,
         "label": "参数一致性检查",
+    },
+    "file_completeness": {
+        "runner": run_file_completeness_job,
+        "label": "文件齐套性检查",
     },
 }
 
@@ -402,15 +408,80 @@ def _start_job(job_type: str, session_id: str) -> JobRecord:
     monitor_thread = Thread(target=_monitor_process, args=(job_id, process), daemon=True)
     monitor_thread.start()
     return record
+
+
+def _get_job_status(job_id: str, expected_type: Optional[str] = None) -> EnterpriseJobStatus:
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+    if not record or (expected_type and record.job_type != expected_type):
+        raise HTTPException(status_code=404, detail="未找到任务")
+    return _record_to_status(record)
+
+
+def _list_jobs(job_type: str, session_id: Optional[str] = None) -> List[EnterpriseJobStatus]:
+    _prune_jobs()
+    with jobs_lock:
+        filtered = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if record.job_type == job_type
+            and (session_id is None or record.session_id == session_id)
+        ]
+    filtered.sort(key=lambda status: status.created_at, reverse=True)
+    return filtered
+
+
+def _pause_resume_stop_job(job_id: str, action: str, job_type: str) -> EnterpriseJobStatus:
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != job_type:
+            raise HTTPException(status_code=404, detail="未找到任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持此操作")
+        pause_flag = os.path.join(control_dir, "pause")
+        stop_flag = os.path.join(control_dir, "stop")
+        if action == "pause":
+            try:
+                open(pause_flag, "a").close()
+            except Exception as error:
+                raise HTTPException(status_code=500, detail=f"设置暂停失败: {error}")
+            record.status = "paused"
+            record.stage = "paused"
+        elif action == "resume":
+            try:
+                if os.path.isfile(pause_flag):
+                    os.remove(pause_flag)
+            except Exception as error:
+                raise HTTPException(status_code=500, detail=f"取消暂停失败: {error}")
+            record.status = "running"
+            record.stage = record.stage or "running"
+        elif action == "stop":
+            try:
+                open(stop_flag, "a").close()
+                if os.path.isfile(pause_flag):
+                    os.remove(pause_flag)
+            except Exception as error:
+                raise HTTPException(status_code=500, detail=f"请求停止失败: {error}")
+            record.status = "stopping"
+            record.stage = "stopping"
+        else:
+            raise HTTPException(status_code=400, detail="未知操作")
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
 # Base directories
-BASE_DIR = ""  # Use root directory instead of "user_sessions"
+BASE_DIR = str(CONFIG["directories"]["uploads"])
+os.makedirs(BASE_DIR, exist_ok=True)
 
 def get_session_dirs(session_id: str) -> Dict[str, str]:
     """Get session directories for a user"""
+    session_root = os.path.join(BASE_DIR, session_id, "parameters")
     return {
-        "reference": os.path.join(BASE_DIR, "reference_files", session_id),
-        "target": os.path.join(BASE_DIR, "target_files", session_id),
-        "graph": os.path.join(BASE_DIR, "graph_files", session_id)
+        "reference": os.path.join(session_root, "reference"),
+        "target": os.path.join(session_root, "target"),
+        "graph": os.path.join(session_root, "graph"),
     }
 
 def ensure_session_dirs(session_id: str):
@@ -671,7 +742,7 @@ def start_parameters_job(request: EnterpriseJobRequest) -> EnterpriseJobStatus:
 
 @app.get("/parameters/jobs/{job_id}", response_model=EnterpriseJobStatus)
 def get_parameters_job(job_id: str) -> EnterpriseJobStatus:
-    return _get_job_status(job_id)
+    return _get_job_status(job_id, expected_type="parameters")
 
 
 @app.get("/parameters/jobs", response_model=List[EnterpriseJobStatus])
@@ -681,17 +752,48 @@ def list_parameters_jobs(session_id: Optional[str] = None) -> List[EnterpriseJob
 
 @app.post("/parameters/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
 def pause_parameters_job(job_id: str) -> EnterpriseJobStatus:
-    return _pause_resume_stop_job(job_id, action="pause")
+    return _pause_resume_stop_job(job_id, action="pause", job_type="parameters")
 
 
 @app.post("/parameters/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
 def resume_parameters_job(job_id: str) -> EnterpriseJobStatus:
-    return _pause_resume_stop_job(job_id, action="resume")
+    return _pause_resume_stop_job(job_id, action="resume", job_type="parameters")
 
 
 @app.post("/parameters/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
 def stop_parameters_job(job_id: str) -> EnterpriseJobStatus:
-    return _pause_resume_stop_job(job_id, action="stop")
+    return _pause_resume_stop_job(job_id, action="stop", job_type="parameters")
+
+
+@app.post("/file-completeness/jobs", response_model=EnterpriseJobStatus)
+def start_file_completeness_job(request: EnterpriseJobRequest) -> EnterpriseJobStatus:
+    record = _start_job("file_completeness", request.session_id)
+    return _record_to_status(record)
+
+
+@app.get("/file-completeness/jobs/{job_id}", response_model=EnterpriseJobStatus)
+def get_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
+    return _get_job_status(job_id, expected_type="file_completeness")
+
+
+@app.get("/file-completeness/jobs", response_model=List[EnterpriseJobStatus])
+def list_file_completeness_jobs(session_id: Optional[str] = None) -> List[EnterpriseJobStatus]:
+    return _list_jobs("file_completeness", session_id)
+
+
+@app.post("/file-completeness/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+def pause_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="pause", job_type="file_completeness")
+
+
+@app.post("/file-completeness/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+def resume_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="resume", job_type="file_completeness")
+
+
+@app.post("/file-completeness/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+def stop_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="stop", job_type="file_completeness")
 
 
 @app.post("/enterprise-standard/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)

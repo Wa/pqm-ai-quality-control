@@ -686,7 +686,7 @@ def render_technical_docs_section(session_id):
       generated_files/ \\
       user_sessions/ \\
       user_settings/ \\
-      enterprise_standard_files/
+      uploads/
     
     # 备份配置文件
     cp config.py config_backup_$(date +%Y%m%d).py
