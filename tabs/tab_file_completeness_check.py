@@ -180,9 +180,12 @@ def render_stage_events(
     session_id: str,
     events: Iterable[Dict[str, object]],
     source: str,
+    *,
+    state_token: Optional[str] = None,
 ) -> None:
     if not events:
         return
+    token_value = state_token if state_token is not None else source
     grouped: Dict[str, List[Dict[str, object]]] = {}
     for event in events:
         stage = str(event.get("file") or event.get("file_name") or "")
@@ -195,32 +198,67 @@ def render_stage_events(
         with st.expander(f"{stage_name} · 分析记录", expanded=False):
             state_key = f"file_completeness_stream_state_{session_id}_{source}_{stage_name}"
             state = st.session_state.get(state_key)
-            if not isinstance(state, dict):
-                state = {"rendered": set()}
-            rendered = set(state.get("rendered") or [])
+            if not isinstance(state, dict) or state.get("token") != token_value:
+                state = {"token": token_value, "messages": {}}
+            messages_state = state.get("messages")
+            if not isinstance(messages_state, dict):
+                messages_state = {}
+
+            sequence_groups: Dict[int, List[Dict[str, object]]] = {}
             for event in sorted(stage_events, key=lambda item: int(item.get("sequence", 0))):
                 sequence = int(event.get("sequence", 0))
-                is_new = sequence not in rendered
-                rendered.add(sequence)
-                role = "user" if event.get("kind") == "prompt" else "assistant"
-                text = str(event.get("text") or "")
-                timestamp = event.get("ts")
+                sequence_groups.setdefault(sequence, []).append(event)
+
+            active_sequences: List[int] = []
+            for sequence in sorted(sequence_groups.keys()):
+                entries = sequence_groups[sequence]
+                if not entries:
+                    continue
+                latest_event = entries[-1]
+                role = "user" if latest_event.get("kind") == "prompt" else "assistant"
+                timestamp = None
+                message_text = ""
+                for candidate in reversed(entries):
+                    if not timestamp and candidate.get("ts"):
+                        timestamp = candidate.get("ts")
+                    candidate_text = str(candidate.get("text") or "")
+                    if candidate_text and not message_text:
+                        message_text = candidate_text
+                    if timestamp and message_text:
+                        break
+
+                previous_state = messages_state.get(sequence)
+                is_new = not isinstance(previous_state, dict)
+
                 with st.chat_message(role):
                     if timestamp:
                         st.caption(str(timestamp))
-                    if text:
+                    if message_text:
                         if is_new:
                             placeholder = st.empty()
                             render_method = "text" if role == "user" else "write"
-                            stream_text(placeholder, text, render_method=render_method, delay=0.02)
+                            stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
                         else:
                             if role == "user":
-                                st.text(text)
+                                st.text(message_text)
                             else:
-                                st.write(text)
+                                st.write(message_text)
                     else:
                         st.write("(无内容)")
-            state["rendered"] = sorted(rendered)
+
+                messages_state[sequence] = {
+                    "text": message_text,
+                    "timestamp": timestamp,
+                    "role": role,
+                }
+                active_sequences.append(sequence)
+
+            for existing_sequence in list(messages_state.keys()):
+                if existing_sequence not in active_sequences:
+                    messages_state.pop(existing_sequence, None)
+
+            state["messages"] = messages_state
+            state["token"] = token_value
             st.session_state[state_key] = state
 
 
@@ -416,10 +454,18 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 )
                 progress = job_status.get("progress")
                 if isinstance(progress, (int, float)):
-                    st.progress(min(100, max(0, float(progress))) / 100.0)
+                    clamped = min(100.0, max(0.0, float(progress)))
+                    st.progress(clamped / 100.0)
+                    st.caption(f"进度：{clamped:.0f}%")
                 events = job_status.get("stream_events")
                 if isinstance(events, list) and events:
-                    render_stage_events(session_id, events, source="job")
+                    job_state_token = f"job_{job_status.get('job_id') or ''}"
+                    render_stage_events(
+                        session_id,
+                        events,
+                        source="job",
+                        state_token=job_state_token,
+                    )
                 logs = job_status.get("logs")
                 if isinstance(logs, list) and logs:
                     with st.expander("点击查看后台日志", expanded=False):
@@ -441,7 +487,13 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
         demo_events = st.session_state.get(demo_state_key)
         if demo_events and not job_status:
             st.info("演示模式：下方展示预先生成的提示词与响应。")
-            render_stage_events(session_id, demo_events, source="demo")
+            demo_state_token = f"demo_{session_id}"
+            render_stage_events(
+                session_id,
+                demo_events,
+                source="demo",
+                state_token=demo_state_token,
+            )
 
         if backend_ready and job_status and status_value in {"queued", "running"}:
             st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
