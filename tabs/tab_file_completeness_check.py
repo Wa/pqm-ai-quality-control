@@ -314,7 +314,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                                     try:
                                         os.remove(info["path"])
                                         st.success(f"已删除: {info['name']}")
-                                        st.experimental_rerun()
+                                        st.rerun()
                                     except Exception as error:
                                         st.error(f"删除失败: {error}")
                 else:
@@ -325,7 +325,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 if uploaded:
                     target_dir = stage_dirs.get(stage_name)
                     handle_file_upload(uploaded, target_dir)
-                    st.experimental_rerun()
+                    st.rerun()
         with tabs[-1]:
             result_files = get_file_list(final_results_dir)
             if result_files:
@@ -364,7 +364,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
                         st.success("已提交后台任务。")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         detail = ""
                         if isinstance(response, dict):
@@ -376,7 +376,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     resp = backend_client.pause_file_completeness_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("status") in {"paused", "running", "stopping"} or resp.get("job_id")):
                         st.success("已请求暂停任务。")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error(f"暂停失败：{resp}")
         with btn_row1[2]:
@@ -385,7 +385,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     resp = backend_client.resume_file_completeness_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("status") in {"running", "queued"} or resp.get("job_id")):
                         st.success("已请求恢复任务。")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error(f"恢复失败：{resp}")
 
@@ -396,7 +396,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     resp = backend_client.stop_file_completeness_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("status") in {"stopping", "failed", "succeeded"} or resp.get("job_id")):
                         st.success("已请求停止任务。")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error(f"停止失败：{resp}")
         with btn_row2[1]:
@@ -405,7 +405,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 st.session_state.pop(job_state_key, None)
                 st.session_state[demo_state_key] = events
                 st.success("已加载演示数据。")
-                st.experimental_rerun()
+                st.rerun()
 
         if backend_ready:
             if job_status:

@@ -323,10 +323,7 @@ def render_special_symbols_check_tab(session_id):
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
                         st.success("已提交后台任务，刷新或稍后查看进度。")
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        else:
-                            st.experimental_rerun()
+                        st.rerun()
                     else:
                         detail = ""
                         if isinstance(response, dict):
@@ -344,10 +341,7 @@ def render_special_symbols_check_tab(session_id):
                     resp = backend_client.pause_special_symbols_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"paused", "running", "stopping"}):
                         st.success("已请求暂停任务。")
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        else:
-                            st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error(f"暂停失败：{str(resp)}")
 
@@ -359,10 +353,7 @@ def render_special_symbols_check_tab(session_id):
                     resp = backend_client.resume_special_symbols_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"running", "queued"}):
                         st.success("已请求恢复任务。")
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        else:
-                            st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error(f"恢复失败：{str(resp)}")
 
@@ -753,9 +744,6 @@ def render_special_symbols_check_tab(session_id):
     if job_running:
         st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
         time.sleep(5)
-        if hasattr(st, "rerun"):
-            st.rerun()
-        else:
-            st.experimental_rerun()
+        st.rerun()
 
 # The end
