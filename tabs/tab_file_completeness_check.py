@@ -176,6 +176,16 @@ def prepare_demo_run(
     return events
 
 
+def _event_sequence_order(event: Dict[str, object]) -> int:
+    try:
+        value = event.get("sequence") if isinstance(event, dict) else None
+        if value is None:
+            return 0
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def render_stage_events(
     session_id: str,
     events: Iterable[Dict[str, object]],
@@ -209,7 +219,7 @@ def render_stage_events(
             grouped_messages: List[Dict[str, object]] = []
             group_index: Dict[str, int] = {}
 
-            sorted_events = sorted(stage_events, key=lambda item: int(item.get("sequence", 0)))
+            sorted_events = sorted(stage_events, key=_event_sequence_order)
             for event in sorted_events:
                 kind = str(event.get("kind") or "info")
                 part = int(event.get("part") or 0)
@@ -327,6 +337,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
     backend_client = get_backend_client() if backend_ready else None
     job_state_key = f"file_completeness_job_id_{session_id}"
     demo_state_key = f"file_completeness_demo_events_{session_id}"
+    stream_events_state_key = f"file_completeness_stream_events_{session_id}"
 
     job_status: Optional[Dict[str, object]] = None
     job_error: Optional[str] = None
@@ -430,6 +441,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 else:
                     clear_folder_contents(initial_results_dir)
                     st.session_state.pop(demo_state_key, None)
+                    st.session_state.pop(stream_events_state_key, None)
                     response = backend_client.start_file_completeness_job(session_id)
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
@@ -473,6 +485,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
             if st.button("演示", key=f"demo_completeness_{session_id}"):
                 events = prepare_demo_run(session_id, stage_dirs, initial_results_dir, final_results_dir)
                 st.session_state.pop(job_state_key, None)
+                st.session_state.pop(stream_events_state_key, None)
                 st.session_state[demo_state_key] = events
                 st.success("已加载演示数据。")
                 st.rerun()
@@ -488,12 +501,49 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     clamped = min(100.0, max(0.0, float(progress)))
                     st.progress(clamped / 100.0)
                     st.caption(f"进度：{clamped:.0f}%")
+                job_id = str(job_status.get("job_id") or "")
+                stream_state = st.session_state.get(stream_events_state_key)
+                if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_id:
+                    stream_state = {"job_id": job_id, "events": {}}
+                events_state = stream_state.get("events")
+                if not isinstance(events_state, dict):
+                    events_state = {}
+                    stream_state["events"] = events_state
+
                 events = job_status.get("stream_events")
-                if isinstance(events, list) and events:
-                    job_state_token = f"job_{job_status.get('job_id') or ''}"
+                if isinstance(events, list):
+                    for event in events:
+                        if not isinstance(event, dict):
+                            continue
+                        sequence_value = str(event.get("sequence") or "")
+                        if not sequence_value:
+                            fallback_key = "::".join(
+                                [
+                                    str(event.get("kind") or ""),
+                                    str(event.get("file") or ""),
+                                    str(event.get("part") or ""),
+                                    str(event.get("total_parts") or ""),
+                                    str(event.get("ts") or ""),
+                                ]
+                            )
+                            sequence_value = fallback_key or str(len(events_state) + 1)
+                        existing_event = events_state.get(sequence_value)
+                        if isinstance(existing_event, dict):
+                            merged_event = dict(existing_event)
+                            merged_event.update(event)
+                            events_state[sequence_value] = merged_event
+                        else:
+                            events_state[sequence_value] = dict(event)
+
+                st.session_state[stream_events_state_key] = stream_state
+
+                aggregated_events = list(events_state.values())
+                if aggregated_events:
+                    aggregated_events.sort(key=_event_sequence_order)
+                    job_state_token = f"job_{job_id}"
                     render_stage_events(
                         session_id,
-                        events,
+                        aggregated_events,
                         source="job",
                         state_token=job_state_token,
                     )
@@ -525,6 +575,20 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 source="demo",
                 state_token=demo_state_token,
             )
+        elif not job_status:
+            stream_state = st.session_state.get(stream_events_state_key)
+            if isinstance(stream_state, dict):
+                cached_events = stream_state.get("events")
+                if isinstance(cached_events, dict) and cached_events:
+                    cached_list = list(cached_events.values())
+                    cached_list.sort(key=_event_sequence_order)
+                    job_state_token = f"job_{stream_state.get('job_id') or ''}"
+                    render_stage_events(
+                        session_id,
+                        cached_list,
+                        source="job",
+                        state_token=job_state_token,
+                    )
 
         if backend_ready and job_status and status_value in {"queued", "running"}:
             st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
