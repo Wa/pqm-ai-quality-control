@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
@@ -441,3 +442,8 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
         if demo_events and not job_status:
             st.info("演示模式：下方展示预先生成的提示词与响应。")
             render_stage_events(session_id, demo_events, source="demo")
+
+        if backend_ready and job_status and status_value in {"queued", "running"}:
+            st.caption("页面将在 5 秒后自动刷新以更新后台任务进度…")
+            time.sleep(5)
+            st.rerun()
