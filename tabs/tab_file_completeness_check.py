@@ -1,6 +1,7 @@
 """Streamlit UI for the file completeness check workflow."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -11,7 +12,7 @@ import streamlit as st
 
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
-from tabs.file_completeness import STAGE_ORDER, STAGE_SLUG_MAP
+from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_MAP
 from tabs.shared import stream_text
 from util import ensure_session_dirs, handle_file_upload, get_user_session
 
@@ -337,6 +338,33 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
 
     stage_dirs = {name: session_dirs.get(STAGE_SLUG_MAP.get(name, name), "") for name in STAGE_ORDER}
 
+    custom_requirements_path = os.path.join(completeness_dir, "custom_requirements.json")
+    existing_custom_requirements: Dict[str, List[str]] = {}
+    if os.path.isfile(custom_requirements_path):
+        try:
+            with open(custom_requirements_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            stages_data = data.get("stages") if isinstance(data, dict) else None
+            if isinstance(stages_data, dict):
+                for stage_name, items in stages_data.items():
+                    if isinstance(stage_name, str):
+                        if isinstance(items, list):
+                            cleaned = [str(item).strip() for item in items if str(item).strip()]
+                        elif isinstance(items, str):
+                            cleaned = [
+                                piece.strip()
+                                for piece in str(items).splitlines()
+                                if piece.strip()
+                            ]
+                        else:
+                            cleaned = []
+                        if cleaned:
+                            existing_custom_requirements[stage_name] = cleaned
+                        elif stage_name in STAGE_REQUIREMENTS:
+                            existing_custom_requirements[stage_name] = []
+        except Exception:
+            existing_custom_requirements = {}
+
     get_user_session(session_id, "completeness")
 
     backend_ready = is_backend_available()
@@ -448,12 +476,56 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     else:
                         st.error("未找到对应的上传目录，请稍后重试。")
 
+                expander_label = f"点击填写{stage_name}清单"
+                requirements_key = f"requirements_{STAGE_SLUG_MAP.get(stage_name, stage_name)}_{session_id}"
+                override_items = existing_custom_requirements.get(stage_name)
+                if override_items is None:
+                    default_items = list(STAGE_REQUIREMENTS.get(stage_name, ()))
+                    default_text = "\n".join(default_items)
+                else:
+                    default_text = "\n".join(override_items)
+                with st.expander(expander_label, expanded=False):
+                    st.caption("每行填写一个应包含的文件名称。")
+                    st.text_area(
+                        "文件清单（每行一个）",
+                        value=default_text,
+                        key=requirements_key,
+                        height=180,
+                    )
+
         btn_row1 = st.columns([1, 1, 1])
         with btn_row1[0]:
             if st.button("开始分析", key=f"start_completeness_{session_id}"):
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法启动任务。")
                 else:
+                    custom_requirements_payload: Dict[str, List[str]] = {}
+                    for stage_name in STAGE_ORDER:
+                        slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
+                        requirements_key = f"requirements_{slug}_{session_id}"
+                        raw_value = st.session_state.get(requirements_key)
+                        lines: List[str] = []
+                        if isinstance(raw_value, str):
+                            lines = [line.strip() for line in raw_value.splitlines() if line.strip()]
+                        elif isinstance(raw_value, list):
+                            lines = [str(item).strip() for item in raw_value if str(item).strip()]
+                        default_items = list(STAGE_REQUIREMENTS.get(stage_name, ()))
+                        if lines != default_items:
+                            custom_requirements_payload[stage_name] = lines
+                    try:
+                        if custom_requirements_payload:
+                            os.makedirs(os.path.dirname(custom_requirements_path), exist_ok=True)
+                            with open(custom_requirements_path, "w", encoding="utf-8") as handle:
+                                json.dump(
+                                    {"stages": custom_requirements_payload},
+                                    handle,
+                                    ensure_ascii=False,
+                                    indent=2,
+                                )
+                        elif os.path.isfile(custom_requirements_path):
+                            os.remove(custom_requirements_path)
+                    except Exception as error:
+                        st.warning(f"保存自定义清单失败：{error}")
                     clear_folder_contents(initial_results_dir)
                     st.session_state.pop(demo_state_key, None)
                     st.session_state.pop(stream_events_state_key, None)

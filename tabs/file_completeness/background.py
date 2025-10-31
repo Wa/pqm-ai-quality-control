@@ -139,7 +139,37 @@ def _save_text(path: str, content: str) -> None:
         handle.write(content)
 
 
-def _build_excel_rows(stage_responses: Dict[str, str]) -> Dict[str, List[Dict[str, str]]]:
+def _load_custom_requirements(root: str) -> Dict[str, Tuple[str, ...]]:
+    overrides_path = os.path.join(root, "custom_requirements.json")
+    overrides: Dict[str, Tuple[str, ...]] = {}
+    if not os.path.isfile(overrides_path):
+        return overrides
+    try:
+        with open(overrides_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return overrides
+    stages = data.get("stages") if isinstance(data, dict) else None
+    if not isinstance(stages, dict):
+        return overrides
+    for stage_name, items in stages.items():
+        if not isinstance(stage_name, str):
+            continue
+        if isinstance(items, list):
+            cleaned_list = [str(item).strip() for item in items if str(item).strip()]
+        elif isinstance(items, str):
+            cleaned_list = [part.strip() for part in items.splitlines() if part.strip()]
+        else:
+            cleaned_list = []
+        overrides[stage_name] = tuple(cleaned_list)
+    return overrides
+
+
+def _build_excel_rows(
+    stage_responses: Dict[str, str],
+    requirements_overrides: Optional[Dict[str, Tuple[str, ...]]] = None,
+) -> Dict[str, List[Dict[str, str]]]:
+    requirements_overrides = requirements_overrides or {}
     all_stage_data: Dict[str, List[Dict[str, str]]] = {}
     for stage_name in STAGE_ORDER:
         response_text = stage_responses.get(stage_name)
@@ -182,7 +212,10 @@ def _build_excel_rows(stage_responses: Dict[str, str]) -> Dict[str, List[Dict[st
                     row.setdefault("note", "")
                 all_stage_data[stage_name] = fallback_rows
         else:
-            requirements = STAGE_REQUIREMENTS.get(stage_name, ())
+            if stage_name in requirements_overrides:
+                requirements = tuple(requirements_overrides.get(stage_name, ()))
+            else:
+                requirements = STAGE_REQUIREMENTS.get(stage_name, ())
             all_stage_data[stage_name] = [
                 {
                     "filename": req,
@@ -199,8 +232,9 @@ def export_completeness_results(
     session_id: str,
     stage_responses: Dict[str, str],
     final_results_dir: str,
+    requirements_overrides: Optional[Dict[str, Tuple[str, ...]]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    data = _build_excel_rows(stage_responses)
+    data = _build_excel_rows(stage_responses, requirements_overrides=requirements_overrides)
     rows: List[Dict[str, str]] = []
     for stage_name in STAGE_ORDER:
         for item in data.get(stage_name, []):
@@ -235,6 +269,8 @@ def run_file_completeness_job(
 ) -> Dict[str, List[str]]:
     publish({"status": "running", "stage": "initializing", "message": "准备文件齐套性检查目录"})
     stage_dirs, initial_dir, final_dir = _ensure_dirs(session_id)
+    overrides_root = os.path.dirname(initial_dir)
+    requirements_overrides = _load_custom_requirements(overrides_root)
     removed = _clear_directory(initial_dir)
     if removed:
         publish(
@@ -317,6 +353,10 @@ def run_file_completeness_job(
             ]
         except Exception:
             stage_files = []
+        if stage_name in requirements_overrides:
+            stage_requirements = requirements_overrides.get(stage_name, ())
+        else:
+            stage_requirements = STAGE_REQUIREMENTS.get(stage_name, ())
         if not stage_files:
             stage_responses[stage_name] = ""
             processed += 1
@@ -324,9 +364,7 @@ def run_file_completeness_job(
             progress = min(95.0, progress + progress_step)
             publish({"progress": progress})
             continue
-        prompt = generate_stage_prompt(
-            stage_name, stage_dir, STAGE_REQUIREMENTS.get(stage_name, ())
-        )
+        prompt = generate_stage_prompt(stage_name, stage_dir, stage_requirements)
         prompt_path = os.path.join(initial_dir, f"prompt_{stage_name}.txt")
         _save_text(prompt_path, prompt)
         publish(
@@ -388,7 +426,12 @@ def run_file_completeness_job(
 
     if not ensure_running("汇总", "生成Excel汇总结果"):
         return {"final_results": []}
-    filepath, filename = export_completeness_results(session_id, stage_responses, final_dir)
+    filepath, filename = export_completeness_results(
+        session_id,
+        stage_responses,
+        final_dir,
+        requirements_overrides=requirements_overrides,
+    )
     if not filepath:
         publish(
             {
