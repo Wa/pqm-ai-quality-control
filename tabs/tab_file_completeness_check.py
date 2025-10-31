@@ -309,7 +309,13 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
         return
 
     st.subheader("📁 文件齐套性检查")
-    st.markdown("上传每个阶段的文件后点击开始，AI会根据预设的清单检查并输出结果。")
+    st.markdown(
+        "第1步：重要！在右边文件列表处清空上次任务的文件（不需要清空分析结果）。  \n"
+        "第2步：上传每个阶段的文件。  \n"
+        "第3步：点击开始，AI会根据预设的清单检查并输出结果。  \n"
+        "第4步：在右边文件列表处下载结果。  \n"
+        "审核时间取决于文件数量和长度，一般在1分钟到10分钟之间。"
+    )
 
     uploads_root = str(CONFIG["directories"]["uploads"])
     base_dirs: Dict[str, object] = {}
@@ -373,7 +379,6 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
-        st.markdown("### 文件管理")
         tab_labels = list(STAGE_ORDER) + ["分析结果"]
         tabs = st.tabs(tab_labels)
         for idx, stage_name in enumerate(STAGE_ORDER):
@@ -400,13 +405,6 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                                         st.error(f"删除失败: {error}")
                 else:
                     st.write("（未上传）")
-                st.markdown("---")
-                uploader_key = f"uploader_{stage_name}_{session_id}"
-                uploaded = st.file_uploader(f"选择{stage_name}文件", accept_multiple_files=True, key=uploader_key)
-                if uploaded:
-                    target_dir = stage_dirs.get(stage_name)
-                    handle_file_upload(uploaded, target_dir)
-                    st.rerun()
         with tabs[-1]:
             result_files = get_file_list(final_results_dir)
             if result_files:
@@ -432,7 +430,24 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 st.write("（暂无分析结果）")
 
     with col_main:
-        st.markdown("### 分析控制")
+        upload_cols = st.columns(2)
+        for index, stage_name in enumerate(STAGE_ORDER):
+            uploader_key = f"uploader_{stage_name}_{session_id}"
+            target_dir = stage_dirs.get(stage_name)
+            column = upload_cols[index % len(upload_cols)]
+            with column:
+                uploaded = st.file_uploader(
+                    f"上传{stage_name}文件",
+                    accept_multiple_files=True,
+                    key=uploader_key,
+                )
+                if uploaded:
+                    if target_dir:
+                        handle_file_upload(uploaded, target_dir)
+                        st.rerun()
+                    else:
+                        st.error("未找到对应的上传目录，请稍后重试。")
+
         btn_row1 = st.columns([1, 1, 1])
         with btn_row1[0]:
             if st.button("开始分析", key=f"start_completeness_{session_id}"):
@@ -501,6 +516,22 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                     clamped = min(100.0, max(0.0, float(progress)))
                     st.progress(clamped / 100.0)
                     st.caption(f"进度：{clamped:.0f}%")
+                result_files = job_status.get("result_files") or []
+                if status_value == "succeeded" and result_files:
+                    first_result = str(result_files[0])
+                    if os.path.isfile(first_result):
+                        try:
+                            with open(first_result, "rb") as result_handle:
+                                result_data = result_handle.read()
+                            st.download_button(
+                                label="⬇️ 下载最新分析结果",
+                                data=result_data,
+                                file_name=os.path.basename(first_result),
+                                mime="application/octet-stream",
+                                key=f"download_latest_{session_id}",
+                            )
+                        except Exception as error:
+                            st.warning(f"无法提供结果下载：{error}")
                 job_id = str(job_status.get("job_id") or "")
                 stream_state = st.session_state.get(stream_events_state_key)
                 if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_id:
