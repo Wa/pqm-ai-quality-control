@@ -201,43 +201,74 @@ def render_stage_events(
             if not isinstance(state, dict) or state.get("token") != token_value:
                 state = {"token": token_value, "messages": {}}
             messages_state = state.get("messages")
-            if not isinstance(messages_state, dict):
+            if not isinstance(messages_state, dict) or not all(
+                isinstance(key, str) for key in messages_state.keys()
+            ):
                 messages_state = {}
 
-            sequence_groups: Dict[int, List[Dict[str, object]]] = {}
-            for event in sorted(stage_events, key=lambda item: int(item.get("sequence", 0))):
-                sequence = int(event.get("sequence", 0))
-                sequence_groups.setdefault(sequence, []).append(event)
+            grouped_messages: List[Dict[str, object]] = []
+            group_index: Dict[str, int] = {}
 
-            active_sequences: List[int] = []
-            for sequence in sorted(sequence_groups.keys()):
-                entries = sequence_groups[sequence]
-                if not entries:
-                    continue
-                latest_event = entries[-1]
-                role = "user" if latest_event.get("kind") == "prompt" else "assistant"
-                timestamp = None
-                message_text = ""
-                for candidate in reversed(entries):
-                    if not timestamp and candidate.get("ts"):
-                        timestamp = candidate.get("ts")
-                    candidate_text = str(candidate.get("text") or "")
-                    if candidate_text and not message_text:
-                        message_text = candidate_text
-                    if timestamp and message_text:
-                        break
+            sorted_events = sorted(stage_events, key=lambda item: int(item.get("sequence", 0)))
+            for event in sorted_events:
+                kind = str(event.get("kind") or "info")
+                part = int(event.get("part") or 0)
+                total_parts = int(event.get("total_parts") or 0)
+                message_key = f"{kind}:{part}:{total_parts}"
+                role = "user" if kind == "prompt" else "assistant"
+                idx = group_index.get(message_key)
+                if idx is None:
+                    idx = len(grouped_messages)
+                    group_index[message_key] = idx
+                    grouped_messages.append(
+                        {
+                            "key": message_key,
+                            "role": role,
+                            "first_sequence": int(event.get("sequence", 0)) or (len(grouped_messages) + 1),
+                            "timestamp": event.get("ts"),
+                            "text": str(event.get("text") or ""),
+                        }
+                    )
+                else:
+                    group = grouped_messages[idx]
+                    sequence_value = int(event.get("sequence", 0))
+                    if sequence_value and sequence_value < int(group.get("first_sequence", sequence_value)):
+                        group["first_sequence"] = sequence_value
+                    timestamp_value = event.get("ts")
+                    if timestamp_value:
+                        group["timestamp"] = timestamp_value
+                    text_value = str(event.get("text") or "")
+                    if text_value:
+                        group["text"] = text_value
 
-                previous_state = messages_state.get(sequence)
+            grouped_messages.sort(key=lambda item: int(item.get("first_sequence", 0)))
+
+            active_keys: List[str] = []
+            for message in grouped_messages:
+                key = str(message.get("key") or "")
+                role = str(message.get("role") or "assistant")
+                timestamp = message.get("timestamp")
+                message_text = str(message.get("text") or "")
+                previous_state = messages_state.get(key)
+                previous_text = ""
+                if isinstance(previous_state, dict):
+                    previous_text = str(previous_state.get("text") or "")
                 is_new = not isinstance(previous_state, dict)
+                text_changed = message_text and message_text != previous_text
 
                 with st.chat_message(role):
                     if timestamp:
                         st.caption(str(timestamp))
                     if message_text:
-                        if is_new:
+                        if is_new or text_changed:
                             placeholder = st.empty()
                             render_method = "text" if role == "user" else "write"
-                            stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
+                            stream_text(
+                                placeholder,
+                                message_text,
+                                render_method=render_method,
+                                delay=0.02,
+                            )
                         else:
                             if role == "user":
                                 st.text(message_text)
@@ -246,16 +277,16 @@ def render_stage_events(
                     else:
                         st.write("(无内容)")
 
-                messages_state[sequence] = {
+                messages_state[key] = {
                     "text": message_text,
                     "timestamp": timestamp,
                     "role": role,
                 }
-                active_sequences.append(sequence)
+                active_keys.append(key)
 
-            for existing_sequence in list(messages_state.keys()):
-                if existing_sequence not in active_sequences:
-                    messages_state.pop(existing_sequence, None)
+            for existing_key in list(messages_state.keys()):
+                if existing_key not in active_keys:
+                    messages_state.pop(existing_key, None)
 
             state["messages"] = messages_state
             state["token"] = token_value
