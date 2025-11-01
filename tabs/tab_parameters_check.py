@@ -361,11 +361,32 @@ def render_parameters_check_tab(session_id: str | None) -> None:
 
             processed = int(job_status.get("processed_chunks") or 0)
             total = int(job_status.get("total_chunks") or 0)
+            conversion_weight = 10.0
+            bisheng_weight = 85.0
+            max_before_results = conversion_weight + bisheng_weight
+            stage_name = str(stage).lower()
+            status_lower = status_str.lower()
+            bisheng_ratio = 0.0
             if total:
-                progress = min(processed / total, 1.0)
-                st.progress(progress, text=f"处理进度：{processed}/{total}")
+                bisheng_ratio = min(max(processed / total, 0.0), 1.0)
+
+            progress_percent = 0.0
+            if stage_name == "conversion":
+                progress_percent = conversion_weight
+            elif stage_name in {"kb_sync", "warmup", "compare", "aggregate"}:
+                progress_percent = conversion_weight + bisheng_weight * bisheng_ratio
             else:
-                st.progress(0, text="处理进度：0/0")
+                progress_percent = bisheng_weight * bisheng_ratio
+
+            progress_percent = min(progress_percent, max_before_results)
+
+            result_ready = bool(result_files) or status_lower in {"succeeded", "finished", "completed"}
+            if result_ready:
+                progress_percent = 100.0
+
+            progress_value = max(0.0, min(progress_percent / 100.0, 1.0))
+            progress_label = f"处理进度：{progress_percent:.0f}%"
+            st.progress(progress_value, text=progress_label)
 
             stream_events = job_status.get("stream_events") or []
             rendered_state = st.session_state.get(stream_state_key) or {"rendered": set()}
