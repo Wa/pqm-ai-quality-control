@@ -230,40 +230,6 @@ def render_parameters_check_tab(session_id: str | None) -> None:
         _render_file_list(tab_results, result_files, "parameters_delete_result")
 
         st.markdown("---")
-        st.markdown("**上传文件**")
-        reference_uploads = st.file_uploader(
-            "上传基准文件",
-            type=None,
-            accept_multiple_files=True,
-            key=f"parameters_reference_uploader_{session_id}",
-        )
-        if reference_uploads:
-            handle_file_upload(reference_uploads, reference_dir)
-            st.success(f"已上传 {len(reference_uploads)} 份基准文件")
-
-        target_uploads = st.file_uploader(
-            "上传待检查文件",
-            type=None,
-            accept_multiple_files=True,
-            key=f"parameters_target_uploader_{session_id}",
-        )
-        if target_uploads:
-            handle_file_upload(target_uploads, target_dir)
-            st.success(f"已上传 {len(target_uploads)} 份待检查文件")
-
-        graph_uploads = st.file_uploader(
-            "上传图纸文件",
-            type=None,
-            accept_multiple_files=True,
-            key=f"parameters_graph_uploader_{session_id}",
-        )
-        if graph_uploads and graph_dir:
-            handle_file_upload(graph_uploads, graph_dir)
-            st.success(f"已上传 {len(graph_uploads)} 份图纸文件")
-        elif graph_uploads:
-            st.warning("未配置图纸目录，无法保存图纸文件。")
-
-        st.markdown("---")
         try:
             result_names = os.listdir(final_results_dir)
         except Exception:
@@ -295,6 +261,49 @@ def render_parameters_check_tab(session_id: str | None) -> None:
 
     with col_main:
         st.subheader("⚙️ 参数一致性检查")
+        st.markdown(
+            "第1步：在右侧文件列表中清理上一轮任务遗留的文件。  \n"
+            "第2步：在下方上传本次需要比对的基准、待检查和图纸文件。  \n"
+            "第3步：使用下方的控制按钮启动或管理任务并关注进度提示。  \n"
+            "第4步：任务结束后在右侧的分析结果列表中下载输出文件。  \n"
+        )
+
+        st.markdown("**上传文件**")
+        col_reference, col_target = st.columns(2)
+        with col_reference:
+            reference_uploads = st.file_uploader(
+                "上传基准文件",
+                type=None,
+                accept_multiple_files=True,
+                key=f"parameters_reference_uploader_{session_id}",
+            )
+            if reference_uploads:
+                handle_file_upload(reference_uploads, reference_dir)
+                st.success(f"已上传 {len(reference_uploads)} 份基准文件")
+        with col_target:
+            target_uploads = st.file_uploader(
+                "上传待检查文件",
+                type=None,
+                accept_multiple_files=True,
+                key=f"parameters_target_uploader_{session_id}",
+            )
+            if target_uploads:
+                handle_file_upload(target_uploads, target_dir)
+                st.success(f"已上传 {len(target_uploads)} 份待检查文件")
+
+        graph_uploads = st.file_uploader(
+            "上传图纸文件",
+            type=None,
+            accept_multiple_files=True,
+            key=f"parameters_graph_uploader_{session_id}",
+        )
+        if graph_uploads and graph_dir:
+            handle_file_upload(graph_uploads, graph_dir)
+            st.success(f"已上传 {len(graph_uploads)} 份图纸文件")
+        elif graph_uploads:
+            st.warning("未配置图纸目录，无法保存图纸文件。")
+
+        st.markdown("---")
 
         col_controls = st.container()
         with col_controls:
