@@ -351,11 +351,36 @@ def render_parameters_check_tab(session_id: str | None) -> None:
 
         st.markdown("---")
 
+        STATUS_LABELS = {
+            "queued": "排队中",
+            "running": "运行中",
+            "paused": "已暂停",
+            "stopping": "停止中",
+            "stopped": "已停止",
+            "succeeded": "已完成",
+            "finished": "已完成",
+            "completed": "已完成",
+            "failed": "失败",
+            "error": "出错",
+            "canceled": "已取消",
+            "cancelled": "已取消",
+        }
+        STAGE_LABELS = {
+            "conversion": "文件转换",
+            "kb_sync": "同步知识库",
+            "warmup": "准备比对",
+            "compare": "参数比对",
+            "aggregate": "汇总结果",
+        }
+
         if job_status:
-            st.markdown(f"**任务状态：** {status_str}")
+            status_label = STATUS_LABELS.get(status_str.lower(), status_str or "未知状态")
+            st.markdown(f"**任务状态：** {status_label}")
             stage = job_status.get("stage") or ""
+            stage_label = STAGE_LABELS.get(str(stage).lower(), stage)
+            if stage_label:
+                st.markdown(f"**阶段：** {stage_label}")
             message = job_status.get("message") or ""
-            st.markdown(f"**阶段：** {stage}")
             if message:
                 st.info(str(message))
 
@@ -380,7 +405,7 @@ def render_parameters_check_tab(session_id: str | None) -> None:
 
             progress_percent = min(progress_percent, max_before_results)
 
-            result_ready = bool(result_files) or status_lower in {"succeeded", "finished", "completed"}
+            result_ready = status_lower in {"succeeded", "finished", "completed", "success"}
             if result_ready:
                 progress_percent = 100.0
 
@@ -389,43 +414,98 @@ def render_parameters_check_tab(session_id: str | None) -> None:
             st.progress(progress_value, text=progress_label)
 
             stream_events = job_status.get("stream_events") or []
-            rendered_state = st.session_state.get(stream_state_key) or {"rendered": set()}
-            rendered_set = set(rendered_state.get("rendered", set()))
-            if isinstance(stream_events, list) and stream_events:
-                with st.expander("查看任务提示词与回复", expanded=status_str in {"queued", "running"}):
-                    current_group: tuple[str, int] | None = None
-                    for event in stream_events:
-                        if not isinstance(event, dict):
-                            continue
-                        sequence = event.get("sequence")
-                        if sequence in rendered_set:
-                            continue
-                        rendered_set.add(sequence)
-                        kind = event.get("kind")
-                        file_name = event.get("file") or ""
-                        part = int(event.get("part") or 0)
-                        total_parts = int(event.get("total_parts") or 0)
-                        timestamp = event.get("ts")
-                        message_text = str(event.get("text") or "")
-                        if file_name and part:
-                            header_key = (file_name, part)
-                            if header_key != current_group:
-                                label = f"{file_name} · 第{part}段"
-                                if total_parts:
-                                    label = f"{file_name} · 第{part}/{total_parts}段"
-                                st.markdown(f"**{label}**")
-                                current_group = header_key
-                        role = "user" if kind == "prompt" else "assistant"
-                        with st.chat_message(role):
-                            if timestamp:
-                                st.caption(str(timestamp))
-                            if message_text:
-                                placeholder = st.empty()
-                                render_method = "text" if role == "user" else "write"
-                                stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
-                            else:
-                                st.write("(无内容)")
-                    st.session_state[stream_state_key] = {"rendered": rendered_set}
+            if isinstance(stream_events, list):
+                stream_state = st.session_state.get(stream_state_key)
+                job_id = job_status.get("job_id")
+                if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_id:
+                    stream_state = {"job_id": job_id, "events": [], "rendered": []}
+                stored_events = stream_state.get("events") or []
+                known_sequences = {
+                    int(event.get("sequence") or 0)
+                    for event in stored_events
+                    if isinstance(event, dict)
+                }
+                rendered_raw = stream_state.get("rendered") or []
+                rendered_sequences: set[int] = set()
+                for value in rendered_raw:
+                    try:
+                        rendered_sequences.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+                new_events = []
+                for event in stream_events:
+                    if not isinstance(event, dict):
+                        continue
+                    try:
+                        sequence = int(event.get("sequence") or 0)
+                    except (TypeError, ValueError):
+                        sequence = 0
+                    if sequence in known_sequences:
+                        continue
+                    known_sequences.add(sequence)
+                    new_events.append(event)
+                if new_events:
+                    stored_events.extend(new_events)
+                    stored_events.sort(key=lambda item: int(item.get("sequence") or 0))
+                    stream_state["events"] = stored_events
+                    st.session_state[stream_state_key] = stream_state
+                elif stream_state.get("events") is None:
+                    stream_state["events"] = []
+                    st.session_state[stream_state_key] = stream_state
+
+                events_to_render = st.session_state.get(stream_state_key, {}).get("events", [])
+                if events_to_render:
+                    with st.expander(
+                        "点击查看具体进展",
+                        expanded=status_str in {"queued", "running"},
+                    ):
+                        current_group: tuple[str, int] | None = None
+                        for event in events_to_render:
+                            if not isinstance(event, dict):
+                                continue
+                            try:
+                                sequence = int(event.get("sequence") or 0)
+                            except (TypeError, ValueError):
+                                sequence = 0
+                            kind = event.get("kind")
+                            file_name = event.get("file") or ""
+                            part = int(event.get("part") or 0)
+                            total_parts = int(event.get("total_parts") or 0)
+                            timestamp = event.get("ts")
+                            message_text = str(event.get("text") or "")
+                            if file_name and part:
+                                header_key = (file_name, part)
+                                if header_key != current_group:
+                                    label = f"{file_name} · 第{part}段"
+                                    if total_parts:
+                                        label = f"{file_name} · 第{part}/{total_parts}段"
+                                    st.markdown(f"**{label}**")
+                                    current_group = header_key
+                            role = "user" if kind == "prompt" else "assistant"
+                            is_new = sequence not in rendered_sequences
+                            with st.chat_message(role):
+                                if timestamp:
+                                    st.caption(str(timestamp))
+                                if message_text:
+                                    if is_new:
+                                        placeholder = st.empty()
+                                        render_method = "text" if role == "user" else "write"
+                                        stream_text(
+                                            placeholder,
+                                            message_text,
+                                            render_method=render_method,
+                                            delay=0.02,
+                                        )
+                                    else:
+                                        if role == "user":
+                                            st.text(message_text)
+                                        else:
+                                            st.write(message_text)
+                                else:
+                                    st.write("(无内容)")
+                            rendered_sequences.add(sequence)
+                    stream_state["rendered"] = sorted(rendered_sequences)
+                    st.session_state[stream_state_key] = stream_state
 
             logs = job_status.get("logs") or []
             if isinstance(logs, list) and logs:
