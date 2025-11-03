@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from config import CONFIG
 from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
 from bisheng_client import (
+    call_flow_process,
     create_knowledge,
     find_knowledge_id_by_name,
     kb_sync_folder,
@@ -35,10 +36,6 @@ HEADER_SCORE_THRESHOLD = 4
 LLM_CHUNK_LIMIT = 9500
 HISTORY_KB_MODEL_ID = 7
 HISTORY_FLOW_ID = "191af6f3565e415ca9670f1bc2b9117e"
-HISTORY_FLOW_BASE = (
-    os.getenv("HISTORY_FLOW_BASE")
-    or f"{CONFIG.get('bisheng', {}).get('base_url', 'http://10.31.60.11:3001').rstrip('/')}/api/v1/process"
-)
 HISTORY_FLOW_TWEAKS = {
     "MixEsVectorRetriever-J35CZ": {},
     "Milvus-cyR5W": {},
@@ -48,6 +45,36 @@ HISTORY_FLOW_TWEAKS = {
     "RetrievalQA-f0f31": {},
     "CombineDocsChain-2f68e": {},
 }
+HISTORY_FLOW_INPUT_NODE_ID = (
+    os.getenv("HISTORY_FLOW_INPUT_NODE_ID")
+    or os.getenv("FLOW_INPUT_NODE_ID")
+    or "RetrievalQA-f0f31"
+)
+HISTORY_FLOW_MILVUS_NODE_ID = (
+    os.getenv("HISTORY_FLOW_MILVUS_NODE_ID")
+    or os.getenv("FLOW_MILVUS_NODE_ID")
+    or "Milvus-cyR5W"
+)
+HISTORY_FLOW_ES_NODE_ID = (
+    os.getenv("HISTORY_FLOW_ES_NODE_ID")
+    or os.getenv("FLOW_ES_NODE_ID")
+    or "ElasticKeywordsSearch-1c80e"
+)
+
+
+def _safe_int(value: str | None, fallback: int) -> int:
+    try:
+        return int(value) if value is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+HISTORY_FLOW_TIMEOUT = _safe_int(
+    os.getenv("HISTORY_FLOW_TIMEOUT")
+    or os.getenv("BISHENG_TIMEOUT_S")
+    or str(CONFIG.get("bisheng", {}).get("timeout_s", 120)),
+    120,
+)
 
 HEADER_ALIASES = {
     "failure_mode": [
@@ -459,6 +486,8 @@ def _resolve_bisheng_credentials() -> tuple[str, Optional[str]]:
     settings = CONFIG.get("bisheng", {})
     base_url = (
         os.getenv("HISTORY_BISHENG_BASE_URL")
+        or os.getenv("HISTORY_FLOW_BASE_URL")
+        or os.getenv("HISTORY_FLOW_BASE")
         or os.getenv("BISHENG_BASE_URL")
         or settings.get("base_url")
         or ""
@@ -551,23 +580,41 @@ def _apply_kb_to_tweaks(kb_id: Optional[int]) -> dict:
     tweaks = {key: value.copy() for key, value in HISTORY_FLOW_TWEAKS.items()}
     if kb_id is None:
         return tweaks
-    for node_id in ("Milvus-cyR5W", "ElasticKeywordsSearch-1c80e"):
+    for node_id in (HISTORY_FLOW_MILVUS_NODE_ID, HISTORY_FLOW_ES_NODE_ID):
         node_tw = tweaks.get(node_id, {}).copy()
         node_tw["collection_id"] = str(kb_id)
         tweaks[node_id] = node_tw
     return tweaks
 
 
-def _invoke_history_flow(prompt: str, kb_id: Optional[int], progress_area) -> dict:
-    payload = {"inputs": {"input": prompt}}
+def _invoke_history_flow(
+    prompt: str,
+    kb_id: Optional[int],
+    session_token: Optional[str],
+    progress_area,
+) -> dict:
+    base_url, api_key = _resolve_bisheng_credentials()
+    if not base_url:
+        progress_area.error("未配置毕昇服务地址，无法调用比对流程。")
+        return {"error": "missing_bisheng_base_url"}
     tweaks = _apply_kb_to_tweaks(kb_id)
-    if tweaks:
-        payload["tweaks"] = tweaks
-    url = f"{HISTORY_FLOW_BASE.rstrip('/')}/{HISTORY_FLOW_ID}"
     try:
-        response = requests.post(url, json=payload, timeout=180)
-        response.raise_for_status()
-        return response.json()
+        response = call_flow_process(
+            base_url=base_url,
+            flow_id=HISTORY_FLOW_ID,
+            question=prompt,
+            kb_id=kb_id,
+            input_node_id=HISTORY_FLOW_INPUT_NODE_ID,
+            api_key=api_key,
+            session_id=session_token,
+            history_count=0,
+            extra_tweaks=tweaks,
+            milvus_node_id=HISTORY_FLOW_MILVUS_NODE_ID,
+            es_node_id=HISTORY_FLOW_ES_NODE_ID,
+            timeout_s=HISTORY_FLOW_TIMEOUT,
+            max_retries=2,
+        )
+        return response
     except Exception as error:
         progress_area.error(f"调用毕昇比对失败: {error}")
         return {"error": str(error)}
@@ -666,12 +713,16 @@ def _evaluate_history_problems(
     collected_rows: list[dict[str, object]] = []
     processed = 0
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    flow_session_key = f"history_bisheng_session_{session_id}"
     for file_name, records in payloads:
         safe_file = _safe_result_name(os.path.splitext(file_name)[0])
         for index, record in enumerate(records, start=1):
             prompt = _build_record_prompt(record)
-            response = _invoke_history_flow(prompt, kb_id, progress_area)
-            answer_text, _ = parse_flow_answer(response)
+            session_token = st.session_state.get(flow_session_key)
+            response = _invoke_history_flow(prompt, kb_id, session_token, progress_area)
+            answer_text, response_session = parse_flow_answer(response)
+            if response_session:
+                st.session_state[flow_session_key] = response_session
             parsed_answer: dict[str, object] | None = None
             if isinstance(answer_text, str) and answer_text.strip():
                 try:
