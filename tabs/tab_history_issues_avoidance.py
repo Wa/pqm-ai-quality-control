@@ -8,7 +8,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 import pandas as pd
 import requests
@@ -74,6 +74,10 @@ HISTORY_FLOW_TIMEOUT = _safe_int(
     or os.getenv("BISHENG_TIMEOUT_S")
     or str(CONFIG.get("bisheng", {}).get("timeout_s", 120)),
     120,
+)
+
+HISTORY_FLOW_WARMUP_PROMPT = (
+    os.getenv("HISTORY_FLOW_WARMUP_PROMPT") or "预热：请回复'历史问题比对准备就绪'。"
 )
 
 HEADER_ALIASES = {
@@ -587,6 +591,33 @@ def _apply_kb_to_tweaks(kb_id: Optional[int]) -> dict:
     return tweaks
 
 
+def _warmup_history_flow(kb_id: Optional[int], progress_area) -> None:
+    base_url, api_key = _resolve_bisheng_credentials()
+    if not base_url:
+        progress_area.warning("未配置毕昇服务地址，跳过流程预热。")
+        return
+    tweaks = _apply_kb_to_tweaks(kb_id)
+    try:
+        call_flow_process(
+            base_url=base_url,
+            flow_id=HISTORY_FLOW_ID,
+            question=HISTORY_FLOW_WARMUP_PROMPT,
+            kb_id=kb_id,
+            input_node_id=HISTORY_FLOW_INPUT_NODE_ID,
+            api_key=api_key,
+            session_id=None,
+            history_count=0,
+            extra_tweaks=tweaks,
+            milvus_node_id=HISTORY_FLOW_MILVUS_NODE_ID,
+            es_node_id=HISTORY_FLOW_ES_NODE_ID,
+            timeout_s=min(30, HISTORY_FLOW_TIMEOUT),
+            max_retries=0,
+        )
+        progress_area.info("毕昇比对流程预热完成。")
+    except Exception as error:
+        progress_area.warning(f"毕昇比对流程预热失败：{error}")
+
+
 def _invoke_history_flow(
     prompt: str,
     kb_id: Optional[int],
@@ -697,19 +728,28 @@ def _evaluate_history_problems(
     kb_id: Optional[int],
     session_id: str,
     progress_area,
+    transcript_area=None,
+    progress_callback: Optional[Callable[[float], None]] = None,
+    progress_offset: float = 0.0,
+    progress_span: float = 0.85,
 ) -> None:
     os.makedirs(initial_dir, exist_ok=True)
     os.makedirs(final_dir, exist_ok=True)
     payloads = _load_issue_payloads(issue_dir)
+    if progress_callback:
+        progress_callback(progress_offset)
     if not payloads:
         progress_area.info("未发现历史问题解析结果，跳过比对。")
+        if progress_callback:
+            progress_callback(min(progress_offset + progress_span, 1.0))
         return
     total_records = sum(len(records) for _, records in payloads)
     if total_records == 0:
         progress_area.info("历史问题记录为空。")
+        if progress_callback:
+            progress_callback(min(progress_offset + progress_span, 1.0))
         return
     progress_area.markdown("**开始历史问题覆盖性比对**")
-    progress_bar = progress_area.progress(0.0)
     collected_rows: list[dict[str, object]] = []
     processed = 0
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -743,6 +783,15 @@ def _evaluate_history_problems(
                     json.dump(initial_payload, f, ensure_ascii=False, indent=2)
             except Exception as error:
                 progress_area.warning(f"写入初步结果失败 ({out_name}): {error}")
+            if transcript_area is not None:
+                transcript_area.markdown(
+                    f"**{file_name} · 第 {index} 条记录**"
+                )
+                transcript_area.markdown("**提示词**")
+                transcript_area.code(prompt, language="markdown")
+                transcript_area.markdown("**回答**")
+                transcript_area.write(answer_text or "（无回答）")
+                transcript_area.divider()
             row = {
                 "source_file": file_name,
                 "record_index": index,
@@ -766,10 +815,13 @@ def _evaluate_history_problems(
                 )
             collected_rows.append(row)
             processed += 1
-            progress_bar.progress(min(processed / total_records, 1.0))
-    progress_bar.empty()
+            if progress_callback and total_records:
+                fraction = processed / total_records
+                progress_callback(min(progress_offset + progress_span * fraction, 1.0))
     if not collected_rows:
         progress_area.info("未获取到有效的比对结果。")
+        if progress_callback:
+            progress_callback(min(progress_offset + progress_span, 1.0))
         return
     df = pd.DataFrame(collected_rows)
     csv_path = os.path.join(final_dir, f"history_issues_results_{timestamp}.csv")
@@ -784,6 +836,8 @@ def _evaluate_history_problems(
         progress_area.success(f"已生成Excel结果：{os.path.basename(xlsx_path)}")
     except Exception as error:
         progress_area.error(f"导出Excel失败: {error}")
+    if progress_callback:
+        progress_callback(min(progress_offset + progress_span, 1.0))
 
 
 def _strip_html(value: str) -> str:
@@ -1264,14 +1318,30 @@ def render_history_issues_avoidance_tab(session_id):
                 if not generated_root:
                     st.error("未能初始化生成文件目录，请检查配置。")
                 else:
-                    st.info("开始处理文件：PDF 使用 MinerU，Word/PPT 使用 Unstructured，历史问题清单解析为 JSON。")
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0.0)
+                    prompts_expander = st.expander("📝 提示与回答", expanded=False)
+                    prompts_container = prompts_expander.container()
+                    logs_expander = st.expander("🪵 处理日志", expanded=False)
+                    logs_container = logs_expander.container()
+
+                    def update_progress(value: float) -> None:
+                        clamped = max(0.0, min(value, 1.0))
+                        percent = int(round(clamped * 100))
+                        progress_bar.progress(clamped)
+                        progress_text.markdown(f"**当前进度：{percent}%**")
+
+                    update_progress(0.0)
+                    logs_container.info(
+                        "开始处理文件：PDF 使用 MinerU，Word/PPT 使用 Unstructured，历史问题清单解析为 JSON。"
+                    )
                     generated_dirs = _ensure_generated_dirs(generated_root)
                     total_created: list[str] = []
                     total_created.extend(
                         _process_issue_lists(
                             issue_lists_dir,
                             generated_dirs["issue_lists"],
-                            area,
+                            logs_container,
                         )
                     )
                     total_created.extend(
@@ -1279,7 +1349,7 @@ def render_history_issues_avoidance_tab(session_id):
                             "DFMEA",
                             dfmea_dir,
                             generated_dirs["dfmea"],
-                            area,
+                            logs_container,
                         )
                     )
                     total_created.extend(
@@ -1287,7 +1357,7 @@ def render_history_issues_avoidance_tab(session_id):
                             "PFMEA",
                             pfmea_dir,
                             generated_dirs["pfmea"],
-                            area,
+                            logs_container,
                         )
                     )
                     total_created.extend(
@@ -1295,11 +1365,12 @@ def render_history_issues_avoidance_tab(session_id):
                             "控制计划 (CP)",
                             cp_dir,
                             generated_dirs["cp"],
-                            area,
+                            logs_container,
                         )
                     )
                     if total_created:
-                        st.success("文本解析完成。")
+                        logs_container.success("文本解析完成。")
+                        update_progress(0.1)
                         kb_id = _sync_history_kb(
                             session_id,
                             {
@@ -1307,18 +1378,24 @@ def render_history_issues_avoidance_tab(session_id):
                                 "PFMEA": generated_dirs.get("pfmea", ""),
                                 "控制计划": generated_dirs.get("cp", ""),
                             },
-                            area,
+                            logs_container,
                         )
+                        _warmup_history_flow(kb_id, logs_container)
                         _evaluate_history_problems(
                             generated_dirs.get("issue_lists", ""),
                             generated_dirs.get("initial_results", ""),
                             generated_dirs.get("final_results", ""),
                             kb_id,
                             session_id,
-                            area,
+                            logs_container,
+                            transcript_area=prompts_container,
+                            progress_callback=update_progress,
+                            progress_offset=0.1,
+                            progress_span=0.85,
                         )
+                        update_progress(1.0)
                     else:
-                        st.info("未生成任何文本文件，请确认上传内容后重试。")
+                        logs_container.info("未生成任何文本文件，请确认上传内容后重试。")
 
     with col_info:
         st.subheader("📁 上传文件")
