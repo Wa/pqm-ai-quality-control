@@ -254,7 +254,9 @@ def ensure_session_dirs(base_dirs, session_id):
         _ensure_upload_subdir("special_reference", "special_symbols", "reference")
         _ensure_upload_subdir("special_examined", "special_symbols", "examined")
         _ensure_upload_subdir("history_issue_lists", "history_issues", "issue_lists")
-        _ensure_upload_subdir("history_target_files", "history_issues", "target_files")
+        _ensure_upload_subdir("history_dfmea", "history_issues", "dfmea")
+        _ensure_upload_subdir("history_pfmea", "history_issues", "pfmea")
+        _ensure_upload_subdir("history_cp", "history_issues", "cp")
     except Exception:
         # Fail-safe: do not break callers if path operations fail
         pass
