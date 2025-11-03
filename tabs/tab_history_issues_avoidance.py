@@ -434,21 +434,65 @@ def _safe_result_name(base: str) -> str:
     return name[:120] or "result"
 
 
+def _sanitize_bisheng_base_url(raw: str | None) -> str:
+    if not raw:
+        return ""
+    trimmed = raw.strip()
+    if not trimmed:
+        return ""
+    trimmed = trimmed.rstrip("/")
+    suffixes = [
+        "/api/v1/process",
+        "/api/v2/workflow/invoke",
+        "/api/v2/workflow",
+        "/api/v2",
+    ]
+    lowered = trimmed.lower()
+    for suffix in suffixes:
+        if lowered.endswith(suffix):
+            trimmed = trimmed[: -len(suffix)].rstrip("/")
+            lowered = trimmed.lower()
+    return trimmed
+
+
+def _resolve_bisheng_credentials() -> tuple[str, Optional[str]]:
+    settings = CONFIG.get("bisheng", {})
+    base_url = (
+        os.getenv("HISTORY_BISHENG_BASE_URL")
+        or os.getenv("BISHENG_BASE_URL")
+        or settings.get("base_url")
+        or ""
+    )
+    api_key = (
+        os.getenv("HISTORY_BISHENG_API_KEY")
+        or os.getenv("BISHENG_API_KEY")
+        or settings.get("api_key")
+        or ""
+    )
+    return _sanitize_bisheng_base_url(base_url), (api_key or None)
+
+
+def _build_history_kb_name(session_id: str) -> str:
+    base = f"{session_id}_history"
+    return _safe_result_name(base)
+
+
 def _sync_history_kb(
     session_id: str,
     text_dirs: dict[str, str],
     progress_area,
 ) -> Optional[int]:
-    settings = CONFIG.get("bisheng", {})
-    base_url = settings.get("base_url") or ""
-    api_key = settings.get("api_key") or None
+    base_url, api_key = _resolve_bisheng_credentials()
     if not base_url:
         progress_area.warning("未配置毕昇服务地址，跳过知识库同步。")
         return None
-    kb_name = f"{session_id}_history_issues_avoidance"
+    kb_name = _build_history_kb_name(session_id)
     try:
         knowledge_id = find_knowledge_id_by_name(base_url, api_key, kb_name)
-        if not knowledge_id:
+        if knowledge_id:
+            progress_area.info(f"已找到知识库：{kb_name} (ID: {knowledge_id})")
+        else:
+            progress_area.write(f"正在创建知识库：{kb_name} …")
             knowledge_id = create_knowledge(
                 base_url,
                 api_key,
@@ -456,8 +500,12 @@ def _sync_history_kb(
                 model=str(HISTORY_KB_MODEL_ID),
                 description="历史问题规避-项目文档",
             )
+            if knowledge_id:
+                progress_area.success(f"已创建知识库：{kb_name} (ID: {knowledge_id})")
         if not knowledge_id:
-            progress_area.warning("无法创建或获取知识库，跳过同步。")
+            progress_area.warning(
+                "无法创建或获取知识库，跳过同步。请检查毕昇服务配置与权限。"
+            )
             return None
         total_uploaded = 0
         total_skipped = 0
