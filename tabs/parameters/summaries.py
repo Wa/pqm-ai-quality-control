@@ -341,17 +341,5 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
             report_exception("写入参数检查Excel失败", error, level="warning")
             xlsx_path = None
 
-    manifest = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "row_count": len(rows),
-        "csv_path": csv_path,
-        "xlsx_path": xlsx_path,
-    }
-    try:
-        with open(os.path.join(final_dir, "manifest.json"), "w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, ensure_ascii=False, indent=2)
-    except Exception as error:
-        report_exception("写入参数结果manifest失败", error, level="warning")
-
 
 __all__ = ["aggregate_outputs", "persist_compare_outputs", "summarize_with_ollama"]
