@@ -8,7 +8,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 import pandas as pd
 import requests
@@ -19,6 +19,12 @@ from pydantic import BaseModel, Field
 
 from config import CONFIG
 from util import ensure_session_dirs, handle_file_upload, resolve_ollama_host
+from bisheng_client import (
+    create_knowledge,
+    find_knowledge_id_by_name,
+    kb_sync_folder,
+    parse_flow_answer,
+)
 
 
 PDF_EXTENSIONS = {".pdf"}
@@ -27,6 +33,21 @@ SPREADSHEET_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".csv"}
 HEADER_SCAN_LIMIT = 10
 HEADER_SCORE_THRESHOLD = 4
 LLM_CHUNK_LIMIT = 9500
+HISTORY_KB_MODEL_ID = 7
+HISTORY_FLOW_ID = "191af6f3565e415ca9670f1bc2b9117e"
+HISTORY_FLOW_BASE = (
+    os.getenv("HISTORY_FLOW_BASE")
+    or f"{CONFIG.get('bisheng', {}).get('base_url', 'http://10.31.60.11:3001').rstrip('/')}/api/v1/process"
+)
+HISTORY_FLOW_TWEAKS = {
+    "MixEsVectorRetriever-J35CZ": {},
+    "Milvus-cyR5W": {},
+    "PromptTemplate-bs0vj": {},
+    "BishengLLM-768ac": {},
+    "ElasticKeywordsSearch-1c80e": {},
+    "RetrievalQA-f0f31": {},
+    "CombineDocsChain-2f68e": {},
+}
 
 HEADER_ALIASES = {
     "failure_mode": [
@@ -294,10 +315,17 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
 
 def _ensure_generated_dirs(root: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
+    os.makedirs(root, exist_ok=True)
     for key in ("issue_lists", "dfmea", "pfmea", "cp"):
         path = os.path.join(root, f"{key}_txt")
         os.makedirs(path, exist_ok=True)
         mapping[key] = path
+    initial_dir = os.path.join(root, "initial_results")
+    final_dir = os.path.join(root, "final_results")
+    os.makedirs(initial_dir, exist_ok=True)
+    os.makedirs(final_dir, exist_ok=True)
+    mapping["initial_results"] = initial_dir
+    mapping["final_results"] = final_dir
     return mapping
 
 
@@ -398,6 +426,265 @@ def _process_category(label: str, source_dir: str | None, output_dir: str, progr
     if not created:
         progress_area.info(f"{label} 未生成任何文本文件，请确认已上传 PDF/Word/Excel。")
     return created
+
+
+def _safe_result_name(base: str) -> str:
+    name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]", "_", base)
+    name = name.strip("._")
+    return name[:120] or "result"
+
+
+def _sync_history_kb(
+    session_id: str,
+    text_dirs: dict[str, str],
+    progress_area,
+) -> Optional[int]:
+    settings = CONFIG.get("bisheng", {})
+    base_url = settings.get("base_url") or ""
+    api_key = settings.get("api_key") or None
+    if not base_url:
+        progress_area.warning("未配置毕昇服务地址，跳过知识库同步。")
+        return None
+    kb_name = f"{session_id}_history_issues_avoidance"
+    try:
+        knowledge_id = find_knowledge_id_by_name(base_url, api_key, kb_name)
+        if not knowledge_id:
+            knowledge_id = create_knowledge(
+                base_url,
+                api_key,
+                kb_name,
+                model=str(HISTORY_KB_MODEL_ID),
+                description="历史问题规避-项目文档",
+            )
+        if not knowledge_id:
+            progress_area.warning("无法创建或获取知识库，跳过同步。")
+            return None
+        total_uploaded = 0
+        total_skipped = 0
+        for label, folder in text_dirs.items():
+            if not folder or not os.path.isdir(folder):
+                continue
+            progress_area.write(f"同步至知识库 ({label}) …")
+            try:
+                result = kb_sync_folder(
+                    base_url=base_url,
+                    api_key=api_key,
+                    knowledge_id=int(knowledge_id),
+                    folder_path=folder,
+                    clear_first=False,
+                    chunk_size=800,
+                    chunk_overlap=80,
+                    separators=["\n\n", "\n"],
+                    separator_rule=["after", "after"],
+                )
+            except Exception as error:
+                progress_area.error(f"同步 {label} 失败: {error}")
+                continue
+            uploaded = len(result.get("uploaded", [])) if isinstance(result, dict) else 0
+            skipped = len(result.get("skipped", [])) if isinstance(result, dict) else 0
+            total_uploaded += uploaded
+            total_skipped += skipped
+            progress_area.success(
+                f"{label} 已同步：上传 {uploaded} 个，跳过 {skipped} 个。"
+            )
+        if total_uploaded or total_skipped:
+            progress_area.info(
+                f"知识库同步完成（上传 {total_uploaded}，跳过 {total_skipped}）。"
+            )
+        else:
+            progress_area.info("知识库同步完成（无可同步文件）。")
+        return int(knowledge_id)
+    except Exception as error:
+        progress_area.error(f"知识库同步失败: {error}")
+        return None
+
+
+def _apply_kb_to_tweaks(kb_id: Optional[int]) -> dict:
+    tweaks = {key: value.copy() for key, value in HISTORY_FLOW_TWEAKS.items()}
+    if kb_id is None:
+        return tweaks
+    for node_id in ("Milvus-cyR5W", "ElasticKeywordsSearch-1c80e"):
+        node_tw = tweaks.get(node_id, {}).copy()
+        node_tw["collection_id"] = str(kb_id)
+        tweaks[node_id] = node_tw
+    return tweaks
+
+
+def _invoke_history_flow(prompt: str, kb_id: Optional[int], progress_area) -> dict:
+    payload = {"inputs": {"input": prompt}}
+    tweaks = _apply_kb_to_tweaks(kb_id)
+    if tweaks:
+        payload["tweaks"] = tweaks
+    url = f"{HISTORY_FLOW_BASE.rstrip('/')}/{HISTORY_FLOW_ID}"
+    try:
+        response = requests.post(url, json=payload, timeout=180)
+        response.raise_for_status()
+        return response.json()
+    except Exception as error:
+        progress_area.error(f"调用毕昇比对失败: {error}")
+        return {"error": str(error)}
+
+
+def _build_record_prompt(record: IssueRecord) -> str:
+    details = [
+        f"失效模式: {record.failure_mode}",
+        f"根因: {record.root_cause or '（未提供）'}",
+        f"预防措施: {record.prevention_action or '（未提供）'}",
+        f"检测措施: {record.detection_action or '（未提供）'}",
+    ]
+    for label, value in (
+        ("严重度", record.severity),
+        ("发生度", record.occurrence),
+        ("检测度", record.detection),
+        ("责任人", record.responsible),
+        ("计划完成时间", record.due_date),
+        ("状态", record.status),
+        ("备注", record.remarks),
+    ):
+        if value:
+            details.append(f"{label}: {value}")
+    instructions = """
+你是一名资深APQP质量工程师，负责检查历史问题是否已在当前项目的DFMEA、PFMEA、控制计划中得到预防。
+
+你的任务：
+1. 阅读“历史问题”的描述，理解其失效模式、根本原因、预防措施、检测措施。
+2. 阅读提供的当前项目文档片段（DFMEA/PFMEA/控制计划）。
+3. 判断该历史问题的预防与检测措施是否已经被覆盖。
+4. 若未覆盖，请建议在哪个文档（DFMEA/PFMEA/控制计划）中增加何种控制。
+
+请仅输出以下JSON格式：
+{
+  "status": "已覆盖 | 部分覆盖 | 未覆盖",
+  "where_covered": [
+    {"doc_type": "PFMEA", "row_ref": "PFMEA-R12", "说明": "已有UV固化时间5s及拉力测试控制"}
+  ],
+  "建议更新": [
+    {"目标文件": "控制计划", "建议内容": "增加100%拉力测试≥5N", "理由": "对应历史问题NTC探头松脱"}
+  ]
+}
+""".strip()
+    return f"{instructions}\n\n历史问题详情：\n" + "\n".join(f"- {line}" for line in details if line)
+
+
+def _load_issue_payloads(issue_dir: str) -> list[tuple[str, list[IssueRecord]]]:
+    payloads: list[tuple[str, list[IssueRecord]]] = []
+    if not issue_dir or not os.path.isdir(issue_dir):
+        return payloads
+    for name in sorted(os.listdir(issue_dir)):
+        path = os.path.join(issue_dir, name)
+        if not os.path.isfile(path) or not name.lower().endswith(".txt"):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        records_raw = data.get("records") if isinstance(data, dict) else None
+        if not isinstance(records_raw, list):
+            continue
+        records: list[IssueRecord] = []
+        for item in records_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                records.append(IssueRecord(**item))
+            except Exception:
+                continue
+        if records:
+            payloads.append((name, records))
+    return payloads
+
+
+def _evaluate_history_problems(
+    issue_dir: str,
+    initial_dir: str,
+    final_dir: str,
+    kb_id: Optional[int],
+    session_id: str,
+    progress_area,
+) -> None:
+    os.makedirs(initial_dir, exist_ok=True)
+    os.makedirs(final_dir, exist_ok=True)
+    payloads = _load_issue_payloads(issue_dir)
+    if not payloads:
+        progress_area.info("未发现历史问题解析结果，跳过比对。")
+        return
+    total_records = sum(len(records) for _, records in payloads)
+    if total_records == 0:
+        progress_area.info("历史问题记录为空。")
+        return
+    progress_area.markdown("**开始历史问题覆盖性比对**")
+    progress_bar = progress_area.progress(0.0)
+    collected_rows: list[dict[str, object]] = []
+    processed = 0
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for file_name, records in payloads:
+        safe_file = _safe_result_name(os.path.splitext(file_name)[0])
+        for index, record in enumerate(records, start=1):
+            prompt = _build_record_prompt(record)
+            response = _invoke_history_flow(prompt, kb_id, progress_area)
+            answer_text, _ = parse_flow_answer(response)
+            parsed_answer: dict[str, object] | None = None
+            if isinstance(answer_text, str) and answer_text.strip():
+                try:
+                    parsed_answer = json.loads(answer_text)
+                except json.JSONDecodeError:
+                    parsed_answer = None
+            initial_payload = {
+                "source_file": file_name,
+                "record_index": index,
+                "prompt": prompt,
+                "record": record.model_dump(),
+                "response": response,
+                "answer": answer_text,
+            }
+            out_name = f"{safe_file}_record_{index:04d}.json"
+            try:
+                with open(os.path.join(initial_dir, out_name), "w", encoding="utf-8") as f:
+                    json.dump(initial_payload, f, ensure_ascii=False, indent=2)
+            except Exception as error:
+                progress_area.warning(f"写入初步结果失败 ({out_name}): {error}")
+            row = {
+                "source_file": file_name,
+                "record_index": index,
+                "session_id": session_id,
+                "failure_mode": record.failure_mode,
+                "root_cause": record.root_cause,
+                "prevention_action": record.prevention_action,
+                "detection_action": record.detection_action,
+                "status": "",
+                "where_covered": "",
+                "建议更新": "",
+                "原始回答": answer_text or "",
+            }
+            if parsed_answer:
+                row["status"] = str(parsed_answer.get("status", ""))
+                row["where_covered"] = json.dumps(
+                    parsed_answer.get("where_covered", []), ensure_ascii=False
+                )
+                row["建议更新"] = json.dumps(
+                    parsed_answer.get("建议更新", []), ensure_ascii=False
+                )
+            collected_rows.append(row)
+            processed += 1
+            progress_bar.progress(min(processed / total_records, 1.0))
+    progress_bar.empty()
+    if not collected_rows:
+        progress_area.info("未获取到有效的比对结果。")
+        return
+    df = pd.DataFrame(collected_rows)
+    csv_path = os.path.join(final_dir, f"history_issues_results_{timestamp}.csv")
+    xlsx_path = os.path.join(final_dir, f"history_issues_results_{timestamp}.xlsx")
+    try:
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        progress_area.success(f"已生成CSV结果：{os.path.basename(csv_path)}")
+    except Exception as error:
+        progress_area.error(f"导出CSV失败: {error}")
+    try:
+        df.to_excel(xlsx_path, index=False, engine="openpyxl")
+        progress_area.success(f"已生成Excel结果：{os.path.basename(xlsx_path)}")
+    except Exception as error:
+        progress_area.error(f"导出Excel失败: {error}")
 
 
 def _strip_html(value: str) -> str:
@@ -913,7 +1200,24 @@ def render_history_issues_avoidance_tab(session_id):
                         )
                     )
                     if total_created:
-                        st.success("处理完成。")
+                        st.success("文本解析完成。")
+                        kb_id = _sync_history_kb(
+                            session_id,
+                            {
+                                "DFMEA": generated_dirs.get("dfmea", ""),
+                                "PFMEA": generated_dirs.get("pfmea", ""),
+                                "控制计划": generated_dirs.get("cp", ""),
+                            },
+                            area,
+                        )
+                        _evaluate_history_problems(
+                            generated_dirs.get("issue_lists", ""),
+                            generated_dirs.get("initial_results", ""),
+                            generated_dirs.get("final_results", ""),
+                            kb_id,
+                            session_id,
+                            area,
+                        )
                     else:
                         st.info("未生成任何文本文件，请确认上传内容后重试。")
 
