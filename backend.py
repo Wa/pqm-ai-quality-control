@@ -20,6 +20,7 @@ from config import CONFIG
 from tabs.enterprise_standard.background import run_enterprise_standard_job
 from tabs.file_completeness import run_file_completeness_job
 from tabs.parameters.background import run_parameters_job
+from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
 
 
@@ -39,6 +40,10 @@ JOB_DEFINITIONS = {
     "file_completeness": {
         "runner": run_file_completeness_job,
         "label": "文件齐套性检查",
+    },
+    "history": {
+        "runner": run_history_job,
+        "label": "历史问题规避",
     },
 }
 
@@ -794,6 +799,37 @@ def resume_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
 @app.post("/file-completeness/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
 def stop_file_completeness_job(job_id: str) -> EnterpriseJobStatus:
     return _pause_resume_stop_job(job_id, action="stop", job_type="file_completeness")
+
+
+@app.post("/history/jobs", response_model=EnterpriseJobStatus)
+def start_history_job(request: EnterpriseJobRequest) -> EnterpriseJobStatus:
+    record = _start_job("history", request.session_id)
+    return _record_to_status(record)
+
+
+@app.get("/history/jobs/{job_id}", response_model=EnterpriseJobStatus)
+def get_history_job(job_id: str) -> EnterpriseJobStatus:
+    return _get_job_status(job_id, expected_type="history")
+
+
+@app.get("/history/jobs", response_model=List[EnterpriseJobStatus])
+def list_history_jobs(session_id: Optional[str] = None) -> List[EnterpriseJobStatus]:
+    return _list_jobs("history", session_id)
+
+
+@app.post("/history/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+def pause_history_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="pause", job_type="history")
+
+
+@app.post("/history/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+def resume_history_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="resume", job_type="history")
+
+
+@app.post("/history/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+def stop_history_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="stop", job_type="history")
 
 
 @app.post("/enterprise-standard/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
