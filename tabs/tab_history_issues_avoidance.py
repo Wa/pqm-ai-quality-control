@@ -1,12 +1,12 @@
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import os
 import io
 import zipfile
 import json
-import re
 import requests
-import shutil
 from util import ensure_session_dirs, handle_file_upload
 from config import CONFIG
 
@@ -260,192 +260,192 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area):
 	return created
 
 
+def _collect_files(folder: str) -> list[dict[str, object]]:
+    if not folder or not os.path.isdir(folder):
+        return []
+    items = []
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        stat = os.stat(path)
+        items.append(
+            {
+                "name": name,
+                "path": path,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            }
+        )
+    items.sort(key=lambda info: info["modified"], reverse=True)
+    return items
+
+
+def _format_file_size(size_bytes: int) -> str:
+    if size_bytes == 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB"]
+    value = float(size_bytes)
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024.0
+        index += 1
+    return f"{value:.1f} {units[index]}"
+
+
+def _format_timestamp(timestamp: float) -> str:
+    from datetime import datetime
+
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+
+
+def _truncate_filename(filename: str, max_length: int = 40) -> str:
+    if len(filename) <= max_length:
+        return filename
+    name, ext = os.path.splitext(filename)
+    available = max_length - len(ext) - 3
+    if available <= 0:
+        return filename[: max_length - 3] + "..."
+    return name[:available] + "..." + ext
+
+
+def _process_category(
+    label: str,
+    source_dir: str | None,
+    output_dir: str,
+    progress_area,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    if not source_dir or not os.path.isdir(source_dir):
+        progress_area.warning(f"未找到 {label} 上传目录，已跳过。")
+        return []
+
+    progress_area.markdown(f"**{label} → 文本**")
+    created = []
+    created.extend(_process_pdf_folder(source_dir, output_dir, progress_area))
+    created.extend(_process_word_ppt_folder(source_dir, output_dir, progress_area))
+    created.extend(_process_excel_folder(source_dir, output_dir, progress_area))
+    if not created:
+        progress_area.info(f"{label} 未生成任何文本文件，请确认已上传 PDF、Word/PPT 或 Excel。")
+    return created
+
+
 def render_history_issues_avoidance_tab(session_id):
-    # Handle None session_id (user not logged in)
     if session_id is None:
         st.warning("请先登录以使用此功能。")
         return
-    
+
     st.subheader("📋 历史问题规避")
-    
-    # Ensure history issues avoidance directories exist
+
     base_dirs = {
         "generated": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
+
     issue_lists_dir = session_dirs.get("history_issue_lists")
-    target_files_dir = session_dirs.get("history_target_files")
-    generated_session_dir = session_dirs.get("generated")
-    
-    # Layout similar to enterprise standard check: left main content, right file manager
+    dfmea_dir = session_dirs.get("history_dfmea")
+    pfmea_dir = session_dirs.get("history_pfmea")
+    cp_dir = session_dirs.get("history_cp")
+    generated_root = session_dirs.get("generated_history_issues_avoidance")
+    if not generated_root:
+        generated_base = session_dirs.get("generated")
+        if generated_base:
+            generated_root = os.path.join(generated_base, "history_issues_avoidance")
+            os.makedirs(generated_root, exist_ok=True)
+
+    upload_targets = [
+        {"label": "历史问题清单", "key": "issue_lists", "dir": issue_lists_dir},
+        {"label": "DFMEA", "key": "dfmea", "dir": dfmea_dir},
+        {"label": "PFMEA", "key": "pfmea", "dir": pfmea_dir},
+        {"label": "控制计划 (CP)", "key": "cp", "dir": cp_dir},
+    ]
+
     col_main, col_info = st.columns([2, 1])
-    
+
     with col_main:
-        # Two uploaders side by side
-        col_issues, col_targets = st.columns(2)
-        with col_issues:
-            files_issues = st.file_uploader("点击上传历史问题清单", type=None, accept_multiple_files=True, key=f"history_issues_{session_id}")
-            if files_issues:
-                handle_file_upload(files_issues, issue_lists_dir)
-                st.success(f"已上传 {len(files_issues)} 个历史问题清单文件")
-        with col_targets:
-            files_targets = st.file_uploader("点击上传待检查文件", type=None, accept_multiple_files=True, key=f"history_targets_{session_id}")
-            if files_targets:
-                handle_file_upload(files_targets, target_files_dir)
-                st.success(f"已上传 {len(files_targets)} 个待检查文件")
-        
-        # Start and Demo buttons
-        btn_col1, btn_col2 = st.columns([1, 1])
-        with btn_col1:
-            if st.button("开始", key=f"history_start_button_{session_id}"):
-                # Process PDFs (MinerU) and Word/PPT (Unstructured) into plain text
-                st.info("开始处理文件：PDF 使用 MinerU，Word/PPT 使用 Unstructured…")
-                area = st.container()
-                with area:
-                    # Create output directories for parsed text files
-                    history_out_root = os.path.join(generated_session_dir, "history_issues_avoidance")
-                    issue_lists_txt_dir = os.path.join(history_out_root, "issue_lists_txt")
-                    target_files_txt_dir = os.path.join(history_out_root, "target_files_txt")
-                    os.makedirs(issue_lists_txt_dir, exist_ok=True)
-                    os.makedirs(target_files_txt_dir, exist_ok=True)
-                    
-                    st.markdown("**历史问题清单 → 文本**")
-                    created_issues_pdf = _process_pdf_folder(issue_lists_dir, issue_lists_txt_dir, st)
-                    created_issues_wp = _process_word_ppt_folder(issue_lists_dir, issue_lists_txt_dir, st)
-                    created_issues_xls = _process_excel_folder(issue_lists_dir, issue_lists_txt_dir, st)
-                    st.markdown("**待检查文件 → 文本**")
-                    created_targets_pdf = _process_pdf_folder(target_files_dir, target_files_txt_dir, st)
-                    created_targets_wp = _process_word_ppt_folder(target_files_dir, target_files_txt_dir, st)
-                    created_targets_xls = _process_excel_folder(target_files_dir, target_files_txt_dir, st)
-                    if any([created_issues_pdf, created_issues_wp, created_issues_xls, created_targets_pdf, created_targets_wp, created_targets_xls]):
+        st.markdown("请上传历史问题清单、DFMEA、PFMEA 与控制计划文件。支持 PDF、Word/PPT、Excel 等格式。")
+
+        upload_columns = st.columns(2)
+        for index, target in enumerate(upload_targets):
+            column = upload_columns[index % len(upload_columns)]
+            with column:
+                uploaded_files = st.file_uploader(
+                    f"点击上传 {target['label']}",
+                    type=None,
+                    accept_multiple_files=True,
+                    key=f"history_upload_{target['key']}_{session_id}",
+                )
+                if uploaded_files:
+                    handle_file_upload(uploaded_files, target["dir"])
+                    st.success(f"已上传 {len(uploaded_files)} 个 {target['label']} 文件")
+
+        st.divider()
+
+        if st.button("开始解析", key=f"history_start_{session_id}"):
+            area = st.container()
+            with area:
+                if not generated_root:
+                    st.error("未能初始化生成文件目录，请检查配置。")
+                else:
+                    st.info("开始处理文件：PDF 使用 MinerU，Word/PPT 使用 Unstructured…")
+                    total_created = []
+                    for target in upload_targets:
+                        output_dir = os.path.join(generated_root, f"{target['key']}_txt")
+                        created = _process_category(
+                            target["label"],
+                            target["dir"],
+                            output_dir,
+                            area,
+                        )
+                        total_created.extend(created)
+                    if total_created:
                         st.success("处理完成。")
                     else:
-                        st.info("未生成任何文本文件，请确认已上传 PDF、Word/PPT 或 Excel。")
-        with btn_col2:
-            if st.button("演示", key=f"history_demo_button_{session_id}"):
-                # Copy demonstration file to issue_lists directory
-                try:
-                    # Locate demonstration root (same convention as other tabs)
-                    demo_base_dir = CONFIG["directories"]["demonstration"]
-                    demo_file_path = os.path.join(str(demo_base_dir), "副本LL-lesson learn-历史问题规避-V9.4.xlsx")
-                    if os.path.exists(demo_file_path):
-                        dest_path = os.path.join(issue_lists_dir, "副本LL-lesson learn-历史问题规避-V9.4.xlsx")
-                        shutil.copy2(demo_file_path, dest_path)
-                        st.session_state[f"history_demo_{session_id}"] = True
-                        st.success("已复制演示文件：副本LL-lesson learn-历史问题规避-V9.4.xlsx")
-                    else:
-                        st.error("演示文件不存在，请检查路径是否正确。")
-                except Exception as e:
-                    st.error(f"演示文件复制失败: {e}")
+                        st.info("未生成任何文本文件，请确认上传内容后重试。")
 
     with col_info:
-        # File manager utilities (mirroring enterprise standard tab behavior)
-        def get_file_list(folder):
-            if not folder or not os.path.exists(folder):
-                return []
-            files = []
-            for f in os.listdir(folder):
-                file_path = os.path.join(folder, f)
-                if os.path.isfile(file_path):
-                    stat = os.stat(file_path)
-                    files.append({
-                        'name': f,
-                        'size': stat.st_size,
-                        'modified': stat.st_mtime,
-                        'path': file_path
-                    })
-            # Sort by name then modified time for stability
-            return sorted(files, key=lambda x: (x['name'].lower(), x['modified']))
+        st.subheader("📁 上传文件")
 
-        def format_file_size(size_bytes):
-            if size_bytes == 0:
-                return "0 B"
-            size_names = ["B", "KB", "MB", "GB"]
-            i = 0
-            while size_bytes >= 1024 and i < len(size_names) - 1:
-                size_bytes /= 1024.0
-                i += 1
-            return f"{size_bytes:.1f} {size_names[i]}"
+        clear_columns = st.columns(2)
+        for index, target in enumerate(upload_targets):
+            column = clear_columns[index % len(clear_columns)]
+            with column:
+                if st.button(
+                    f"🗑️ 清空{target['label']}",
+                    key=f"history_clear_{target['key']}_{session_id}",
+                ):
+                    try:
+                        if target["dir"] and os.path.isdir(target["dir"]):
+                            for name in os.listdir(target["dir"]):
+                                path = os.path.join(target["dir"], name)
+                                if os.path.isfile(path):
+                                    os.remove(path)
+                        st.success(f"已清空 {target['label']} 文件")
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"清空失败: {error}")
 
-        def format_timestamp(timestamp):
-            from datetime import datetime
-            return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
-
-        def truncate_filename(filename, max_length=40):
-            if len(filename) <= max_length:
-                return filename
-            name, ext = os.path.splitext(filename)
-            available_length = max_length - len(ext) - 3
-            if available_length <= 0:
-                return filename[:max_length-3] + "..."
-            truncated_name = name[:available_length] + "..."
-            return truncated_name + ext
-
-        # Clear buttons
-        col_clear1, col_clear2 = st.columns(2)
-        with col_clear1:
-            if st.button("🗑️ 清空历史问题清单", key=f"clear_history_issues_{session_id}"):
-                try:
-                    for file in os.listdir(issue_lists_dir):
-                        file_path = os.path.join(issue_lists_dir, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                    st.success("已清空历史问题清单文件")
-                except Exception as e:
-                    st.error(f"清空失败: {e}")
-        with col_clear2:
-            if st.button("🗑️ 清空待检查文件", key=f"clear_history_targets_{session_id}"):
-                try:
-                    for file in os.listdir(target_files_dir):
-                        file_path = os.path.join(target_files_dir, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                    st.success("已清空待检查文件")
-                except Exception as e:
-                    st.error(f"清空失败: {e}")
-
-        # File lists in tabs
-        tab_issues, tab_targets = st.tabs(["历史问题清单", "待检查文件"])
-        with tab_issues:
-            issue_files = get_file_list(issue_lists_dir)
-            if issue_files:
-                for file_info in issue_files:
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_i, col_a = st.columns([3, 1])
-                        with col_i:
-                            st.write(f"**文件名:** {file_info['name']}")
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_a:
-                            delete_key = f"del_issue_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+        tabs = st.tabs([target["label"] for target in upload_targets])
+        for tab, target in zip(tabs, upload_targets):
+            with tab:
+                files = _collect_files(target["dir"])
+                if not files:
+                    st.write("（未上传）")
+                    continue
+                for info in files:
+                    display = _truncate_filename(info["name"])
+                    with st.expander(f"📄 {display}", expanded=False):
+                        col_meta, col_actions = st.columns([3, 1])
+                        with col_meta:
+                            st.write(f"**文件名:** {info['name']}")
+                            st.write(f"**大小:** {_format_file_size(info['size'])}")
+                            st.write(f"**修改时间:** {_format_timestamp(info['modified'])}")
+                        with col_actions:
+                            delete_key = f"history_delete_{target['key']}_{info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
-            else:
-                st.write("（未上传）")
-
-        with tab_targets:
-            target_files = get_file_list(target_files_dir)
-            if target_files:
-                for file_info in target_files:
-                    display_name = truncate_filename(file_info['name'])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_i, col_a = st.columns([3, 1])
-                        with col_i:
-                            st.write(f"**文件名:** {file_info['name']}")
-                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
-                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
-                        with col_a:
-                            delete_key = f"del_target_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(file_info['path'])
-                                    st.success(f"已删除: {file_info['name']}")
-                                except Exception as e:
-                                    st.error(f"删除失败: {e}")
-            else:
-                st.write("（未上传）")
+                                    os.remove(info["path"])
+                                    st.success(f"已删除: {info['name']}")
+                                    st.rerun()
+                                except Exception as error:
+                                    st.error(f"删除失败: {error}")
