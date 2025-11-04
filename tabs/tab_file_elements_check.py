@@ -18,6 +18,7 @@ from .file_elements import (
     SEVERITY_LABELS,
     SEVERITY_ORDER,
     parse_deliverable_stub,
+    save_result_payload,
 )
 
 
@@ -49,13 +50,17 @@ def _collect_files(folder: str) -> List[Dict[str, object]]:
         entries.append(
             {
                 "name": name,
-                "path": path,
+                "path": os.path.normpath(path),
                 "size": stat.st_size,
                 "modified": stat.st_mtime,
             }
         )
     entries.sort(key=lambda item: item["modified"], reverse=True)
     return entries
+
+
+def _extract_paths(entries: List[Dict[str, object]]) -> List[str]:
+    return [item["path"] for item in entries if item.get("path")]
 
 
 def render_file_elements_check_tab(session_id: str | None) -> None:
@@ -69,7 +74,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     )
 
     uploads_root = str(CONFIG["directories"]["uploads"])
-    elements_base = os.path.join(uploads_root, "{session_id}", "file_elements")
+    elements_base = os.path.join(uploads_root, "{session_id}", "elements")
     base_dirs = {
         "source": os.path.join(elements_base, "source"),
         "parsed": os.path.join(elements_base, "parsed"),
@@ -83,6 +88,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     result_state_key = f"file_elements_result_{session_id}"
     severity_state_key = f"file_elements_severity_{session_id}"
     issue_state_key = f"file_elements_issue_{session_id}"
+    paths_state_key = f"file_elements_source_paths_{session_id}"
 
     stage_options = list(PHASE_TO_DELIVERABLES.keys())
     if not stage_options:
@@ -135,6 +141,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         st.markdown("### 3. 评估执行与结果")
 
         existing_files = _collect_files(source_dir)
+        st.session_state[paths_state_key] = _extract_paths(existing_files)
         uploaded = st.file_uploader(
             "上传交付物（支持TXT/MD，若为其他格式请提供同名文本解析文件）",
             accept_multiple_files=True,
@@ -145,6 +152,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             if saved:
                 st.success(f"已保存 {saved} 个文件至 {source_dir}")
                 existing_files = _collect_files(source_dir)
+                st.session_state[paths_state_key] = _extract_paths(existing_files)
 
         if existing_files:
             file_info_rows = [
@@ -162,18 +170,22 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         orchestrator = EvaluationOrchestrator(profile)
 
         def run_evaluation() -> None:
-            text, source_file, warnings = parse_deliverable_stub(profile, source_dir, parsed_dir)
+            current_files = _collect_files(source_dir)
+            normalized_paths = _extract_paths(current_files)
+            st.session_state[paths_state_key] = normalized_paths
+            text, source_file, warnings = parse_deliverable_stub(
+                profile,
+                source_dir,
+                parsed_dir,
+                source_paths=normalized_paths,
+            )
             result = orchestrator.evaluate(text, source_file=source_file, warnings=warnings)
             st.session_state[result_state_key] = result
             st.session_state[severity_state_key] = list(SEVERITY_ORDER)
             st.session_state.pop(issue_state_key, None)
             if export_dir:
                 try:
-                    os.makedirs(export_dir, exist_ok=True)
-                    payload = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
-                    target_path = os.path.join(export_dir, "file_elements_evaluation.json")
-                    with open(target_path, "w", encoding="utf-8") as handle:
-                        handle.write(payload)
+                    save_result_payload(result, export_dir)
                 except OSError as error:
                     st.warning(f"结果保存失败：{error}")
 
