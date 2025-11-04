@@ -14,6 +14,7 @@ from .evaluator import (
     EvaluationOrchestrator,
     EvaluationResult,
     parse_deliverable_stub,
+    save_result_payload,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "EvaluationOrchestrator",
     "EvaluationResult",
     "parse_deliverable_stub",
+    "save_result_payload",
 ]
