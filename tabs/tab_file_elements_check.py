@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from io import BytesIO
 from datetime import datetime
 from typing import Dict, List
 
@@ -20,6 +21,7 @@ from .file_elements import (
     parse_deliverable_stub,
     save_result_payload,
 )
+from .shared.file_conversion import process_pdf_folder, process_word_ppt_folder
 
 
 def _format_size(num_bytes: int) -> str:
@@ -74,21 +76,20 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     )
 
     uploads_root = str(CONFIG["directories"]["uploads"])
-    elements_base = os.path.join(uploads_root, "{session_id}", "elements")
     base_dirs = {
-        "source": os.path.join(elements_base, "source"),
-        "parsed": os.path.join(elements_base, "parsed"),
+        "elements": os.path.join(uploads_root, "{session_id}", "elements"),
         "generated": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
-    source_dir = session_dirs.get("source", "")
-    parsed_dir = session_dirs.get("parsed", "")
+    source_dir = session_dirs.get("elements", "")
+    parsed_dir = session_dirs.get("generated_file_elements_check", "")
     export_dir = session_dirs.get("generated_file_elements_check", session_dirs.get("generated", ""))
 
     result_state_key = f"file_elements_result_{session_id}"
     severity_state_key = f"file_elements_severity_{session_id}"
     issue_state_key = f"file_elements_issue_{session_id}"
     paths_state_key = f"file_elements_source_paths_{session_id}"
+    export_state_key = f"file_elements_export_path_{session_id}"
 
     stage_options = list(PHASE_TO_DELIVERABLES.keys())
     if not stage_options:
@@ -167,6 +168,42 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         else:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
+        with st.expander("📎 非文本文件解析助手", expanded=False):
+            st.markdown(
+                "当交付物为PDF、Word或PPT时，可在此批量解析生成对应的`.txt`文件，"
+                "系统将自动在评估时优先使用最新的同名文本。解析结果会存入"
+                "`generated_files/{session_id}/file_elements_check/`。"
+            )
+            pdf_status = st.container()
+            office_status = st.container()
+            col_pdf, col_office = st.columns(2)
+            with col_pdf:
+                if st.button(
+                    "解析PDF", key=f"file_elements_convert_pdf_{session_id}", help="调用MinerU解析当前目录下的PDF文件。"
+                ):
+                    if not source_dir or not parsed_dir:
+                        pdf_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
+                    else:
+                        created = process_pdf_folder(source_dir, parsed_dir, pdf_status, annotate_sources=True)
+                        if created:
+                            pdf_status.success(f"成功生成 {len(created)} 个文本文件。")
+                        else:
+                            pdf_status.info("未解析出新的文本，请确认PDF文件是否存在或已处理。")
+            with col_office:
+                if st.button(
+                    "解析Word/PPT",
+                    key=f"file_elements_convert_office_{session_id}",
+                    help="调用Unstructured服务解析Word/PPT文件为文本。",
+                ):
+                    if not source_dir or not parsed_dir:
+                        office_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
+                    else:
+                        created = process_word_ppt_folder(source_dir, parsed_dir, office_status, annotate_sources=True)
+                        if created:
+                            office_status.success(f"成功生成 {len(created)} 个文本文件。")
+                        else:
+                            office_status.info("未解析出新的文本，请确认文件格式并重试。")
+
         orchestrator = EvaluationOrchestrator(profile)
 
         def run_evaluation() -> None:
@@ -181,11 +218,18 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             )
             result = orchestrator.evaluate(text, source_file=source_file, warnings=warnings)
             st.session_state[result_state_key] = result
-            st.session_state[severity_state_key] = list(SEVERITY_ORDER)
+            available_levels = [
+                level
+                for level in SEVERITY_ORDER
+                if any(item.severity == level for item in result.evaluations)
+            ]
+            st.session_state[severity_state_key] = available_levels or list(SEVERITY_ORDER)
             st.session_state.pop(issue_state_key, None)
+            st.session_state[export_state_key] = None
             if export_dir:
                 try:
-                    save_result_payload(result, export_dir)
+                    saved_path = save_result_payload(result, export_dir)
+                    st.session_state[export_state_key] = saved_path
                 except OSError as error:
                     st.warning(f"结果保存失败：{error}")
 
@@ -202,7 +246,19 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 run_evaluation()
         with col_export:
             result = st.session_state.get(result_state_key)
-            if result:
+            export_path = st.session_state.get(export_state_key)
+            if result and export_path and os.path.isfile(export_path):
+                with open(export_path, "r", encoding="utf-8") as handle:
+                    payload = handle.read()
+                st.download_button(
+                    "📥 导出JSON",
+                    payload.encode("utf-8"),
+                    file_name=os.path.basename(export_path),
+                    mime="application/json",
+                    key=f"file_elements_export_{session_id}",
+                    help="导出评估结果以便归档或共享。",
+                )
+            elif result:
                 export_content = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
                 st.download_button(
                     "📥 导出JSON",
@@ -235,8 +291,34 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             with col_missing:
                 st.metric("待补充", summary.get("missing", 0))
 
-            severity_options = [level for level in SEVERITY_ORDER if level in SEVERITY_LABELS]
+            severity_stats: Dict[str, Dict[str, int]] = {}
+            for item in result.evaluations:
+                bucket = severity_stats.setdefault(
+                    item.severity, {"total": 0, "pass": 0, "missing": 0}
+                )
+                bucket["total"] += 1
+                if item.status == "pass":
+                    bucket["pass"] += 1
+                else:
+                    bucket["missing"] += 1
+
+            ordered_levels = [level for level in SEVERITY_ORDER if level in severity_stats]
+            if ordered_levels:
+                st.markdown("#### 严重度拆解")
+                for start in range(0, len(ordered_levels), 3):
+                    chunk = ordered_levels[start : start + 3]
+                    cols = st.columns(len(chunk))
+                    for col, level in zip(cols, chunk):
+                        data = severity_stats[level]
+                        label = SEVERITY_LABELS.get(level, level)
+                        value = f"{data['missing']} 待补 / {data['total']} 项"
+                        delta = f"已满足 {data['pass']}"
+                        col.metric(label, value, delta=delta)
+
+            severity_options = ordered_levels or [level for level in SEVERITY_ORDER if level in SEVERITY_LABELS]
             current_selection = st.session_state.get(severity_state_key, severity_options)
+            if not current_selection:
+                current_selection = severity_options
             selected_levels = st.multiselect(
                 "按严重度筛选",
                 options=severity_options,
@@ -273,42 +355,84 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         severity_filter = st.session_state.get(severity_state_key, list(SEVERITY_ORDER))
         candidates = [item for item in result.evaluations if item.severity in severity_filter]
         missing_items = [item for item in candidates if item.status != "pass"]
-        if missing_items:
-            detail_pool = missing_items
-        else:
-            detail_pool = candidates
+        detail_pool = missing_items or candidates
 
-        if not detail_pool:
+        selected_item = None
+        if detail_pool:
+            index_to_item = {idx: item for idx, item in enumerate(detail_pool)}
+            default_issue = st.session_state.get(issue_state_key, next(iter(index_to_item), 0))
+            selected_index = st.selectbox(
+                "选择要素",
+                options=list(index_to_item.keys()),
+                index=0
+                if default_issue not in index_to_item
+                else list(index_to_item.keys()).index(default_issue),
+                format_func=lambda idx: f"{index_to_item[idx].requirement.name}（{SEVERITY_LABELS.get(index_to_item[idx].severity, index_to_item[idx].severity)}）",
+                key=f"file_elements_issue_selector_{session_id}",
+            )
+            st.session_state[issue_state_key] = selected_index
+            selected_item = index_to_item[selected_index]
+        else:
+            st.session_state.pop(issue_state_key, None)
             st.success("所有要素均已满足，无需额外整改。")
-            return
 
-        index_to_item = {idx: item for idx, item in enumerate(detail_pool)}
-        default_issue = st.session_state.get(issue_state_key, next(iter(index_to_item), 0))
-        selected_index = st.selectbox(
-            "选择要素",
-            options=list(index_to_item.keys()),
-            index=0 if default_issue not in index_to_item else list(index_to_item.keys()).index(default_issue),
-            format_func=lambda idx: f"{index_to_item[idx].requirement.name}（{SEVERITY_LABELS.get(index_to_item[idx].severity, index_to_item[idx].severity)}）",
-            key=f"file_elements_issue_selector_{session_id}",
-        )
-        st.session_state[issue_state_key] = selected_index
-        selected_item = index_to_item[selected_index]
+        if selected_item:
+            detail_col, snippet_col = st.columns((1.4, 1))
+            with detail_col:
+                severity_label = SEVERITY_LABELS.get(selected_item.severity, selected_item.severity)
+                status_prefix = "✅" if selected_item.status == "pass" else "⚠️"
+                status_text = "已满足" if selected_item.status == "pass" else "待补充"
+                st.markdown(f"{status_prefix} **{selected_item.requirement.name}** — {severity_label} · {status_text}")
+                st.markdown(f"**要素描述：** {selected_item.requirement.description}")
+                st.markdown(f"**当前判断：** {selected_item.message}")
+                st.markdown(f"**整改指导：** {selected_item.requirement.guidance or '—'}")
+                if selected_item.keyword:
+                    st.caption(f"检测关键字：{selected_item.keyword}")
+            with snippet_col:
+                if selected_item.snippet:
+                    st.markdown("**上下文摘录：**")
+                    st.code(selected_item.snippet, language="text")
+                else:
+                    st.caption("未检索到上下文片段，请在源文档中补充证据。")
 
-        if selected_item.status == "pass":
-            st.success(f"✅ {selected_item.requirement.name}：{selected_item.message}")
+        rectify_rows = [
+            {
+                "要素": item.requirement.name,
+                "严重度": SEVERITY_LABELS.get(item.severity, item.severity),
+                "当前状态": item.message,
+                "整改指导": item.requirement.guidance,
+                "建议完成日期": "",
+            }
+            for item in result.evaluations
+            if item.status != "pass"
+        ]
+
+        st.markdown("#### 整改跟踪表（自动草稿）")
+        if rectify_rows:
+            rectify_df = pd.DataFrame(rectify_rows)
+            st.dataframe(rectify_df, use_container_width=True)
+            csv_data = rectify_df.to_csv(index=False).encode("utf-8-sig")
+            excel_buffer = BytesIO()
+            rectify_df.to_excel(excel_buffer, index=False, sheet_name="整改清单")
+            excel_buffer.seek(0)
+            col_csv, col_excel = st.columns(2)
+            with col_csv:
+                st.download_button(
+                    "导出CSV",
+                    csv_data,
+                    file_name=f"{profile.id}_file_elements_rectify.csv",
+                    mime="text/csv",
+                    key=f"file_elements_rectify_csv_{session_id}",
+                )
+            with col_excel:
+                st.download_button(
+                    "导出Excel",
+                    excel_buffer.getvalue(),
+                    file_name=f"{profile.id}_file_elements_rectify.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"file_elements_rectify_excel_{session_id}",
+                )
         else:
-            st.error(f"⚠️ {selected_item.requirement.name}：{selected_item.message}")
+            st.success("暂无需整改项目，所有要素均已满足。")
 
-        st.markdown(f"**要素描述：** {selected_item.requirement.description}")
-        st.markdown(f"**整改指导：** {selected_item.requirement.guidance}")
-        if selected_item.keyword:
-            st.caption(f"检测关键字：{selected_item.keyword}")
-        if selected_item.snippet:
-            st.markdown("**上下文摘录：**")
-            st.code(selected_item.snippet, language="text")
-        else:
-            st.caption("未获取到上下文，请在源文件中补充相关内容。")
-
-        st.markdown(
-            "如需再次分析，请使用上方“重新评估”按钮；若需对外共享，可导出JSON文件或将结果复制至整改清单。"
-        )
+        st.caption("如需再次分析，请使用上方“重新评估”按钮；若需归档，可结合整改清单与JSON导出共享。")
