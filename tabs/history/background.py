@@ -355,6 +355,10 @@ class IssueRecord(BaseModel):
     due_date: str | None = None
     status: str | None = None
     remarks: str | None = None
+    header_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="原始文件中的列标题映射，键为标准字段名，值为原始表头",
+    )
     hash_key: str = Field(..., description="同文件内用于去重的哈希")
 
 
@@ -1006,6 +1010,16 @@ def _evaluate_history_problems(
         return
     progress_area.markdown("**开始历史问题覆盖性比对**")
     collected_rows: list[dict[str, object]] = []
+    header_preferences: dict[str, str] = {}
+
+    def capture_header_labels(record: IssueRecord) -> None:
+        labels = getattr(record, "header_labels", {}) or {}
+        for key, value in labels.items():
+            if key not in header_preferences and isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    header_preferences[key] = stripped
+
     processed = 0
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     flow_session_key = f"history_bisheng_session_{session_id}"
@@ -1080,6 +1094,7 @@ def _evaluate_history_problems(
                         parsed_answer.get("建议更新", []), ensure_ascii=False
                     )
                 collected_rows.append(row)
+                capture_header_labels(record)
                 processed += 1
                 if checkpoint is not None and result_name:
                     checkpoint.mark_processed(file_name, record.hash_key, index, result_name)
@@ -1161,6 +1176,7 @@ def _evaluate_history_problems(
                     parsed_answer.get("建议更新", []), ensure_ascii=False
                 )
             collected_rows.append(row)
+            capture_header_labels(record)
             processed += 1
             if progress_callback and total_records:
                 fraction = processed / total_records
@@ -1171,8 +1187,23 @@ def _evaluate_history_problems(
             progress_callback(min(progress_offset + progress_span, 1.0))
         return
     df = pd.DataFrame(collected_rows)
-    csv_path = os.path.join(final_dir, f"history_issues_results_{timestamp}.csv")
-    xlsx_path = os.path.join(final_dir, f"history_issues_results_{timestamp}.xlsx")
+    rename_map: dict[str, str] = {}
+    for field in REQUIRED_FIELDS + OPTIONAL_FIELDS:
+        if field not in df.columns:
+            continue
+        preferred = header_preferences.get(field)
+        if not preferred:
+            aliases = HEADER_ALIASES.get(field)
+            if isinstance(aliases, list) and aliases:
+                preferred = aliases[0]
+        if not preferred:
+            preferred = field
+        rename_map[field] = preferred
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    result_basename = f"历史问题排查结果_{timestamp}"
+    csv_path = os.path.join(final_dir, f"{result_basename}.csv")
+    xlsx_path = os.path.join(final_dir, f"{result_basename}.xlsx")
     try:
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
         progress_area.success(f"已生成CSV结果：{os.path.basename(csv_path)}")
@@ -1278,25 +1309,37 @@ def map_headers(headers: Sequence[str]) -> tuple[dict[int, str], int]:
     return mapping, total_score
 
 
-def _detect_header(rows: list[list[str]]) -> tuple[list[int], dict[int, str]]:
-    candidates: list[tuple[int, list[int], dict[int, str]]] = []
+def _detect_header(
+    rows: list[list[str]],
+) -> tuple[list[int], dict[int, str], dict[str, str]]:
+    candidates: list[tuple[int, list[int], dict[int, str], dict[str, str]]] = []
     scan_limit = min(HEADER_SCAN_LIMIT, len(rows))
     for row_index in range(scan_limit):
         headers = _build_header_candidate(rows, [row_index])
         mapping, score = map_headers(headers)
         if score >= HEADER_SCORE_THRESHOLD and "failure_mode" in mapping.values():
-            candidates.append((score, [row_index], mapping))
+            labels = {
+                canonical: headers[col_index]
+                for col_index, canonical in mapping.items()
+                if col_index < len(headers)
+            }
+            candidates.append((score, [row_index], mapping, labels))
     for row_index in range(scan_limit - 1):
         combo = [row_index, row_index + 1]
         headers = _build_header_candidate(rows, combo)
         mapping, score = map_headers(headers)
         if score >= HEADER_SCORE_THRESHOLD and "failure_mode" in mapping.values():
-            candidates.append((score, combo, mapping))
+            labels = {
+                canonical: headers[col_index]
+                for col_index, canonical in mapping.items()
+                if col_index < len(headers)
+            }
+            candidates.append((score, combo, mapping, labels))
     if not candidates:
         raise ValueError("未能识别表头")
     candidates.sort(key=lambda item: (item[0], -len(item[1])), reverse=True)
-    _, indices, mapping = candidates[0]
-    return indices, mapping
+    _, indices, mapping, labels = candidates[0]
+    return indices, mapping, labels
 
 
 def _prepare_rows(raw_rows: list[list]) -> list[list[str]]:
@@ -1341,6 +1384,7 @@ def _load_csv_rows(path: str) -> list[list]:
 def _build_issue_record(
     row_map: dict[str, str],
     sheet_name: str | None = None,
+    header_labels: dict[str, str] | None = None,
 ) -> IssueRecord | None:
     failure_mode = row_map.get("failure_mode", "").strip()
     if not failure_mode:
@@ -1349,7 +1393,7 @@ def _build_issue_record(
         row_map.get(field, "").strip().lower() for field in REQUIRED_FIELDS
     )
     hash_key = hashlib.sha1(hash_input.encode("utf-8")).hexdigest()
-    record_data: dict[str, str | None] = {
+    record_data: dict[str, str | None | dict[str, str]] = {
         "failure_mode": failure_mode,
         "root_cause": row_map.get("root_cause", ""),
         "prevention_action": row_map.get("prevention_action", ""),
@@ -1360,15 +1404,23 @@ def _build_issue_record(
         record_data["sheet_name"] = sheet_name
     for field in OPTIONAL_FIELDS:
         record_data[field] = row_map.get(field) or None
+    if header_labels:
+        labels_clean = {
+            key: value
+            for key, value in header_labels.items()
+            if value and isinstance(value, str)
+        }
+        if labels_clean:
+            record_data["header_labels"] = labels_clean
     return IssueRecord(**record_data)
 
 
 def _parse_issue_sheet(
     rows: list[list[str]],
     sheet_name: str | None = None,
-) -> tuple[list[IssueRecord], IssueSummary]:
+) -> tuple[list[IssueRecord], IssueSummary, dict[str, str]]:
     rows_prepared = [_horizontal_fill(row) for row in rows]
-    header_indices, mapping = _detect_header(rows_prepared)
+    header_indices, mapping, header_labels = _detect_header(rows_prepared)
     data_start = max(header_indices) + 1
     width = max(len(row) for row in rows_prepared) if rows_prepared else 0
     summary = IssueSummary()
@@ -1388,7 +1440,11 @@ def _parse_issue_sheet(
         for col_index, canonical in mapping.items():
             value = values[col_index] if col_index < len(values) else ""
             row_map[canonical] = value
-        record = _build_issue_record(row_map, sheet_name=sheet_name)
+        record = _build_issue_record(
+            row_map,
+            sheet_name=sheet_name,
+            header_labels=header_labels,
+        )
         if record is None:
             summary.skipped_rows += 1
             continue
@@ -1398,37 +1454,46 @@ def _parse_issue_sheet(
         seen.add(record.hash_key)
         records.append(record)
         summary.parsed_rows += 1
-    return records, summary
+    return records, summary, header_labels
 
 
-def _parse_issue_list_spreadsheet(file_path: str) -> tuple[list[IssueRecord], IssueSummary]:
+def _parse_issue_list_spreadsheet(
+    file_path: str,
+) -> tuple[list[IssueRecord], IssueSummary, dict[str, str]]:
     ext = os.path.splitext(file_path)[1].lower()
     all_records: list[IssueRecord] = []
     summary = IssueSummary()
+    header_labels: dict[str, str] = {}
     if ext == ".csv":
         rows = _prepare_rows(_load_csv_rows(file_path))
         sheet_label = os.path.splitext(os.path.basename(file_path))[0]
-        records, part_summary = _parse_issue_sheet(rows, sheet_name=sheet_label)
+        records, part_summary, part_labels = _parse_issue_sheet(
+            rows, sheet_name=sheet_label
+        )
         summary.total_rows += part_summary.total_rows
         summary.parsed_rows += part_summary.parsed_rows
         summary.skipped_rows += part_summary.skipped_rows
         summary.duplicates += part_summary.duplicates
+        header_labels.update(part_labels)
         all_records.extend(records)
-        return all_records, summary
+        return all_records, summary, header_labels
     for sheet_name, raw_rows in _iter_excel_rows(file_path):
         rows = _prepare_rows(raw_rows)
         try:
-            records, part_summary = _parse_issue_sheet(rows, sheet_name=sheet_name)
+            records, part_summary, part_labels = _parse_issue_sheet(
+                rows, sheet_name=sheet_name
+            )
             summary.total_rows += part_summary.total_rows
             summary.parsed_rows += part_summary.parsed_rows
             summary.skipped_rows += part_summary.skipped_rows
             summary.duplicates += part_summary.duplicates
             if not records:
                 continue
+            header_labels.update(part_labels)
             all_records.extend(records)
         except ValueError as error:
             raise ValueError(f"{sheet_name}: {error}") from error
-    return all_records, summary
+    return all_records, summary, header_labels
 
 
 def _chunk_text(text: str, limit: int = LLM_CHUNK_LIMIT) -> list[str]:
@@ -1552,7 +1617,7 @@ def _process_issue_lists(
         progress_area.write(f"处理历史问题清单: {name}")
         try:
             if ext in SPREADSHEET_EXTENSIONS:
-                records, summary = _parse_issue_list_spreadsheet(file_path)
+                records, summary, _ = _parse_issue_list_spreadsheet(file_path)
             else:
                 text_output_dir = os.path.join(output_dir, "_tmp_txt")
                 os.makedirs(text_output_dir, exist_ok=True)
