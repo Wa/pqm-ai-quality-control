@@ -9,7 +9,9 @@ import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
+
+import tempfile
 
 import pandas as pd
 import requests
@@ -63,6 +65,139 @@ HISTORY_FLOW_ES_NODE_ID = (
 
 
 BACKEND_SESSION_STATE: Dict[str, object] = {}
+
+
+class HistoryCheckpoint:
+    """Persistent manifest to allow resuming history comparisons."""
+
+    def __init__(self, checkpoint_dir: str) -> None:
+        self.checkpoint_dir = checkpoint_dir
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.manifest_path = os.path.join(self.checkpoint_dir, "manifest.json")
+        self._manifest: Dict[str, Any] = {"version": 1, "files": {}}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            if os.path.isfile(self.manifest_path):
+                with open(self.manifest_path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle) or {}
+                if isinstance(data, dict):
+                    files = data.get("files") if isinstance(data.get("files"), dict) else {}
+                    self._manifest = {"version": data.get("version", 1), "files": files}
+        except Exception:
+            self._manifest = {"version": 1, "files": {}}
+
+    def _save(self) -> None:
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", delete=False, encoding="utf-8", dir=self.checkpoint_dir
+            ) as tmp:
+                tmp.write(json.dumps(self._manifest, ensure_ascii=False, indent=2))
+                tmp_name = tmp.name
+            os.replace(tmp_name, self.manifest_path)
+        except Exception:
+            pass
+
+    def register_file(self, file_name: str, signature: str, total_records: int) -> None:
+        files = self._manifest.setdefault("files", {})
+        file_entry = files.get(file_name)
+        if not isinstance(file_entry, dict) or file_entry.get("signature") != signature:
+            files[file_name] = {
+                "signature": signature,
+                "total_records": int(total_records),
+                "records": {},
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self._save()
+            return
+        existing_total = int(file_entry.get("total_records") or 0)
+        if existing_total != total_records:
+            file_entry["total_records"] = int(total_records)
+            file_entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._save()
+
+    def get_record_entry(self, file_name: str, hash_key: str) -> Optional[Dict[str, Any]]:
+        files = self._manifest.get("files")
+        if not isinstance(files, dict):
+            return None
+        file_entry = files.get(file_name)
+        if not isinstance(file_entry, dict):
+            return None
+        records = file_entry.get("records")
+        if not isinstance(records, dict):
+            return None
+        entry = records.get(hash_key)
+        if not isinstance(entry, dict):
+            return None
+        return dict(entry)
+
+    def mark_processed(
+        self,
+        file_name: str,
+        hash_key: str,
+        record_index: int,
+        result_name: str,
+    ) -> None:
+        files = self._manifest.setdefault("files", {})
+        file_entry = files.setdefault(
+            file_name,
+            {
+                "signature": "",
+                "total_records": 0,
+                "records": {},
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+        records = file_entry.setdefault("records", {})
+        records[hash_key] = {
+            "status": "done",
+            "record_index": int(record_index),
+            "result_file": result_name,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        file_entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._save()
+
+    def invalidate_record(self, file_name: str, hash_key: str) -> None:
+        files = self._manifest.get("files")
+        if not isinstance(files, dict):
+            return
+        file_entry = files.get(file_name)
+        if not isinstance(file_entry, dict):
+            return
+        records = file_entry.get("records")
+        if not isinstance(records, dict):
+            return
+        if hash_key in records:
+            records.pop(hash_key, None)
+            file_entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            self._save()
+
+    def summary(self) -> Dict[str, Any]:
+        files = self._manifest.get("files")
+        total = 0
+        completed = 0
+        file_summaries: Dict[str, Any] = {}
+        if isinstance(files, dict):
+            for name, info in files.items():
+                if not isinstance(info, dict):
+                    continue
+                records = info.get("records") if isinstance(info.get("records"), dict) else {}
+                total_records = int(info.get("total_records") or len(records))
+                done = sum(1 for value in records.values() if isinstance(value, dict) and value.get("status") == "done")
+                total += total_records
+                completed += done
+                file_summaries[name] = {
+                    "total_records": total_records,
+                    "completed": done,
+                }
+        return {
+            "total_records": total,
+            "completed": completed,
+            "files": file_summaries,
+            "reported_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 class BackendProgressArea:
@@ -398,10 +533,13 @@ def _ensure_generated_dirs(root: str) -> dict[str, str]:
         mapping[key] = path
     initial_dir = os.path.join(root, "initial_results")
     final_dir = os.path.join(root, "final_results")
+    checkpoint_dir = os.path.join(root, "checkpoint")
     os.makedirs(initial_dir, exist_ok=True)
     os.makedirs(final_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
     mapping["initial_results"] = initial_dir
     mapping["final_results"] = final_dir
+    mapping["checkpoint"] = checkpoint_dir
     return mapping
 
 
@@ -412,7 +550,12 @@ def _sanitize_sheet_name(name: str) -> str:
     return "_".join(name.strip().split())[:80] or "Sheet"
 
 
-def _process_pdf_folder(input_dir: str, output_dir: str, progress_area) -> list[str]:
+def _process_pdf_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+) -> list[str]:
     pdf_paths = _list_pdfs(input_dir)
     created: list[str] = []
     if not pdf_paths:
@@ -420,6 +563,8 @@ def _process_pdf_folder(input_dir: str, output_dir: str, progress_area) -> list[
         return created
     for pdf_path in pdf_paths:
         orig_name = os.path.basename(pdf_path)
+        if ensure_running is not None:
+            ensure_running("conversion", f"解析PDF：{orig_name}")
         out_txt = os.path.join(output_dir, f"{orig_name}.txt")
         try:
             if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
@@ -438,7 +583,12 @@ def _process_pdf_folder(input_dir: str, output_dir: str, progress_area) -> list[
     return created
 
 
-def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area) -> list[str]:
+def _process_word_ppt_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+) -> list[str]:
     doc_paths = _list_word_ppt(input_dir)
     created: list[str] = []
     if not doc_paths:
@@ -446,6 +596,8 @@ def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area) -> 
         return created
     for file_path in doc_paths:
         orig_name = os.path.basename(file_path)
+        if ensure_running is not None:
+            ensure_running("conversion", f"解析文档：{orig_name}")
         out_txt = os.path.join(output_dir, f"{orig_name}.txt")
         try:
             if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
@@ -463,7 +615,12 @@ def _process_word_ppt_folder(input_dir: str, output_dir: str, progress_area) -> 
     return created
 
 
-def _process_excel_folder(input_dir: str, output_dir: str, progress_area) -> list[str]:
+def _process_excel_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+) -> list[str]:
     excel_paths = _list_excels(input_dir)
     created: list[str] = []
     if not excel_paths:
@@ -471,10 +628,14 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area) -> lis
         return created
     for excel_path in excel_paths:
         orig_name = os.path.basename(excel_path)
+        if ensure_running is not None:
+            ensure_running("conversion", f"解析Excel：{orig_name}")
         try:
             xls = pd.ExcelFile(excel_path)
             for sheet in xls.sheet_names:
                 safe_sheet = _sanitize_sheet_name(sheet)
+                if ensure_running is not None:
+                    ensure_running("conversion", f"转换Excel：{orig_name} / {sheet}")
                 out_txt = os.path.join(output_dir, f"{orig_name}_SHEET_{safe_sheet}.txt")
                 if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
                     progress_area.info(f"已存在（跳过）: {os.path.basename(out_txt)}")
@@ -489,16 +650,30 @@ def _process_excel_folder(input_dir: str, output_dir: str, progress_area) -> lis
     return created
 
 
-def _process_category(label: str, source_dir: str | None, output_dir: str, progress_area) -> list[str]:
+def _process_category(
+    label: str,
+    source_dir: str | None,
+    output_dir: str,
+    progress_area,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+) -> list[str]:
     os.makedirs(output_dir, exist_ok=True)
     if not source_dir or not os.path.isdir(source_dir):
         progress_area.warning(f"未找到 {label} 上传目录，已跳过。")
         return []
     progress_area.markdown(f"**{label} → 文本转换**")
     created: list[str] = []
-    created.extend(_process_pdf_folder(source_dir, output_dir, progress_area))
-    created.extend(_process_word_ppt_folder(source_dir, output_dir, progress_area))
-    created.extend(_process_excel_folder(source_dir, output_dir, progress_area))
+    created.extend(
+        _process_pdf_folder(source_dir, output_dir, progress_area, ensure_running=ensure_running)
+    )
+    created.extend(
+        _process_word_ppt_folder(
+            source_dir, output_dir, progress_area, ensure_running=ensure_running
+        )
+    )
+    created.extend(
+        _process_excel_folder(source_dir, output_dir, progress_area, ensure_running=ensure_running)
+    )
     if not created:
         progress_area.info(f"{label} 未生成任何文本文件，请确认已上传 PDF/Word/Excel。")
     return created
@@ -766,6 +941,20 @@ def _load_issue_payloads(issue_dir: str) -> list[tuple[str, list[IssueRecord]]]:
     return payloads
 
 
+def _history_records_signature(records: Sequence[IssueRecord]) -> str:
+    digest = hashlib.sha1()
+    try:
+        iterable = sorted(records, key=lambda item: item.hash_key)
+    except Exception:
+        iterable = records
+    for record in iterable:
+        try:
+            digest.update(record.hash_key.encode("utf-8"))
+        except Exception:
+            continue
+    return digest.hexdigest()
+
+
 def _evaluate_history_problems(
     issue_dir: str,
     initial_dir: str,
@@ -777,6 +966,9 @@ def _evaluate_history_problems(
     progress_callback: Optional[Callable[[float], None]] = None,
     progress_offset: float = 0.0,
     progress_span: float = 0.85,
+    checkpoint: Optional[HistoryCheckpoint] = None,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+    checkpoint_emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> None:
     os.makedirs(initial_dir, exist_ok=True)
     os.makedirs(final_dir, exist_ok=True)
@@ -799,9 +991,85 @@ def _evaluate_history_problems(
     processed = 0
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     flow_session_key = f"history_bisheng_session_{session_id}"
+    if checkpoint is not None:
+        for file_name, records in payloads:
+            checkpoint.register_file(
+                file_name,
+                _history_records_signature(records),
+                len(records),
+            )
+        if checkpoint_emitter is not None:
+            checkpoint_emitter(checkpoint.summary())
     for file_name, records in payloads:
         safe_file = _safe_result_name(os.path.splitext(file_name)[0])
         for index, record in enumerate(records, start=1):
+            if ensure_running is not None:
+                ensure_running("compare", f"历史问题比对：{file_name} 第{index}/{len(records)}条")
+            reused_payload: Optional[dict[str, Any]] = None
+            result_name: Optional[str] = None
+            if checkpoint is not None:
+                entry = checkpoint.get_record_entry(file_name, record.hash_key)
+                candidate_names: list[str] = []
+                if entry:
+                    stored_name = entry.get("result_file")
+                    if isinstance(stored_name, str) and stored_name:
+                        candidate_names.append(stored_name)
+                    stored_index = entry.get("record_index")
+                    if isinstance(stored_index, int) and stored_index > 0:
+                        candidate_names.append(f"{safe_file}_record_{stored_index:04d}.json")
+                candidate_names.append(f"{safe_file}_record_{index:04d}.json")
+                for candidate in candidate_names:
+                    candidate_path = os.path.join(initial_dir, candidate)
+                    if os.path.isfile(candidate_path):
+                        result_name = candidate
+                        try:
+                            with open(candidate_path, "r", encoding="utf-8") as handle:
+                                reused_payload = json.load(handle) or {}
+                        except Exception:
+                            reused_payload = None
+                        if reused_payload is not None:
+                            break
+                if reused_payload is None and entry:
+                    checkpoint.invalidate_record(file_name, record.hash_key)
+            if reused_payload is not None:
+                answer_text = reused_payload.get("answer") if isinstance(reused_payload, dict) else ""
+                parsed_answer: dict[str, object] | None = None
+                if isinstance(answer_text, str) and answer_text.strip():
+                    try:
+                        parsed_answer = json.loads(answer_text)
+                    except json.JSONDecodeError:
+                        parsed_answer = None
+                row = {
+                    "source_file": file_name,
+                    "record_index": index,
+                    "session_id": session_id,
+                    "failure_mode": record.failure_mode,
+                    "root_cause": record.root_cause,
+                    "prevention_action": record.prevention_action,
+                    "detection_action": record.detection_action,
+                    "status": "",
+                    "where_covered": "",
+                    "建议更新": "",
+                    "原始回答": answer_text or "",
+                }
+                if parsed_answer:
+                    row["status"] = str(parsed_answer.get("status", ""))
+                    row["where_covered"] = json.dumps(
+                        parsed_answer.get("where_covered", []), ensure_ascii=False
+                    )
+                    row["建议更新"] = json.dumps(
+                        parsed_answer.get("建议更新", []), ensure_ascii=False
+                    )
+                collected_rows.append(row)
+                processed += 1
+                if checkpoint is not None and result_name:
+                    checkpoint.mark_processed(file_name, record.hash_key, index, result_name)
+                    if checkpoint_emitter is not None:
+                        checkpoint_emitter(checkpoint.summary())
+                if progress_callback and total_records:
+                    fraction = processed / total_records
+                    progress_callback(min(progress_offset + progress_span * fraction, 1.0))
+                continue
             prompt = _build_record_prompt(record)
             session_token = BACKEND_SESSION_STATE.get(flow_session_key)
             response = _invoke_history_flow(prompt, kb_id, session_token, progress_area)
@@ -828,6 +1096,10 @@ def _evaluate_history_problems(
                     json.dump(initial_payload, f, ensure_ascii=False, indent=2)
             except Exception as error:
                 progress_area.warning(f"写入初步结果失败 ({out_name}): {error}")
+            if checkpoint is not None:
+                checkpoint.mark_processed(file_name, record.hash_key, index, out_name)
+                if checkpoint_emitter is not None:
+                    checkpoint_emitter(checkpoint.summary())
             if publish_stream is not None:
                 publish_stream(
                     {
@@ -1224,7 +1496,12 @@ def _call_llm_for_issue_lists(text: str, file_label: str, progress_area) -> tupl
     return aggregated, summary
 
 
-def _process_issue_lists(source_dir: str | None, output_dir: str, progress_area) -> list[str]:
+def _process_issue_lists(
+    source_dir: str | None,
+    output_dir: str,
+    progress_area,
+    ensure_running: Optional[Callable[[str, str], None]] = None,
+) -> list[str]:
     os.makedirs(output_dir, exist_ok=True)
     if not source_dir or not os.path.isdir(source_dir):
         progress_area.warning("未找到历史问题清单上传目录，已跳过。")
@@ -1241,6 +1518,8 @@ def _process_issue_lists(source_dir: str | None, output_dir: str, progress_area)
     for file_path in files:
         name = os.path.basename(file_path)
         ext = os.path.splitext(name)[1].lower()
+        if ensure_running is not None:
+            ensure_running("conversion", f"解析历史问题清单：{name}")
         progress_area.write(f"处理历史问题清单: {name}")
         try:
             if ext in SPREADSHEET_EXTENSIONS:
@@ -1345,9 +1624,13 @@ def run_history_job(
         )
         return {"final_results": []}
 
-    def ensure_running(stage: str, detail: str) -> bool:
+    class JobCancelled(Exception):
+        """Raised when the job is requested to stop."""
+
+    def ensure_running(stage: str, detail: str) -> None:
+        publish_status(status="running", stage=stage, message=detail)
         if not check_control:
-            return True
+            return
         while True:
             try:
                 status = check_control() or {}
@@ -1355,7 +1638,7 @@ def run_history_job(
                 status = {}
             if status.get("stopped"):
                 announce_stop("任务已被用户停止")
-                return False
+                raise JobCancelled()
             if status.get("paused"):
                 publish(
                     {
@@ -1370,7 +1653,7 @@ def run_history_job(
                 time.sleep(1)
                 continue
             publish_status(status="running", stage=stage, message=detail)
-            return True
+            return
 
     publish_status(status="running", stage=current_stage, message=current_message)
 
@@ -1392,29 +1675,63 @@ def run_history_job(
         logger.error("未能初始化生成文件目录，请检查配置。")
         return announce_stop("未能初始化生成文件目录")
 
-    if not ensure_running("conversion", "解析上传文件"):
+    try:
+        ensure_running("conversion", "解析上传文件")
+    except JobCancelled:
         return {"final_results": []}
 
     generated_dirs = _ensure_generated_dirs(generated_root)
+    checkpoint_dir = generated_dirs.get("checkpoint") or os.path.join(generated_root, "checkpoint")
+    checkpoint = HistoryCheckpoint(checkpoint_dir)
+
+    def checkpoint_emitter(payload: Dict[str, Any]) -> None:
+        try:
+            publish({"checkpoint": payload})
+        except Exception:
+            pass
+
+    checkpoint_emitter(checkpoint.summary())
 
     logger.info("开始处理历史问题清单与FMEA/控制计划文档。")
-    total_created: list[str] = []
-    total_created.extend(
-        _process_issue_lists(
-            issue_lists_dir,
-            generated_dirs["issue_lists"],
-            logger,
+    try:
+        total_created: list[str] = []
+        total_created.extend(
+            _process_issue_lists(
+                issue_lists_dir,
+                generated_dirs["issue_lists"],
+                logger,
+                ensure_running=ensure_running,
+            )
         )
-    )
-    total_created.extend(
-        _process_category("DFMEA", dfmea_dir, generated_dirs["dfmea"], logger)
-    )
-    total_created.extend(
-        _process_category("PFMEA", pfmea_dir, generated_dirs["pfmea"], logger)
-    )
-    total_created.extend(
-        _process_category("控制计划 (CP)", cp_dir, generated_dirs["cp"], logger)
-    )
+        total_created.extend(
+            _process_category(
+                "DFMEA",
+                dfmea_dir,
+                generated_dirs["dfmea"],
+                logger,
+                ensure_running=ensure_running,
+            )
+        )
+        total_created.extend(
+            _process_category(
+                "PFMEA",
+                pfmea_dir,
+                generated_dirs["pfmea"],
+                logger,
+                ensure_running=ensure_running,
+            )
+        )
+        total_created.extend(
+            _process_category(
+                "控制计划 (CP)",
+                cp_dir,
+                generated_dirs["cp"],
+                logger,
+                ensure_running=ensure_running,
+            )
+        )
+    except JobCancelled:
+        return {"final_results": []}
 
     if not total_created:
         logger.warning("未生成任何文本文件，请确认上传内容后重试。")
@@ -1422,7 +1739,9 @@ def run_history_job(
 
     set_progress(0.1, "文本解析完成")
 
-    if not ensure_running("kb_sync", "同步知识库"):
+    try:
+        ensure_running("kb_sync", "同步知识库")
+    except JobCancelled:
         return {"final_results": []}
 
     kb_id = _sync_history_kb(
@@ -1436,13 +1755,17 @@ def run_history_job(
     )
     set_progress(0.15, "知识库同步完成")
 
-    if not ensure_running("warmup", "预热历史问题比对流程"):
+    try:
+        ensure_running("warmup", "预热历史问题比对流程")
+    except JobCancelled:
         return {"final_results": []}
 
     _warmup_history_flow(kb_id, logger)
     set_progress(0.2, "预热完成")
 
-    if not ensure_running("compare", "执行历史问题覆盖比对"):
+    try:
+        ensure_running("compare", "执行历史问题覆盖比对")
+    except JobCancelled:
         return {"final_results": []}
 
     def progress_callback(value: float) -> None:
@@ -1462,6 +1785,9 @@ def run_history_job(
         progress_callback=progress_callback,
         progress_offset=0.2,
         progress_span=0.75,
+        checkpoint=checkpoint,
+        ensure_running=ensure_running,
+        checkpoint_emitter=checkpoint_emitter,
     )
 
     set_progress(1.0, "历史问题规避任务已完成")
