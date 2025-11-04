@@ -13,9 +13,72 @@ from .config import (
     ElementRequirement,
     SEVERITY_ORDER,
 )
+from ..shared.file_conversion import (
+    process_excel_folder,
+    process_pdf_folder,
+    process_textlike_folder,
+    process_word_ppt_folder,
+)
 
-TEXT_EXTENSIONS = {".txt", ".md"}
+TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
+
+
+class _SilentProgress:
+    """Collect warnings from conversion helpers without emitting UI output."""
+
+    def __init__(self) -> None:
+        self.messages: List[str] = []
+
+    def info(self, *_args, **_kwargs) -> None:  # pragma: no cover - compatibility noop
+        return
+
+    def write(self, *_args, **_kwargs) -> None:  # pragma: no cover - compatibility noop
+        return
+
+    def success(self, *_args, **_kwargs) -> None:  # pragma: no cover - compatibility noop
+        return
+
+    def warning(self, message: str, *_args, **_kwargs) -> None:
+        self.messages.append(str(message))
+
+    def error(self, message: str, *_args, **_kwargs) -> None:
+        self.messages.append(str(message))
+
+
+def auto_convert_sources(
+    source_dir: str | None,
+    parsed_dir: str | None,
+    *,
+    progress_area=None,
+    annotate_sources: bool = True,
+) -> Tuple[List[str], List[str]]:
+    """Convert supported uploads into `.txt` artifacts located in ``parsed_dir``."""
+
+    created: List[str] = []
+    warnings: List[str] = []
+    if not source_dir or not parsed_dir or not os.path.isdir(source_dir):
+        return created, warnings
+
+    os.makedirs(parsed_dir, exist_ok=True)
+    emitter = progress_area or _SilentProgress()
+    silent = isinstance(emitter, _SilentProgress)
+
+    created.extend(
+        process_pdf_folder(source_dir, parsed_dir, emitter, annotate_sources=annotate_sources)
+    )
+    created.extend(
+        process_word_ppt_folder(source_dir, parsed_dir, emitter, annotate_sources=annotate_sources)
+    )
+    created.extend(
+        process_excel_folder(source_dir, parsed_dir, emitter, annotate_sources=annotate_sources)
+    )
+    created.extend(process_textlike_folder(source_dir, parsed_dir, emitter))
+
+    if silent:
+        warnings.extend(emitter.messages)
+
+    return created, warnings
 
 
 @dataclass
@@ -177,6 +240,27 @@ def parse_deliverable_stub(
     candidates: List[str] = []
     seen: set[str] = set()
 
+    converted: List[str] = []
+    conversion_warnings: List[str] = []
+    conversion_message = ""
+    conversion_noted = False
+
+    if parsed_dir:
+        new_converted, conversion_warnings = auto_convert_sources(
+            source_dir, parsed_dir, annotate_sources=True
+        )
+        if new_converted:
+            converted.extend(new_converted)
+            sample = ", ".join(os.path.basename(item) for item in converted[:4])
+            if len(converted) > 4:
+                sample += " 等"
+            conversion_message = (
+                f"已自动生成 {len(converted)} 个文本文件用于评估（例如：{sample}）。"
+            )
+        if conversion_warnings:
+            warnings.extend(conversion_warnings)
+
+
     def _add_candidate(path: str | None) -> None:
         if not path:
             return
@@ -226,6 +310,9 @@ def parse_deliverable_stub(
                     with open(parsed_candidate, "r", encoding="utf-8") as handle:
                         text_content = handle.read()
                     source_file = os.path.basename(parsed_candidate)
+                    if conversion_message and not conversion_noted:
+                        warnings.append(conversion_message)
+                        conversion_noted = True
                     warnings.append(
                         f"已使用预解析文本 {os.path.basename(parsed_candidate)}，来源：{os.path.basename(path)}。"
                     )
@@ -233,6 +320,8 @@ def parse_deliverable_stub(
                 except OSError as error:
                     warnings.append(f"读取预解析文本失败：{os.path.basename(parsed_candidate)} → {error}")
 
+    if conversion_message and not conversion_noted:
+        warnings.append(conversion_message)
     source_file = os.path.basename(candidates[0]) if candidates else None
     if source_file:
         warnings.append(
@@ -249,6 +338,7 @@ __all__ = [
     "ElementEvaluation",
     "EvaluationResult",
     "EvaluationOrchestrator",
+    "auto_convert_sources",
     "parse_deliverable_stub",
     "save_result_payload",
 ]

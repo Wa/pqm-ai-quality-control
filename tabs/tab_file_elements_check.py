@@ -18,10 +18,16 @@ from .file_elements import (
     PHASE_TO_DELIVERABLES,
     SEVERITY_LABELS,
     SEVERITY_ORDER,
+    auto_convert_sources,
     parse_deliverable_stub,
     save_result_payload,
 )
-from .shared.file_conversion import process_pdf_folder, process_word_ppt_folder
+from .shared.file_conversion import (
+    process_excel_folder,
+    process_pdf_folder,
+    process_textlike_folder,
+    process_word_ppt_folder,
+)
 
 
 def _format_size(num_bytes: int) -> str:
@@ -144,7 +150,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         existing_files = _collect_files(source_dir)
         st.session_state[paths_state_key] = _extract_paths(existing_files)
         uploaded = st.file_uploader(
-            "上传交付物（支持TXT/MD，若为其他格式请提供同名文本解析文件）",
+            "上传交付物（支持TXT/MD/CSV/TSV，PDF/Word/PPT/Excel将自动解析为文本）",
             accept_multiple_files=True,
             key=f"file_elements_upload_{session_id}",
         )
@@ -152,6 +158,17 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             saved = handle_file_upload(uploaded, source_dir)
             if saved:
                 st.success(f"已保存 {saved} 个文件至 {source_dir}")
+                conversion_area = st.container()
+                created, _ = auto_convert_sources(
+                    source_dir,
+                    parsed_dir,
+                    progress_area=conversion_area,
+                    annotate_sources=True,
+                )
+                if created:
+                    conversion_area.success(
+                        f"已自动解析生成 {len(created)} 个文本文件，供后续评估使用。"
+                    )
                 existing_files = _collect_files(source_dir)
                 st.session_state[paths_state_key] = _extract_paths(existing_files)
 
@@ -170,13 +187,14 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
         with st.expander("📎 非文本文件解析助手", expanded=False):
             st.markdown(
-                "当交付物为PDF、Word或PPT时，可在此批量解析生成对应的`.txt`文件，"
-                "系统将自动在评估时优先使用最新的同名文本。解析结果会存入"
+                "系统会在上传后自动尝试解析PDF、Office与Excel文件。如需手动重试，"
+                "或查看进度，可使用下列工具。解析结果统一存入"
                 "`generated_files/{session_id}/file_elements_check/`。"
             )
             pdf_status = st.container()
             office_status = st.container()
-            col_pdf, col_office = st.columns(2)
+            excel_status = st.container()
+            col_pdf, col_office, col_excel = st.columns(3)
             with col_pdf:
                 if st.button(
                     "解析PDF", key=f"file_elements_convert_pdf_{session_id}", help="调用MinerU解析当前目录下的PDF文件。"
@@ -203,6 +221,21 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                             office_status.success(f"成功生成 {len(created)} 个文本文件。")
                         else:
                             office_status.info("未解析出新的文本，请确认文件格式并重试。")
+            with col_excel:
+                if st.button(
+                    "解析Excel/CSV",
+                    key=f"file_elements_convert_excel_{session_id}",
+                    help="使用pandas将Excel与CSV内容展平为文本。",
+                ):
+                    if not source_dir or not parsed_dir:
+                        excel_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
+                    else:
+                        created = process_excel_folder(source_dir, parsed_dir, excel_status, annotate_sources=True)
+                        created.extend(process_textlike_folder(source_dir, parsed_dir, excel_status))
+                        if created:
+                            excel_status.success(f"成功生成 {len(created)} 个文本文件。")
+                        else:
+                            excel_status.info("未转换出新的文本，请确认Excel/CSV文件是否存在或已处理。")
 
         orchestrator = EvaluationOrchestrator(profile)
 
