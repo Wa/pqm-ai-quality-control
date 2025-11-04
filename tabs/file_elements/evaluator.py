@@ -163,12 +163,14 @@ def parse_deliverable_stub(
     parsed_dir: str | None = None,
     *,
     source_paths: Sequence[str] | None = None,
+    preferred_source: str | None = None,
 ) -> Tuple[str, str | None, List[str]]:
     """Attempt to read deliverable text using lightweight heuristics.
 
-    This helper looks for the most recent text-like file in ``source_dir``.
-    If a non-text document被上传, it searches ``parsed_dir`` for a pre-generated
-    ``.txt`` with matching前缀. 失败时返回空字符串并提供警告。"""
+    This helper prioritises ``preferred_source`` when provided. Otherwise it
+    looks for the most recent text-like file in ``source_dir``. If a non-text
+    document被上传, it searches ``parsed_dir`` for a预解析 ``.txt`` with matching
+    前缀。失败时返回空字符串并提供警告。"""
 
     warnings: List[str] = []
     source_file: str | None = None
@@ -177,7 +179,7 @@ def parse_deliverable_stub(
     candidates: List[str] = []
     seen: set[str] = set()
 
-    def _add_candidate(path: str | None) -> None:
+    def _add_candidate(path: str | None, *, front: bool = False) -> None:
         if not path:
             return
         normalized = os.path.normpath(path)
@@ -185,7 +187,13 @@ def parse_deliverable_stub(
             return
         if os.path.isfile(normalized):
             seen.add(normalized)
-            candidates.append(normalized)
+            if front:
+                candidates.insert(0, normalized)
+            else:
+                candidates.append(normalized)
+
+    if preferred_source:
+        _add_candidate(preferred_source, front=True)
 
     if source_paths:
         for path in source_paths:
@@ -203,6 +211,11 @@ def parse_deliverable_stub(
         return text_content, source_file, warnings
 
     candidates.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+    if preferred_source:
+        preferred_norm = os.path.normpath(preferred_source)
+        if preferred_norm in candidates:
+            candidates.remove(preferred_norm)
+            candidates.insert(0, preferred_norm)
 
     for path in candidates:
         _, ext = os.path.splitext(path)
