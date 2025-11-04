@@ -294,6 +294,7 @@ HEADER_ALIASES = {
         "验证措施",
         "Detection",
     ],
+    "serial_number": ["序号", "编号", "ID", "No.", "NO"],
     "severity": ["严重度", "严重性", "S"],
     "occurrence": ["发生度", "发生频度", "O"],
     "detection": ["探测度", "检测度", "D"],
@@ -306,6 +307,7 @@ HEADER_ALIASES = {
 
 REQUIRED_FIELDS = ["failure_mode", "root_cause", "prevention_action", "detection_action"]
 OPTIONAL_FIELDS = [
+    "serial_number",
     "severity",
     "occurrence",
     "detection",
@@ -347,6 +349,7 @@ class IssueRecord(BaseModel):
     prevention_action: str = ""
     detection_action: str = ""
     sheet_name: str | None = Field(default=None, description="源文件中的工作表名称")
+    serial_number: str | None = Field(default=None, description="原始清单中的序号")
     severity: str | None = None
     occurrence: str | None = None
     detection: str | None = None
@@ -977,6 +980,85 @@ def _history_records_signature(records: Sequence[IssueRecord]) -> str:
     return digest.hexdigest()
 
 
+def _parse_answer_payload(answer_text: str | None) -> dict[str, Any] | None:
+    if not isinstance(answer_text, str):
+        return None
+    cleaned = re.sub(r"<think>.*?</think>", "", answer_text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"```[a-zA-Z]*", "", cleaned)
+    cleaned = cleaned.replace("```", "")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    start = cleaned.find("{")
+    while start != -1:
+        depth = 0
+        for idx in range(start, len(cleaned)):
+            char = cleaned[idx]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start : idx + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(parsed, dict):
+                        return parsed
+        start = cleaned.find("{", start + 1)
+    return None
+
+
+def _stringify_structured_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _build_result_row(
+    file_name: str,
+    record: IssueRecord,
+    answer_text: str | None,
+    parsed_answer: dict[str, Any] | None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "source_file": file_name,
+        "sheet_name": record.sheet_name or "",
+        "serial_number": record.serial_number or "",
+        "failure_mode": record.failure_mode or "",
+        "root_cause": record.root_cause or "",
+        "prevention_action": record.prevention_action or "",
+        "detection_action": record.detection_action or "",
+        "status": "",
+        "where_covered": "",
+        "建议更新": "",
+        "原始回答": answer_text or "",
+    }
+    if parsed_answer:
+        status = parsed_answer.get("status")
+        if isinstance(status, (str, int, float)):
+            row["status"] = str(status)
+        where_value = parsed_answer.get("where_covered")
+        if where_value is not None:
+            row["where_covered"] = _stringify_structured_field(where_value)
+        suggestion_value = parsed_answer.get("建议更新")
+        if suggestion_value is not None:
+            row["建议更新"] = _stringify_structured_field(suggestion_value)
+    return row
+
+
 def _evaluate_history_problems(
     issue_dir: str,
     initial_dir: str,
@@ -1065,34 +1147,8 @@ def _evaluate_history_problems(
                     checkpoint.invalidate_record(file_name, record.hash_key)
             if reused_payload is not None:
                 answer_text = reused_payload.get("answer") if isinstance(reused_payload, dict) else ""
-                parsed_answer: dict[str, object] | None = None
-                if isinstance(answer_text, str) and answer_text.strip():
-                    try:
-                        parsed_answer = json.loads(answer_text)
-                    except json.JSONDecodeError:
-                        parsed_answer = None
-                row = {
-                    "source_file": file_name,
-                    "sheet_name": record.sheet_name or "",
-                    "record_index": index,
-                    "session_id": session_id,
-                    "failure_mode": record.failure_mode,
-                    "root_cause": record.root_cause,
-                    "prevention_action": record.prevention_action,
-                    "detection_action": record.detection_action,
-                    "status": "",
-                    "where_covered": "",
-                    "建议更新": "",
-                    "原始回答": answer_text or "",
-                }
-                if parsed_answer:
-                    row["status"] = str(parsed_answer.get("status", ""))
-                    row["where_covered"] = json.dumps(
-                        parsed_answer.get("where_covered", []), ensure_ascii=False
-                    )
-                    row["建议更新"] = json.dumps(
-                        parsed_answer.get("建议更新", []), ensure_ascii=False
-                    )
+                parsed_answer = _parse_answer_payload(answer_text)
+                row = _build_result_row(file_name, record, answer_text, parsed_answer)
                 collected_rows.append(row)
                 capture_header_labels(record)
                 processed += 1
@@ -1110,12 +1166,7 @@ def _evaluate_history_problems(
             answer_text, response_session = parse_flow_answer(response)
             if response_session:
                 BACKEND_SESSION_STATE[flow_session_key] = response_session
-            parsed_answer: dict[str, object] | None = None
-            if isinstance(answer_text, str) and answer_text.strip():
-                try:
-                    parsed_answer = json.loads(answer_text)
-                except json.JSONDecodeError:
-                    parsed_answer = None
+            parsed_answer = _parse_answer_payload(answer_text)
             initial_payload = {
                 "source_file": file_name,
                 "record_index": index,
@@ -1153,28 +1204,7 @@ def _evaluate_history_problems(
                         "text": answer_text or "",
                     }
                 )
-            row = {
-                "source_file": file_name,
-                "sheet_name": record.sheet_name or "",
-                "record_index": index,
-                "session_id": session_id,
-                "failure_mode": record.failure_mode,
-                "root_cause": record.root_cause,
-                "prevention_action": record.prevention_action,
-                "detection_action": record.detection_action,
-                "status": "",
-                "where_covered": "",
-                "建议更新": "",
-                "原始回答": answer_text or "",
-            }
-            if parsed_answer:
-                row["status"] = str(parsed_answer.get("status", ""))
-                row["where_covered"] = json.dumps(
-                    parsed_answer.get("where_covered", []), ensure_ascii=False
-                )
-                row["建议更新"] = json.dumps(
-                    parsed_answer.get("建议更新", []), ensure_ascii=False
-                )
+            row = _build_result_row(file_name, record, answer_text, parsed_answer)
             collected_rows.append(row)
             capture_header_labels(record)
             processed += 1
@@ -1187,6 +1217,7 @@ def _evaluate_history_problems(
             progress_callback(min(progress_offset + progress_span, 1.0))
         return
     df = pd.DataFrame(collected_rows)
+    df = df.drop(columns=["record_index", "session_id"], errors="ignore")
     rename_map: dict[str, str] = {}
     for field in REQUIRED_FIELDS + OPTIONAL_FIELDS:
         if field not in df.columns:
