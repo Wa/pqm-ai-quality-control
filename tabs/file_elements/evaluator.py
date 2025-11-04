@@ -161,6 +161,8 @@ def parse_deliverable_stub(
     profile: DeliverableProfile,
     source_dir: str,
     parsed_dir: str | None = None,
+    *,
+    source_paths: Sequence[str] | None = None,
 ) -> Tuple[str, str | None, List[str]]:
     """Attempt to read deliverable text using lightweight heuristics.
 
@@ -172,15 +174,30 @@ def parse_deliverable_stub(
     source_file: str | None = None
     text_content = ""
 
-    if not source_dir or not os.path.isdir(source_dir):
-        warnings.append("未找到交付物上传目录，请先上传文件。")
-        return text_content, source_file, warnings
+    candidates: List[str] = []
+    seen: set[str] = set()
 
-    candidates = []
-    for name in os.listdir(source_dir):
-        path = os.path.join(source_dir, name)
-        if os.path.isfile(path):
-            candidates.append(path)
+    def _add_candidate(path: str | None) -> None:
+        if not path:
+            return
+        normalized = os.path.normpath(path)
+        if normalized in seen:
+            return
+        if os.path.isfile(normalized):
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    if source_paths:
+        for path in source_paths:
+            _add_candidate(path)
+
+    if not candidates:
+        if not source_dir or not os.path.isdir(source_dir):
+            warnings.append("未找到交付物上传目录，请先上传文件。")
+            return text_content, source_file, warnings
+
+        for name in os.listdir(source_dir):
+            _add_candidate(os.path.join(source_dir, name))
     if not candidates:
         warnings.append("上传目录为空，请上传交付物后再评估。")
         return text_content, source_file, warnings
@@ -203,6 +220,7 @@ def parse_deliverable_stub(
         if parsed_dir:
             base_name = os.path.splitext(os.path.basename(path))[0]
             parsed_candidate = os.path.join(parsed_dir, f"{base_name}.txt")
+            parsed_candidate = os.path.normpath(parsed_candidate)
             if os.path.isfile(parsed_candidate):
                 try:
                     with open(parsed_candidate, "r", encoding="utf-8") as handle:
