@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import time
 import zipfile
 from dataclasses import dataclass
@@ -345,6 +346,7 @@ class IssueRecord(BaseModel):
     root_cause: str = ""
     prevention_action: str = ""
     detection_action: str = ""
+    sheet_name: str | None = Field(default=None, description="源文件中的工作表名称")
     severity: str | None = None
     occurrence: str | None = None
     detection: str | None = None
@@ -522,6 +524,22 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     if available <= 0:
         return filename[: max_length - 3] + "..."
     return name[:available] + "..." + ext
+
+
+def _clear_directory(path: str) -> None:
+    if not path or not os.path.isdir(path):
+        return
+    for name in os.listdir(path):
+        target = os.path.join(path, name)
+        try:
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
 
 
 def _ensure_generated_dirs(root: str) -> dict[str, str]:
@@ -1041,6 +1059,7 @@ def _evaluate_history_problems(
                         parsed_answer = None
                 row = {
                     "source_file": file_name,
+                    "sheet_name": record.sheet_name or "",
                     "record_index": index,
                     "session_id": session_id,
                     "failure_mode": record.failure_mode,
@@ -1121,6 +1140,7 @@ def _evaluate_history_problems(
                 )
             row = {
                 "source_file": file_name,
+                "sheet_name": record.sheet_name or "",
                 "record_index": index,
                 "session_id": session_id,
                 "failure_mode": record.failure_mode,
@@ -1318,7 +1338,10 @@ def _load_csv_rows(path: str) -> list[list]:
     raise ValueError("无法解析CSV编码")
 
 
-def _build_issue_record(row_map: dict[str, str]) -> IssueRecord | None:
+def _build_issue_record(
+    row_map: dict[str, str],
+    sheet_name: str | None = None,
+) -> IssueRecord | None:
     failure_mode = row_map.get("failure_mode", "").strip()
     if not failure_mode:
         return None
@@ -1333,12 +1356,17 @@ def _build_issue_record(row_map: dict[str, str]) -> IssueRecord | None:
         "detection_action": row_map.get("detection_action", ""),
         "hash_key": hash_key,
     }
+    if sheet_name:
+        record_data["sheet_name"] = sheet_name
     for field in OPTIONAL_FIELDS:
         record_data[field] = row_map.get(field) or None
     return IssueRecord(**record_data)
 
 
-def _parse_issue_sheet(rows: list[list[str]]) -> tuple[list[IssueRecord], IssueSummary]:
+def _parse_issue_sheet(
+    rows: list[list[str]],
+    sheet_name: str | None = None,
+) -> tuple[list[IssueRecord], IssueSummary]:
     rows_prepared = [_horizontal_fill(row) for row in rows]
     header_indices, mapping = _detect_header(rows_prepared)
     data_start = max(header_indices) + 1
@@ -1360,7 +1388,7 @@ def _parse_issue_sheet(rows: list[list[str]]) -> tuple[list[IssueRecord], IssueS
         for col_index, canonical in mapping.items():
             value = values[col_index] if col_index < len(values) else ""
             row_map[canonical] = value
-        record = _build_issue_record(row_map)
+        record = _build_issue_record(row_map, sheet_name=sheet_name)
         if record is None:
             summary.skipped_rows += 1
             continue
@@ -1379,7 +1407,8 @@ def _parse_issue_list_spreadsheet(file_path: str) -> tuple[list[IssueRecord], Is
     summary = IssueSummary()
     if ext == ".csv":
         rows = _prepare_rows(_load_csv_rows(file_path))
-        records, part_summary = _parse_issue_sheet(rows)
+        sheet_label = os.path.splitext(os.path.basename(file_path))[0]
+        records, part_summary = _parse_issue_sheet(rows, sheet_name=sheet_label)
         summary.total_rows += part_summary.total_rows
         summary.parsed_rows += part_summary.parsed_rows
         summary.skipped_rows += part_summary.skipped_rows
@@ -1389,7 +1418,7 @@ def _parse_issue_list_spreadsheet(file_path: str) -> tuple[list[IssueRecord], Is
     for sheet_name, raw_rows in _iter_excel_rows(file_path):
         rows = _prepare_rows(raw_rows)
         try:
-            records, part_summary = _parse_issue_sheet(rows)
+            records, part_summary = _parse_issue_sheet(rows, sheet_name=sheet_name)
             summary.total_rows += part_summary.total_rows
             summary.parsed_rows += part_summary.parsed_rows
             summary.skipped_rows += part_summary.skipped_rows
@@ -1681,6 +1710,9 @@ def run_history_job(
         return {"final_results": []}
 
     generated_dirs = _ensure_generated_dirs(generated_root)
+    initial_results_dir = generated_dirs.get("initial_results")
+    if initial_results_dir:
+        _clear_directory(initial_results_dir)
     checkpoint_dir = generated_dirs.get("checkpoint") or os.path.join(generated_root, "checkpoint")
     checkpoint = HistoryCheckpoint(checkpoint_dir)
 
