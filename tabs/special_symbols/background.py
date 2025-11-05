@@ -7,7 +7,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import requests
 
 from config import CONFIG
 
@@ -47,6 +49,105 @@ GPT_OSS_PROMPT_PREFIX = (
     "5) 若整段文本中没有任何被上述分类列标记为★/☆/ /的行，则仅回复：无。\n\n"
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
+
+
+class ModelScopeClient:
+    """Minimal HTTP client for invoking ModelScope chat completions."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api-inference.modelscope.cn/api/v1",
+        temperature: float = 0.3,
+        timeout: float = 120.0,
+    ) -> None:
+        self._session = requests.Session()
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+        self._temperature = temperature
+        self._timeout = timeout
+
+    def chat(
+        self,
+        model: Optional[str] = None,
+        messages: Optional[List[Dict[str, object]]] = None,
+        stream: bool = False,
+        options: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        if stream:
+            raise NotImplementedError("ModelScopeClient does not support streaming responses")
+
+        target_model = model or self._model
+        payload: Dict[str, object] = {
+            "model": target_model,
+            "messages": messages or [],
+            "temperature": self._temperature,
+            "stream": False,
+        }
+
+        num_ctx: Optional[int] = None
+        if options and isinstance(options, dict):
+            num_ctx_value = options.get("num_ctx")
+            if isinstance(num_ctx_value, int):
+                num_ctx = num_ctx_value
+        payload["max_context_length"] = num_ctx or 40001
+
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = self._session.post(url, json=payload, headers=headers, timeout=self._timeout)
+        response.raise_for_status()
+        data = response.json()
+
+        message_content = ""
+        if isinstance(data, dict):
+            choices = data.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    message = choice.get("message")
+                    if isinstance(message, dict) and isinstance(message.get("content"), str):
+                        message_content = message["content"]
+                        break
+                    if isinstance(choice.get("text"), str):
+                        message_content = str(choice["text"])
+                        break
+            if not message_content and isinstance(data.get("text"), str):
+                message_content = str(data["text"])
+            if not message_content:
+                output_text = data.get("output_text") or data.get("output")
+                if isinstance(output_text, str):
+                    message_content = output_text
+            if not message_content:
+                data_field = data.get("data")
+                if isinstance(data_field, list) and data_field:
+                    first_item = data_field[0]
+                    if isinstance(first_item, dict):
+                        for key in ("text", "output_text", "content"):
+                            value = first_item.get(key)
+                            if isinstance(value, str) and value:
+                                message_content = value
+                                break
+
+        if not message_content:
+            message_content = ""
+
+        usage = data.get("usage") if isinstance(data, dict) else None
+        stats: Dict[str, object] = {}
+        if isinstance(usage, dict):
+            stats = usage
+
+        return {
+            "message": {"content": message_content},
+            "model": data.get("model") if isinstance(data, dict) else target_model,
+            "stats": stats,
+        }
 
 
 class ProgressEmitter:
@@ -336,7 +437,7 @@ def _run_gpt_extraction(
 def _run_gpt_extraction_parallel(
     emitter: ProgressEmitter,
     publish: Callable[[Dict[str, object]], None],
-    client_factory: Optional[Callable[[], OllamaClient]],
+    client_factory: Optional[Callable[[], Any]],
     model_name: str,
     session_id: str,
     output_root: str,
@@ -351,6 +452,7 @@ def _run_gpt_extraction_parallel(
     combined_log_template: str = "已生成汇总结果 {name}",
     progress_callback: Optional[Callable[[], None]] = None,
     parallel_label: str = "云端 gpt-oss",
+    engine_tag: str = "ollama",
     max_workers: int = 6,
 ) -> List[str]:
     names = sorted(file_names, key=lambda value: value.lower())
@@ -503,7 +605,7 @@ def _run_gpt_extraction_parallel(
                 session_id,
                 {
                     "ts": datetime.now().isoformat(timespec="seconds"),
-                    "engine": "ollama",
+                    "engine": engine_tag,
                     "model": used_model_name,
                     "session_id": session_id,
                     "file": name,
@@ -792,6 +894,10 @@ def run_special_symbols_job(
     cloud_client_factory: Optional[Callable[[], OllamaClient]] = None
     cloud_host = CONFIG["llm"].get("ollama_cloud_host")
     cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
+    modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or CONFIG["llm"].get("modelscope_api_key")
+    modelscope_model_name = CONFIG["llm"].get("modelscope_model") or "deepseek-ai/DeepSeek-V3.1"
+    modelscope_base_url = CONFIG["llm"].get("modelscope_base_url") or "https://api-inference.modelscope.cn/api/v1"
+    modelscope_client_factory: Optional[Callable[[], ModelScopeClient]] = None
 
     if standards_txt_filtered_files or exam_txt_files:
         try:
@@ -818,12 +924,52 @@ def run_special_symbols_job(
         else:
             emitter.warning("未配置云端 gpt-oss，无法启用云端备份")
 
-    if turbo_mode_enabled and cloud_client_factory is None:
-        emitter.warning("未检测到云端 gpt-oss 配置，高性能模式已回退为标准模式。")
-        turbo_mode_enabled = False
+        if modelscope_api_key:
+            try:
+                def _make_modelscope_client() -> ModelScopeClient:
+                    return ModelScopeClient(
+                        api_key=modelscope_api_key,
+                        model=modelscope_model_name,
+                        base_url=modelscope_base_url,
+                    )
+
+                _make_modelscope_client()
+            except Exception as error:
+                report_exception("初始化 ModelScope DeepSeek 客户端失败", error, level="warning")
+                if turbo_mode_enabled:
+                    emitter.warning("ModelScope DeepSeek 初始化失败，将尝试使用其它高性能通道。")
+            else:
+                modelscope_client_factory = _make_modelscope_client
+        elif turbo_mode_enabled:
+            emitter.warning("未配置 ModelScope API Key，无法启用 ModelScope 高性能通道")
+
+    turbo_parallel_factory: Optional[Callable[[], Any]] = None
+    turbo_parallel_model_name = cloud_extraction_model
+    turbo_parallel_label = "云端 gpt-oss"
+    turbo_unavailable_message = "云端 gpt-oss 客户端不可用，已跳过符号提取"
+    turbo_enabled_description = "将使用云端 Ollama 并行处理待检文本。"
+    turbo_engine_tag = "ollama"
 
     if turbo_mode_enabled:
-        emitter.info("已启用高性能模式，将使用云端 Ollama 并行处理待检文本。")
+        if modelscope_client_factory is not None:
+            turbo_parallel_factory = modelscope_client_factory
+            turbo_parallel_model_name = modelscope_model_name
+            turbo_parallel_label = "ModelScope DeepSeek-V3.1"
+            turbo_unavailable_message = "ModelScope DeepSeek 客户端不可用，已跳过符号提取"
+            turbo_enabled_description = "将使用 ModelScope DeepSeek-V3.1 并行处理待检文本。"
+            turbo_engine_tag = "modelscope"
+        elif cloud_client_factory is not None:
+            turbo_parallel_factory = cloud_client_factory
+        else:
+            emitter.warning("未检测到 ModelScope 或云端 gpt-oss 配置，高性能模式已回退为标准模式。")
+            turbo_mode_enabled = False
+
+    if turbo_mode_enabled and turbo_parallel_factory is None:
+        emitter.warning("高性能模式的所有通道均不可用，已回退为标准模式。")
+        turbo_mode_enabled = False
+
+    if turbo_mode_enabled and turbo_parallel_factory is not None:
+        emitter.info(f"已启用高性能模式，{turbo_enabled_description}")
 
     standards_txt_filtered_further_dir = os.path.join(output_root, "standards_txt_filtered_further")
     standards_outputs: List[str] = []
@@ -847,20 +993,21 @@ def run_special_symbols_job(
             standards_outputs = _run_gpt_extraction_parallel(
                 emitter=emitter,
                 publish=publish,
-                client_factory=cloud_client_factory,
-                model_name=cloud_extraction_model,
+                client_factory=turbo_parallel_factory,
+                model_name=turbo_parallel_model_name,
                 session_id=session_id,
                 output_root=output_root,
                 src_dir=standards_txt_filtered_dir,
                 file_names=standards_txt_filtered_files,
                 dest_dir=standards_txt_filtered_further_dir,
                 stage_label="standards_gpt_oss",
-                stage_message="正在调用 gpt-oss 提取基准文件特殊特性标记",
+                stage_message=f"正在调用 {turbo_parallel_label} 提取基准文件特殊特性标记",
                 clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
-                client_unavailable_message="云端 gpt-oss 客户端不可用，已跳过基准文件符号提取",
+                client_unavailable_message=turbo_unavailable_message,
                 combined_prefix="standards_txt_filtered_final",
                 progress_callback=advance_ollama_progress if increment else None,
-                parallel_label="云端 gpt-oss",
+                parallel_label=turbo_parallel_label,
+                engine_tag=turbo_engine_tag,
             )
         else:
             standards_outputs = _run_gpt_extraction(
@@ -905,20 +1052,21 @@ def run_special_symbols_job(
         exam_outputs = _run_gpt_extraction_parallel(
             emitter=emitter,
             publish=publish,
-            client_factory=cloud_client_factory,
-            model_name=cloud_extraction_model,
+            client_factory=turbo_parallel_factory,
+            model_name=turbo_parallel_model_name,
             session_id=session_id,
             output_root=output_root,
             src_dir=exam_src_dir,
             file_names=exam_txt_files,
             dest_dir=examined_txt_filtered_further_dir,
             stage_label="gpt_oss",
-            stage_message="正在调用 gpt-oss 提取特殊特性标记",
+            stage_message=f"正在调用 {turbo_parallel_label} 提取特殊特性标记",
             clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
-            client_unavailable_message="云端 gpt-oss 客户端不可用，已跳过符号提取",
+            client_unavailable_message=turbo_unavailable_message,
             combined_prefix="examined_txt_filtered_final",
             progress_callback=advance_ollama_progress if increment else None,
-            parallel_label="云端 gpt-oss",
+            parallel_label=turbo_parallel_label,
+            engine_tag=turbo_engine_tag,
         )
     else:
         exam_outputs = _run_gpt_extraction(
