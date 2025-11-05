@@ -13,6 +13,7 @@ import os
 import random
 import string
 import sys
+import time
 from typing import Dict
 
 import requests
@@ -22,6 +23,9 @@ FLOW_ID = os.getenv("BISHENG_FLOW_ID", "d5f4ffd5568b4e8b803acabb7f499fe5")
 API_KEY = os.getenv("BISHENG_API_KEY")
 CALL_COUNT = int(os.getenv("BISHENG_CALL_COUNT", "30"))
 TIMEOUT_SECONDS = int(os.getenv("BISHENG_TIMEOUT", "120"))
+CONNECT_TIMEOUT = float(os.getenv("BISHENG_CONNECT_TIMEOUT", "10"))
+MAX_WORKERS = int(os.getenv("BISHENG_MAX_WORKERS", "30"))
+DEBUG = os.getenv("BISHENG_DEBUG", "0") not in {"", "0", "false", "False"}
 
 INPUT_NODE_ID = os.getenv("BISHENG_INPUT_NODE_ID", "RetrievalQA-f0f31")
 TWEAKS: Dict[str, Dict[str, object]] = {
@@ -109,16 +113,36 @@ def build_payload() -> Dict[str, object]:
 def invoke_once(index: int) -> str:
     url = f"{BASE_API_URL.rstrip('/')}/{FLOW_ID}"
     payload = build_payload()
+    session_id = payload["session_id"]
+    start_time = time.perf_counter()
+    if DEBUG:
+        print(f"#{index:02d} session={session_id} dispatching", flush=True)
     try:
-        response = requests.post(url, headers=HEADERS, data=json.dumps(payload), timeout=TIMEOUT_SECONDS)
+        response = requests.post(
+            url,
+            headers=HEADERS,
+            data=json.dumps(payload),
+            timeout=(CONNECT_TIMEOUT, TIMEOUT_SECONDS),
+        )
         status = response.status_code
+        elapsed = time.perf_counter() - start_time
         if status == 200:
-            return f"#{index:02d}: 200 OK"
-        return f"#{index:02d}: {status} {response.reason or 'Unknown'}"
-    except requests.Timeout:
-        return f"#{index:02d}: TIMEOUT after {TIMEOUT_SECONDS}s"
+            return f"#{index:02d} session={session_id}: 200 OK ({elapsed:.2f}s)"
+        snippet = response.text.strip().replace("\n", " ") if DEBUG and response.text else ""
+        details = f" body={snippet[:200]}" if snippet else ""
+        return (
+            f"#{index:02d} session={session_id}: {status} {response.reason or 'Unknown'}"
+            f" ({elapsed:.2f}s){details}"
+        )
+    except requests.Timeout as error:
+        elapsed = time.perf_counter() - start_time
+        return (
+            f"#{index:02d} session={session_id}: TIMEOUT after {TIMEOUT_SECONDS}s "
+            f"({elapsed:.2f}s) {error}"
+        )
     except requests.RequestException as error:
-        return f"#{index:02d}: ERROR {error}"
+        elapsed = time.perf_counter() - start_time
+        return f"#{index:02d} session={session_id}: ERROR {error} ({elapsed:.2f}s)"
 
 
 def main() -> int:
@@ -127,7 +151,14 @@ def main() -> int:
         return 1
 
     print(f"Dispatching {CALL_COUNT} calls to {BASE_API_URL.rstrip('/')}/{FLOW_ID}")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(CALL_COUNT, 30)) as executor:
+    worker_count = min(CALL_COUNT, MAX_WORKERS)
+    if DEBUG:
+        print(
+            f"Using worker_count={worker_count}, connect_timeout={CONNECT_TIMEOUT}s, "
+            f"read_timeout={TIMEOUT_SECONDS}s",
+            flush=True,
+        )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [executor.submit(invoke_once, i + 1) for i in range(CALL_COUNT)]
         for future in concurrent.futures.as_completed(futures):
             print(future.result())
