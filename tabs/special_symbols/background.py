@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+import requests
 
 from config import CONFIG
 
@@ -46,6 +49,105 @@ GPT_OSS_PROMPT_PREFIX = (
     "5) 若整段文本中没有任何被上述分类列标记为★/☆/ /的行，则仅回复：无。\n\n"
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
+
+
+class ModelScopeClient:
+    """Minimal HTTP client for invoking ModelScope chat completions."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api-inference.modelscope.cn/v1",
+        temperature: float = 0.3,
+        timeout: float = 120.0,
+    ) -> None:
+        self._session = requests.Session()
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+        self._temperature = temperature
+        self._timeout = timeout
+
+    def chat(
+        self,
+        model: Optional[str] = None,
+        messages: Optional[List[Dict[str, object]]] = None,
+        stream: bool = False,
+        options: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        if stream:
+            raise NotImplementedError("ModelScopeClient does not support streaming responses")
+
+        target_model = model or self._model
+        payload: Dict[str, object] = {
+            "model": target_model,
+            "messages": messages or [],
+            "temperature": self._temperature,
+            "stream": False,
+        }
+
+        num_ctx: Optional[int] = None
+        if options and isinstance(options, dict):
+            num_ctx_value = options.get("num_ctx")
+            if isinstance(num_ctx_value, int):
+                num_ctx = num_ctx_value
+        payload["max_context_length"] = num_ctx or 40001
+
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = self._session.post(url, json=payload, headers=headers, timeout=self._timeout)
+        response.raise_for_status()
+        data = response.json()
+
+        message_content = ""
+        if isinstance(data, dict):
+            choices = data.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    message = choice.get("message")
+                    if isinstance(message, dict) and isinstance(message.get("content"), str):
+                        message_content = message["content"]
+                        break
+                    if isinstance(choice.get("text"), str):
+                        message_content = str(choice["text"])
+                        break
+            if not message_content and isinstance(data.get("text"), str):
+                message_content = str(data["text"])
+            if not message_content:
+                output_text = data.get("output_text") or data.get("output")
+                if isinstance(output_text, str):
+                    message_content = output_text
+            if not message_content:
+                data_field = data.get("data")
+                if isinstance(data_field, list) and data_field:
+                    first_item = data_field[0]
+                    if isinstance(first_item, dict):
+                        for key in ("text", "output_text", "content"):
+                            value = first_item.get(key)
+                            if isinstance(value, str) and value:
+                                message_content = value
+                                break
+
+        if not message_content:
+            message_content = ""
+
+        usage = data.get("usage") if isinstance(data, dict) else None
+        stats: Dict[str, object] = {}
+        if isinstance(usage, dict):
+            stats = usage
+
+        return {
+            "message": {"content": message_content},
+            "model": data.get("model") if isinstance(data, dict) else target_model,
+            "stats": stats,
+        }
 
 
 class ProgressEmitter:
@@ -332,10 +434,243 @@ def _run_gpt_extraction(
     return outputs
 
 
+def _run_gpt_extraction_parallel(
+    emitter: ProgressEmitter,
+    publish: Callable[[Dict[str, object]], None],
+    client_factory: Optional[Callable[[], Any]],
+    model_name: str,
+    session_id: str,
+    output_root: str,
+    src_dir: str,
+    file_names: Iterable[str],
+    dest_dir: str,
+    stage_label: str,
+    stage_message: str,
+    clear_message_template: Optional[str],
+    client_unavailable_message: str,
+    combined_prefix: str,
+    combined_log_template: str = "已生成汇总结果 {name}",
+    progress_callback: Optional[Callable[[], None]] = None,
+    parallel_label: str = "云端 gpt-oss",
+    engine_tag: str = "ollama",
+    max_workers: int = 6,
+) -> List[str]:
+    names = sorted(file_names, key=lambda value: value.lower())
+    if not names:
+        return []
+
+    emitter.set_stage(stage_label)
+    if client_factory is None:
+        emitter.warning(client_unavailable_message)
+        return []
+
+    os.makedirs(dest_dir, exist_ok=True)
+    cleared = _clear_directory(dest_dir)
+    if cleared and clear_message_template:
+        try:
+            emitter.info(clear_message_template.format(cleared=cleared))
+        except Exception:
+            emitter.info(clear_message_template)
+
+    emitter.info(f"{stage_message}（高性能模式）")
+
+    outputs: List[str] = []
+    aggregate_data: List[Dict[str, object]] = []
+    prompts: Dict[str, str] = {}
+    tasks: List[str] = []
+
+    for name in names:
+        src_path = os.path.join(src_dir, name)
+        try:
+            with open(src_path, "r", encoding="utf-8") as handle:
+                doc_text = handle.read()
+        except Exception as error:
+            report_exception(f"读取文本失败({stage_label}:{name})", error, level="warning")
+            if progress_callback:
+                progress_callback()
+            continue
+
+        prompt_text = f"{GPT_OSS_PROMPT_PREFIX}{doc_text}"
+        prompts[name] = prompt_text
+        publish(
+            {
+                "stream": {
+                    "kind": "prompt",
+                    "file": name,
+                    "part": 1,
+                    "total_parts": 1,
+                    "engine": model_name,
+                    "text": prompt_text,
+                }
+            }
+        )
+        publish({"stage": stage_label, "message": f"调用 {parallel_label} ({name})"})
+        tasks.append(name)
+
+    if not tasks:
+        return outputs
+
+    worker_limit = max(1, min(max_workers, len(tasks)))
+
+    def _invoke(name: str, prompt_text: str) -> Dict[str, object]:
+        try:
+            client = client_factory()
+        except Exception as client_error:
+            return {"name": name, "error": client_error}
+
+        start_ts = time.time()
+        try:
+            response = client.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=False,
+                options={"num_ctx": 40001},
+            )
+        except Exception as call_error:
+            return {"name": name, "error": call_error}
+
+        message = (
+            response.get("message", {}).get("content")
+            or response.get("response")
+            or ""
+        )
+        stats = response.get("eval_info") or response.get("stats") or {}
+        used_model = response.get("model") or model_name
+        duration_ms = int((time.time() - start_ts) * 1000)
+        return {
+            "name": name,
+            "text": message,
+            "stats": stats,
+            "model": used_model,
+            "duration_ms": duration_ms,
+        }
+
+    futures: Dict[object, str] = {}
+    with ThreadPoolExecutor(max_workers=worker_limit) as executor:
+        for name in tasks:
+            prompt_text = prompts[name]
+            future = executor.submit(_invoke, name, prompt_text)
+            futures[future] = name
+
+        for future in as_completed(futures):
+            name = futures[future]
+            prompt_text = prompts.get(name, "")
+            try:
+                result = future.result()
+            except Exception as error:
+                report_exception(f"调用 {parallel_label} 失败({stage_label}:{name})", error, level="warning")
+                if progress_callback:
+                    progress_callback()
+                continue
+
+            error_obj = result.get("error") if isinstance(result, dict) else None
+            if error_obj:
+                report_exception(f"调用 {parallel_label} 失败({stage_label}:{name})", error_obj, level="warning")
+                publish(
+                    {
+                        "stream": {
+                            "kind": "response",
+                            "file": name,
+                            "part": 1,
+                            "total_parts": 1,
+                            "engine": model_name,
+                            "text": f"调用 {parallel_label} 失败：{error_obj}",
+                        }
+                    }
+                )
+                if progress_callback:
+                    progress_callback()
+                continue
+
+            response_clean = (result.get("text") or "").strip() or "无"
+            used_model_name = result.get("model") or model_name
+            duration_ms = int(result.get("duration_ms") or 0)
+            stats = result.get("stats") or {}
+
+            publish(
+                {
+                    "stream": {
+                        "kind": "response",
+                        "file": name,
+                        "part": 1,
+                        "total_parts": 1,
+                        "engine": used_model_name,
+                        "text": response_clean,
+                    }
+                }
+            )
+
+            log_llm_metrics(
+                output_root,
+                session_id,
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "engine": engine_tag,
+                    "model": used_model_name,
+                    "session_id": session_id,
+                    "file": name,
+                    "part": 1,
+                    "phase": stage_label,
+                    "prompt_chars": len(prompt_text),
+                    "prompt_tokens": estimate_tokens(prompt_text, used_model_name),
+                    "output_chars": len(response_clean),
+                    "output_tokens": estimate_tokens(response_clean, used_model_name),
+                    "duration_ms": duration_ms,
+                    "success": 1 if response_clean else 0,
+                    "stats": stats,
+                    "error": "",
+                },
+            )
+
+            dst_path = os.path.join(dest_dir, name)
+            entries = [line.strip() for line in response_clean.splitlines() if line.strip()]
+            if not entries and response_clean.strip():
+                entries = [response_clean.strip()]
+            stem = os.path.splitext(name)[0]
+            file_name_value = stem
+            sheet_name_value: Optional[str] = None
+            if "_SHEET_" in stem:
+                file_name_value, sheet_name_value = stem.split("_SHEET_", 1)
+            record: Dict[str, object] = {
+                "文件名": file_name_value,
+                "特殊特性符号": entries,
+            }
+            if sheet_name_value:
+                record["工作表名"] = sheet_name_value
+            try:
+                with open(dst_path, "w", encoding="utf-8") as writer:
+                    json.dump(record, writer, ensure_ascii=False, indent=2)
+                    writer.write("\n")
+                outputs.append(dst_path)
+                if not (len(entries) == 1 and entries[0] == "无"):
+                    aggregate_data.append(record)
+            except Exception as error:
+                report_exception(f"写入 gpt-oss 结果失败({stage_label}:{name})", error, level="warning")
+
+            if progress_callback:
+                progress_callback()
+
+    if aggregate_data or outputs:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        combined_name = f"{combined_prefix}_{timestamp}.txt"
+        combined_path = os.path.join(dest_dir, combined_name)
+        try:
+            with open(combined_path, "w", encoding="utf-8") as handle:
+                json.dump(aggregate_data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            outputs.append(combined_path)
+            emitter.info(combined_log_template.format(name=combined_name))
+        except Exception as error:
+            report_exception(f"汇总 gpt-oss 结果失败({stage_label})", error, level="warning")
+
+    return outputs
+
+
 def run_special_symbols_job(
     session_id: str,
     publish: Callable[[Dict[str, object]], None],
     check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+    turbo_mode: bool = False,
 ) -> Dict[str, List[str]]:
     """Run the special symbols workflow headlessly and report progress via ``publish``."""
 
@@ -343,6 +678,9 @@ def run_special_symbols_job(
 
     progress_value = 0.0
     job_start_time = time.time()
+    turbo_mode_enabled = bool(turbo_mode)
+    if turbo_mode_enabled:
+        check_control = None
 
     def publish_progress(value: float) -> None:
         nonlocal progress_value
@@ -553,14 +891,20 @@ def run_special_symbols_job(
     cloud_comparison_model = "deepseek-v3.1:671b-cloud"
     local_ollama_client: Optional[OllamaClient] = None
     cloud_ollama_client: Optional[OllamaClient] = None
+    cloud_client_factory: Optional[Callable[[], OllamaClient]] = None
+    cloud_host = CONFIG["llm"].get("ollama_cloud_host")
+    cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
+    modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or CONFIG["llm"].get("modelscope_api_key")
+    modelscope_model_name = CONFIG["llm"].get("modelscope_model") or "deepseek-ai/DeepSeek-V3.1"
+    modelscope_base_url = CONFIG["llm"].get("modelscope_base_url") or "https://api-inference.modelscope.cn/v1"
+    modelscope_client_factory: Optional[Callable[[], ModelScopeClient]] = None
+
     if standards_txt_filtered_files or exam_txt_files:
         try:
             host = resolve_ollama_host("ollama_9")
             local_ollama_client = OllamaClient(host=host)
         except Exception as error:
             report_exception("初始化本地 gpt-oss 客户端失败", error, level="warning")
-        cloud_host = CONFIG["llm"].get("ollama_cloud_host")
-        cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
         if cloud_host and cloud_api_key:
             try:
                 cloud_ollama_client = OllamaClient(
@@ -569,8 +913,63 @@ def run_special_symbols_job(
                 )
             except Exception as error:
                 report_exception("初始化云端 gpt-oss 客户端失败", error, level="warning")
+            else:
+                def _make_cloud_client() -> OllamaClient:
+                    return OllamaClient(
+                        host=cloud_host,
+                        headers={"Authorization": f"Bearer {cloud_api_key}"},
+                    )
+
+                cloud_client_factory = _make_cloud_client
         else:
             emitter.warning("未配置云端 gpt-oss，无法启用云端备份")
+
+        if modelscope_api_key:
+            try:
+                def _make_modelscope_client() -> ModelScopeClient:
+                    return ModelScopeClient(
+                        api_key=modelscope_api_key,
+                        model=modelscope_model_name,
+                        base_url=modelscope_base_url,
+                    )
+
+                _make_modelscope_client()
+            except Exception as error:
+                report_exception("初始化 ModelScope DeepSeek 客户端失败", error, level="warning")
+                if turbo_mode_enabled:
+                    emitter.warning("ModelScope DeepSeek 初始化失败，将尝试使用其它高性能通道。")
+            else:
+                modelscope_client_factory = _make_modelscope_client
+        elif turbo_mode_enabled:
+            emitter.warning("未配置 ModelScope API Key，无法启用 ModelScope 高性能通道")
+
+    turbo_parallel_factory: Optional[Callable[[], Any]] = None
+    turbo_parallel_model_name = cloud_extraction_model
+    turbo_parallel_label = "云端 gpt-oss"
+    turbo_unavailable_message = "云端 gpt-oss 客户端不可用，已跳过符号提取"
+    turbo_enabled_description = "将使用云端 Ollama 并行处理待检文本。"
+    turbo_engine_tag = "ollama"
+
+    if turbo_mode_enabled:
+        if modelscope_client_factory is not None:
+            turbo_parallel_factory = modelscope_client_factory
+            turbo_parallel_model_name = modelscope_model_name
+            turbo_parallel_label = "ModelScope DeepSeek-V3.1"
+            turbo_unavailable_message = "ModelScope DeepSeek 客户端不可用，已跳过符号提取"
+            turbo_enabled_description = "将使用 ModelScope DeepSeek-V3.1 并行处理待检文本。"
+            turbo_engine_tag = "modelscope"
+        elif cloud_client_factory is not None:
+            turbo_parallel_factory = cloud_client_factory
+        else:
+            emitter.warning("未检测到 ModelScope 或云端 gpt-oss 配置，高性能模式已回退为标准模式。")
+            turbo_mode_enabled = False
+
+    if turbo_mode_enabled and turbo_parallel_factory is None:
+        emitter.warning("高性能模式的所有通道均不可用，已回退为标准模式。")
+        turbo_mode_enabled = False
+
+    if turbo_mode_enabled and turbo_parallel_factory is not None:
+        emitter.info(f"已启用高性能模式，{turbo_enabled_description}")
 
     standards_txt_filtered_further_dir = os.path.join(output_root, "standards_txt_filtered_further")
     standards_outputs: List[str] = []
@@ -590,26 +989,47 @@ def run_special_symbols_job(
     if standards_txt_filtered_files:
         if not ensure_running("standards_gpt_oss", "开始基准文件符号提取"):
             return {"final_results": []}
-        standards_outputs = _run_gpt_extraction(
-            emitter=emitter,
-            publish=publish,
-            primary_client=local_ollama_client,
-            primary_model_name=local_model_name,
-            session_id=session_id,
-            output_root=output_root,
-            src_dir=standards_txt_filtered_dir,
-            file_names=standards_txt_filtered_files,
-            dest_dir=standards_txt_filtered_further_dir,
-            stage_label="standards_gpt_oss",
-            stage_message="正在调用 gpt-oss 提取基准文件特殊特性标记",
-            clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
-            client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
-            combined_prefix="standards_txt_filtered_final",
-            progress_callback=advance_ollama_progress if increment else None,
-            control_handler=ensure_running,
-            fallback_client=cloud_ollama_client,
-            fallback_model_name=cloud_extraction_model,
-        )
+        if turbo_mode_enabled:
+            standards_outputs = _run_gpt_extraction_parallel(
+                emitter=emitter,
+                publish=publish,
+                client_factory=turbo_parallel_factory,
+                model_name=turbo_parallel_model_name,
+                session_id=session_id,
+                output_root=output_root,
+                src_dir=standards_txt_filtered_dir,
+                file_names=standards_txt_filtered_files,
+                dest_dir=standards_txt_filtered_further_dir,
+                stage_label="standards_gpt_oss",
+                stage_message=f"正在调用 {turbo_parallel_label} 提取基准文件特殊特性标记",
+                clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
+                client_unavailable_message=turbo_unavailable_message,
+                combined_prefix="standards_txt_filtered_final",
+                progress_callback=advance_ollama_progress if increment else None,
+                parallel_label=turbo_parallel_label,
+                engine_tag=turbo_engine_tag,
+            )
+        else:
+            standards_outputs = _run_gpt_extraction(
+                emitter=emitter,
+                publish=publish,
+                primary_client=local_ollama_client,
+                primary_model_name=local_model_name,
+                session_id=session_id,
+                output_root=output_root,
+                src_dir=standards_txt_filtered_dir,
+                file_names=standards_txt_filtered_files,
+                dest_dir=standards_txt_filtered_further_dir,
+                stage_label="standards_gpt_oss",
+                stage_message="正在调用 gpt-oss 提取基准文件特殊特性标记",
+                clear_message_template="已清空上次基准 GPT-OSS 结果 {cleared} 个文件",
+                client_unavailable_message="gpt-oss 客户端不可用，已跳过基准文件符号提取",
+                combined_prefix="standards_txt_filtered_final",
+                progress_callback=advance_ollama_progress if increment else None,
+                control_handler=ensure_running,
+                fallback_client=cloud_ollama_client,
+                fallback_model_name=cloud_extraction_model,
+            )
         if stop_announced:
             return {"final_results": []}
 
@@ -628,26 +1048,47 @@ def run_special_symbols_job(
     examined_txt_filtered_further_dir = os.path.join(output_root, "examined_txt_filtered_further")
     if not ensure_running("gpt_oss", "开始待检文件符号提取"):
         return {"final_results": []}
-    exam_outputs = _run_gpt_extraction(
-        emitter=emitter,
-        publish=publish,
-        primary_client=local_ollama_client,
-        primary_model_name=local_model_name,
-        session_id=session_id,
-        output_root=output_root,
-        src_dir=exam_src_dir,
-        file_names=exam_txt_files,
-        dest_dir=examined_txt_filtered_further_dir,
-        stage_label="gpt_oss",
-        stage_message="正在调用 gpt-oss 提取特殊特性标记",
-        clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
-        client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
-        combined_prefix="examined_txt_filtered_final",
-        progress_callback=advance_ollama_progress if increment else None,
-        control_handler=ensure_running,
-        fallback_client=cloud_ollama_client,
-        fallback_model_name=cloud_extraction_model,
-    )
+    if turbo_mode_enabled:
+        exam_outputs = _run_gpt_extraction_parallel(
+            emitter=emitter,
+            publish=publish,
+            client_factory=turbo_parallel_factory,
+            model_name=turbo_parallel_model_name,
+            session_id=session_id,
+            output_root=output_root,
+            src_dir=exam_src_dir,
+            file_names=exam_txt_files,
+            dest_dir=examined_txt_filtered_further_dir,
+            stage_label="gpt_oss",
+            stage_message=f"正在调用 {turbo_parallel_label} 提取特殊特性标记",
+            clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
+            client_unavailable_message=turbo_unavailable_message,
+            combined_prefix="examined_txt_filtered_final",
+            progress_callback=advance_ollama_progress if increment else None,
+            parallel_label=turbo_parallel_label,
+            engine_tag=turbo_engine_tag,
+        )
+    else:
+        exam_outputs = _run_gpt_extraction(
+            emitter=emitter,
+            publish=publish,
+            primary_client=local_ollama_client,
+            primary_model_name=local_model_name,
+            session_id=session_id,
+            output_root=output_root,
+            src_dir=exam_src_dir,
+            file_names=exam_txt_files,
+            dest_dir=examined_txt_filtered_further_dir,
+            stage_label="gpt_oss",
+            stage_message="正在调用 gpt-oss 提取特殊特性标记",
+            clear_message_template="已清空上次 GPT-OSS 结果 {cleared} 个文件",
+            client_unavailable_message="gpt-oss 客户端不可用，已跳过符号提取",
+            combined_prefix="examined_txt_filtered_final",
+            progress_callback=advance_ollama_progress if increment else None,
+            control_handler=ensure_running,
+            fallback_client=cloud_ollama_client,
+            fallback_model_name=cloud_extraction_model,
+        )
     if stop_announced:
         return {"final_results": []}
 

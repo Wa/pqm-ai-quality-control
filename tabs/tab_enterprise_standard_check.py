@@ -286,8 +286,8 @@ def render_enterprise_standard_check_tab(session_id):
                 handle_file_upload(files_exam, examined_dir)
                 st.success(f"已上传 {len(files_exam)} 个待检查文件")
 
-        # Start / Stop / Demo buttons
-        btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
+        # Start / Pause / Demo buttons
+        btn_col1, btn_col_pause, btn_col2 = st.columns([1, 1, 1])
         with btn_col1:
             start_disabled = (not backend_ready) or job_running
             if st.button("开始", key=f"enterprise_start_button_{session_id}", disabled=start_disabled):
@@ -307,9 +307,9 @@ def render_enterprise_standard_check_tab(session_id):
                             detail = str(response)
                         st.error(f"提交任务失败：{detail}")
                     
-        with btn_col_stop:
-            stop_disabled = (not backend_ready) or (not job_status) or job_paused
-            if st.button("停止", key=f"enterprise_stop_button_{session_id}", disabled=stop_disabled):
+        with btn_col_pause:
+            pause_disabled = (not backend_ready) or (not job_status) or job_paused
+            if st.button("暂停", key=f"enterprise_pause_button_{session_id}", disabled=pause_disabled):
                 if not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
@@ -320,17 +320,17 @@ def render_enterprise_standard_check_tab(session_id):
                     else:
                         st.error(f"暂停失败：{str(resp)}")
 
-            cont_disabled = (not backend_ready) or (not job_status) or (not job_paused)
-            if st.button("继续", key=f"enterprise_continue_button_{session_id}", disabled=cont_disabled):
+            resume_disabled = (not backend_ready) or (not job_status) or (not job_paused)
+            if st.button("继续", key=f"enterprise_resume_button_{session_id}", disabled=resume_disabled):
                 if not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
                     resp = backend_client.resume_enterprise_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"running", "queued"}):
-                        st.success("已请求恢复任务。")
+                        st.success("已请求继续任务。")
                         st.rerun()
                     else:
-                        st.error(f"恢复失败：{str(resp)}")
+                        st.error(f"继续失败：{str(resp)}")
 
         with btn_col2:
             if st.button("演示", key=f"enterprise_demo_button_{session_id}"):
@@ -416,7 +416,7 @@ def render_enterprise_standard_check_tab(session_id):
                     if status_value == "paused":
                         _label = "已暂停"
                     elif status_value == "stopping":
-                        _label = "停止中"
+                        _label = "暂停中"
                     else:
                         _label = status_value
                 # st.markdown(f"**任务状态：{_label}**")

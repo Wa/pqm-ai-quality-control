@@ -76,6 +76,12 @@ def render_special_symbols_check_tab(session_id):
     status_str = str(job_status.get("status")) if job_status else ""
     job_running = bool(job_status and status_str in {"queued", "running"})
     job_paused = bool(job_status and status_str == "paused")
+    turbo_job_active = bool(
+        job_status and isinstance(job_status.get("metadata"), dict) and job_status["metadata"].get("turbo_mode")
+    )
+    cloud_available = bool(
+        CONFIG["llm"].get("ollama_cloud_host") and CONFIG["llm"].get("ollama_cloud_api_key")
+    )
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
@@ -266,6 +272,8 @@ def render_special_symbols_check_tab(session_id):
 
     with col_main:
         st.subheader("🔍 特殊特性符号检查")
+        if turbo_job_active:
+            st.info("当前任务正在以高性能模式运行，暂停/继续功能暂不可用。")
         st.markdown(
             "第1步：重要！在右侧文件列表清空上一轮任务的文件（可保留分析结果）。  \n"
             "第2步：上传基准文件与待检查文件，一次可上传多份文件。  \n"
@@ -288,11 +296,23 @@ def render_special_symbols_check_tab(session_id):
                 handle_file_upload(files_exam, inspected_dir)
                 st.success(f"已上传 {len(files_exam)} 个待检查文件")
 
-        # Start / Stop / Demo buttons
-        btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
+        # Start / Pause / Demo buttons
+        btn_col1, btn_col_pause, btn_col2 = st.columns([1, 1, 1])
         with btn_col1:
             start_disabled = (not backend_ready) or job_running
-            if st.button("开始", key=f"special_symbols_start_button_{session_id}", disabled=start_disabled):
+            turbo_state_key = f"special_symbols_turbo_mode_{session_id}"
+            start_clicked = st.button(
+                "开始", key=f"special_symbols_start_button_{session_id}", disabled=start_disabled
+            )
+            turbo_checkbox = st.checkbox(
+                "高性能模式",
+                key=turbo_state_key,
+                help="启用后使用云端 Ollama 并行处理以加速符号提取。",
+                disabled=job_running or (not cloud_available),
+            )
+            if not cloud_available:
+                st.caption("需配置云端 Ollama 才能启用高性能模式。")
+            if start_clicked:
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法启动特殊特性符号检查。")
                 else:
@@ -319,7 +339,10 @@ def render_special_symbols_check_tab(session_id):
                                         pass
                     except Exception:
                         pass
-                    response = backend_client.start_special_symbols_job(session_id)
+                    selected_turbo = bool(st.session_state.get(turbo_state_key, turbo_checkbox))
+                    response = backend_client.start_special_symbols_job(
+                        session_id, turbo_mode=selected_turbo
+                    )
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
                         st.success("已提交后台任务，刷新或稍后查看进度。")
@@ -332,10 +355,12 @@ def render_special_symbols_check_tab(session_id):
                             detail = str(response)
                         st.error(f"提交任务失败：{detail}")
                     
-        with btn_col_stop:
-            stop_disabled = (not backend_ready) or (not job_status) or job_paused
-            if st.button("停止", key=f"special_symbols_stop_button_{session_id}", disabled=stop_disabled):
-                if not backend_ready or backend_client is None or not job_status:
+        with btn_col_pause:
+            pause_disabled = (not backend_ready) or (not job_status) or job_paused
+            if st.button("暂停", key=f"special_symbols_pause_button_{session_id}", disabled=pause_disabled):
+                if turbo_job_active:
+                    st.info("高性能模式暂不支持暂停，请等待任务完成。")
+                elif not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
                     resp = backend_client.pause_special_symbols_job(job_status.get("job_id"))
@@ -345,17 +370,19 @@ def render_special_symbols_check_tab(session_id):
                     else:
                         st.error(f"暂停失败：{str(resp)}")
 
-            cont_disabled = (not backend_ready) or (not job_status) or (not job_paused)
-            if st.button("继续", key=f"special_symbols_continue_button_{session_id}", disabled=cont_disabled):
-                if not backend_ready or backend_client is None or not job_status:
+            resume_disabled = (not backend_ready) or (not job_status) or (not job_paused)
+            if st.button("继续", key=f"special_symbols_resume_button_{session_id}", disabled=resume_disabled):
+                if turbo_job_active:
+                    st.info("高性能模式任务不支持继续。")
+                elif not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
                     resp = backend_client.resume_special_symbols_job(job_status.get("job_id"))
                     if isinstance(resp, dict) and (resp.get("job_id") or resp.get("status") in {"running", "queued"}):
-                        st.success("已请求恢复任务。")
+                        st.success("已请求继续任务。")
                         st.rerun()
                     else:
-                        st.error(f"恢复失败：{str(resp)}")
+                        st.error(f"继续失败：{str(resp)}")
 
         with btn_col2:
             if st.button("演示", key=f"special_symbols_demo_button_{session_id}"):
@@ -441,7 +468,7 @@ def render_special_symbols_check_tab(session_id):
                     if status_value == "paused":
                         _label = "已暂停"
                     elif status_value == "stopping":
-                        _label = "停止中"
+                        _label = "暂停中"
                     else:
                         _label = status_value
                 # st.markdown(f"**任务状态：{_label}**")
@@ -520,29 +547,80 @@ def render_special_symbols_check_tab(session_id):
                 stream_events = job_status.get("stream_events")
                 if isinstance(stream_events, list) and stream_events:
                     stream_state = st.session_state.get(stream_state_key)
-                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_status.get("job_id"):
-                        stream_state = {"job_id": job_status.get("job_id"), "rendered": []}
-                    rendered_raw = stream_state.get("rendered") or []
-                    rendered_set = set()
-                    for v in rendered_raw:
-                        try:
-                            rendered_set.add(int(v))
-                        except (TypeError, ValueError):
-                            pass
+                    current_job_id = job_status.get("job_id")
+                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != current_job_id:
+                        stream_state = {"job_id": current_job_id, "messages": {}}
+                    messages_state: dict[str, dict[str, object]] = stream_state.get("messages") or {}
+
                     events_sorted = sorted(
                         [event for event in stream_events if isinstance(event, dict)],
                         key=lambda item: int(item.get("sequence") or 0),
                     )
+
+                    aggregated: list[dict[str, object]] = []
+                    aggregated_map: dict[str, dict[str, object]] = {}
+
+                    for event in events_sorted:
+                        seq = int(event.get("sequence") or 0)
+                        file_name = str(event.get("file") or event.get("file_name") or "")
+                        part = int(event.get("part") or 0)
+                        total_parts = int(event.get("total_parts") or 0)
+                        kind = str(event.get("kind") or "info")
+                        engine = str(event.get("engine") or "")
+                        timestamp = event.get("ts")
+                        key = "|".join([kind, file_name, str(part), str(total_parts)])
+
+                        entry = aggregated_map.get(key)
+                        if entry is None:
+                            entry = {
+                                "sequence": seq or len(aggregated_map) + 1,
+                                "file": file_name,
+                                "part": part,
+                                "total_parts": total_parts,
+                                "kind": kind,
+                                "engine": engine,
+                                "ts": timestamp,
+                                "text": "",
+                                "key": key,
+                            }
+                            aggregated_map[key] = entry
+                            aggregated.append(entry)
+                        else:
+                            if seq and (not entry.get("sequence") or int(entry["sequence"]) > seq):
+                                entry["sequence"] = seq
+                            if engine and not entry.get("engine"):
+                                entry["engine"] = engine
+                            if timestamp:
+                                entry["ts"] = timestamp
+
+                        chunk_text = str(event.get("text") or "")
+                        if chunk_text:
+                            previous_text = str(entry.get("text") or "")
+                            if previous_text:
+                                if chunk_text.startswith(previous_text):
+                                    entry["text"] = chunk_text
+                                elif previous_text.endswith(chunk_text):
+                                    entry["text"] = previous_text
+                                elif chunk_text in previous_text:
+                                    entry["text"] = previous_text
+                                else:
+                                    entry["text"] = previous_text + chunk_text
+                            else:
+                                entry["text"] = chunk_text
+
+                    aggregated.sort(key=lambda item: int(item.get("sequence") or 0))
+
                     with st.expander("点击查看具体进展", expanded=False):
                         current_group: tuple[str, int] | None = None
-                        for event in events_sorted:
-                            seq = int(event.get("sequence") or 0)
-                            is_new = seq not in rendered_set
-                            rendered_set.add(seq)
-                            file_name = str(event.get("file") or event.get("file_name") or "")
-                            part = int(event.get("part") or 0)
-                            total_parts = int(event.get("total_parts") or 0)
-                            kind = str(event.get("kind") or "info")
+                        for entry in aggregated:
+                            file_name = str(entry.get("file") or "")
+                            part = int(entry.get("part") or 0)
+                            total_parts = int(entry.get("total_parts") or 0)
+                            kind = str(entry.get("kind") or "info")
+                            key = str(entry.get("key") or "")
+                            message_text = str(entry.get("text") or "")
+                            timestamp = entry.get("ts")
+
                             header_key: tuple[str, int] | None = None
                             if file_name and part:
                                 header_key = (file_name, part)
@@ -552,25 +630,46 @@ def render_special_symbols_check_tab(session_id):
                                 else:
                                     st.markdown(f"**{file_name} · 第{part}段**")
                                 current_group = header_key
+
                             role = "user" if kind == "prompt" else "assistant"
-                            message_text = str(event.get("text") or "")
-                            timestamp = event.get("ts")
+                            previous = messages_state.get(key) or {}
+                            previous_text = str(previous.get("text") or "")
+
                             with st.chat_message(role):
                                 if timestamp:
                                     st.caption(str(timestamp))
+                                placeholder = st.empty()
+                                render_method = "text" if role == "user" else "write"
                                 if message_text:
-                                    if is_new:
-                                        placeholder = st.empty()
-                                        render_method = "text" if role == "user" else "write"
-                                        stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
-                                    else:
-                                        if role == "user":
-                                            st.text(message_text)
+                                    if not previous_text:
+                                        stream_text(
+                                            placeholder,
+                                            message_text,
+                                            render_method=render_method,
+                                            delay=0.02,
+                                        )
+                                    elif message_text != previous_text:
+                                        method = getattr(placeholder, render_method, None)
+                                        if callable(method):
+                                            method(message_text)
                                         else:
-                                            st.write(message_text)
+                                            placeholder.write(message_text)
+                                    else:
+                                        method = getattr(placeholder, render_method, None)
+                                        if callable(method):
+                                            method(message_text)
+                                        else:
+                                            placeholder.write(message_text)
                                 else:
-                                    st.write("(无内容)")
-                    stream_state["rendered"] = sorted(rendered_set)
+                                    placeholder.write("(无内容)")
+
+                            messages_state[key] = {
+                                "text": message_text,
+                                "ts": timestamp,
+                                "role": role,
+                            }
+
+                    stream_state["messages"] = messages_state
                     st.session_state[stream_state_key] = stream_state
                 if isinstance(logs, list) and logs:
                     expanded = status_value in {"queued", "running"}
