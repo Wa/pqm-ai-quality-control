@@ -25,6 +25,7 @@ CALL_COUNT = int(os.getenv("BISHENG_CALL_COUNT", "30"))
 TIMEOUT_SECONDS = int(os.getenv("BISHENG_TIMEOUT", "120"))
 CONNECT_TIMEOUT = float(os.getenv("BISHENG_CONNECT_TIMEOUT", "10"))
 MAX_WORKERS = int(os.getenv("BISHENG_MAX_WORKERS", "30"))
+DISPATCH_DELAY_SECONDS = float(os.getenv("BISHENG_DISPATCH_DELAY", "2"))
 DEBUG = os.getenv("BISHENG_DEBUG", "0") not in {"", "0", "false", "False"}
 
 INPUT_NODE_ID = os.getenv("BISHENG_INPUT_NODE_ID", "RetrievalQA-f0f31")
@@ -159,7 +160,11 @@ def main() -> int:
             flush=True,
         )
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(invoke_once, i + 1) for i in range(CALL_COUNT)]
+        futures = []
+        for idx in range(CALL_COUNT):
+            futures.append(executor.submit(invoke_once, idx + 1))
+            if DISPATCH_DELAY_SECONDS > 0 and idx + 1 < CALL_COUNT:
+                time.sleep(DISPATCH_DELAY_SECONDS)
         for future in concurrent.futures.as_completed(futures):
             print(future.result())
     return 0
