@@ -547,29 +547,80 @@ def render_special_symbols_check_tab(session_id):
                 stream_events = job_status.get("stream_events")
                 if isinstance(stream_events, list) and stream_events:
                     stream_state = st.session_state.get(stream_state_key)
-                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != job_status.get("job_id"):
-                        stream_state = {"job_id": job_status.get("job_id"), "rendered": []}
-                    rendered_raw = stream_state.get("rendered") or []
-                    rendered_set = set()
-                    for v in rendered_raw:
-                        try:
-                            rendered_set.add(int(v))
-                        except (TypeError, ValueError):
-                            pass
+                    current_job_id = job_status.get("job_id")
+                    if not isinstance(stream_state, dict) or stream_state.get("job_id") != current_job_id:
+                        stream_state = {"job_id": current_job_id, "messages": {}}
+                    messages_state: dict[str, dict[str, object]] = stream_state.get("messages") or {}
+
                     events_sorted = sorted(
                         [event for event in stream_events if isinstance(event, dict)],
                         key=lambda item: int(item.get("sequence") or 0),
                     )
+
+                    aggregated: list[dict[str, object]] = []
+                    aggregated_map: dict[str, dict[str, object]] = {}
+
+                    for event in events_sorted:
+                        seq = int(event.get("sequence") or 0)
+                        file_name = str(event.get("file") or event.get("file_name") or "")
+                        part = int(event.get("part") or 0)
+                        total_parts = int(event.get("total_parts") or 0)
+                        kind = str(event.get("kind") or "info")
+                        engine = str(event.get("engine") or "")
+                        timestamp = event.get("ts")
+                        key = "|".join([kind, file_name, str(part), str(total_parts)])
+
+                        entry = aggregated_map.get(key)
+                        if entry is None:
+                            entry = {
+                                "sequence": seq or len(aggregated_map) + 1,
+                                "file": file_name,
+                                "part": part,
+                                "total_parts": total_parts,
+                                "kind": kind,
+                                "engine": engine,
+                                "ts": timestamp,
+                                "text": "",
+                                "key": key,
+                            }
+                            aggregated_map[key] = entry
+                            aggregated.append(entry)
+                        else:
+                            if seq and (not entry.get("sequence") or int(entry["sequence"]) > seq):
+                                entry["sequence"] = seq
+                            if engine and not entry.get("engine"):
+                                entry["engine"] = engine
+                            if timestamp:
+                                entry["ts"] = timestamp
+
+                        chunk_text = str(event.get("text") or "")
+                        if chunk_text:
+                            previous_text = str(entry.get("text") or "")
+                            if previous_text:
+                                if chunk_text.startswith(previous_text):
+                                    entry["text"] = chunk_text
+                                elif previous_text.endswith(chunk_text):
+                                    entry["text"] = previous_text
+                                elif chunk_text in previous_text:
+                                    entry["text"] = previous_text
+                                else:
+                                    entry["text"] = previous_text + chunk_text
+                            else:
+                                entry["text"] = chunk_text
+
+                    aggregated.sort(key=lambda item: int(item.get("sequence") or 0))
+
                     with st.expander("点击查看具体进展", expanded=False):
                         current_group: tuple[str, int] | None = None
-                        for event in events_sorted:
-                            seq = int(event.get("sequence") or 0)
-                            is_new = seq not in rendered_set
-                            rendered_set.add(seq)
-                            file_name = str(event.get("file") or event.get("file_name") or "")
-                            part = int(event.get("part") or 0)
-                            total_parts = int(event.get("total_parts") or 0)
-                            kind = str(event.get("kind") or "info")
+                        for entry in aggregated:
+                            file_name = str(entry.get("file") or "")
+                            part = int(entry.get("part") or 0)
+                            total_parts = int(entry.get("total_parts") or 0)
+                            kind = str(entry.get("kind") or "info")
+                            key = str(entry.get("key") or "")
+                            message_text = str(entry.get("text") or "")
+                            timestamp = entry.get("ts")
+
                             header_key: tuple[str, int] | None = None
                             if file_name and part:
                                 header_key = (file_name, part)
@@ -579,25 +630,46 @@ def render_special_symbols_check_tab(session_id):
                                 else:
                                     st.markdown(f"**{file_name} · 第{part}段**")
                                 current_group = header_key
+
                             role = "user" if kind == "prompt" else "assistant"
-                            message_text = str(event.get("text") or "")
-                            timestamp = event.get("ts")
+                            previous = messages_state.get(key) or {}
+                            previous_text = str(previous.get("text") or "")
+
                             with st.chat_message(role):
                                 if timestamp:
                                     st.caption(str(timestamp))
+                                placeholder = st.empty()
+                                render_method = "text" if role == "user" else "write"
                                 if message_text:
-                                    if is_new:
-                                        placeholder = st.empty()
-                                        render_method = "text" if role == "user" else "write"
-                                        stream_text(placeholder, message_text, render_method=render_method, delay=0.02)
-                                    else:
-                                        if role == "user":
-                                            st.text(message_text)
+                                    if not previous_text:
+                                        stream_text(
+                                            placeholder,
+                                            message_text,
+                                            render_method=render_method,
+                                            delay=0.02,
+                                        )
+                                    elif message_text != previous_text:
+                                        method = getattr(placeholder, render_method, None)
+                                        if callable(method):
+                                            method(message_text)
                                         else:
-                                            st.write(message_text)
+                                            placeholder.write(message_text)
+                                    else:
+                                        method = getattr(placeholder, render_method, None)
+                                        if callable(method):
+                                            method(message_text)
+                                        else:
+                                            placeholder.write(message_text)
                                 else:
-                                    st.write("(无内容)")
-                    stream_state["rendered"] = sorted(rendered_set)
+                                    placeholder.write("(无内容)")
+
+                            messages_state[key] = {
+                                "text": message_text,
+                                "ts": timestamp,
+                                "role": role,
+                            }
+
+                    stream_state["messages"] = messages_state
                     st.session_state[stream_state_key] = stream_state
                 if isinstance(logs, list) and logs:
                     expanded = status_value in {"queued", "running"}
