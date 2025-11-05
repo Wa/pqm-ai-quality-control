@@ -18,7 +18,7 @@ def main() -> int:
     llm_config: dict[str, Any] = dict(CONFIG.get("llm", {}))
     api_key = llm_config.get("modelscope_api_key")
     model = llm_config.get("modelscope_model", "deepseek-ai/DeepSeek-V3.1")
-    base_url = llm_config.get("modelscope_base_url", "https://api-inference.modelscope.cn/api/v1")
+    base_url = llm_config.get("modelscope_base_url", "https://api-inference.modelscope.cn/v1")
 
     if not api_key:
         print("ModelScope API key missing in CONFIG['llm']['modelscope_api_key']", file=sys.stderr)

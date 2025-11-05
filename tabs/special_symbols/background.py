@@ -58,7 +58,7 @@ class ModelScopeClient:
         self,
         api_key: str,
         model: str,
-        base_url: str = "https://api-inference.modelscope.cn/api/v1",
+        base_url: str = "https://api-inference.modelscope.cn/v1",
         temperature: float = 0.3,
         timeout: float = 120.0,
     ) -> None:
@@ -896,7 +896,7 @@ def run_special_symbols_job(
     cloud_api_key = CONFIG["llm"].get("ollama_cloud_api_key")
     modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or CONFIG["llm"].get("modelscope_api_key")
     modelscope_model_name = CONFIG["llm"].get("modelscope_model") or "deepseek-ai/DeepSeek-V3.1"
-    modelscope_base_url = CONFIG["llm"].get("modelscope_base_url") or "https://api-inference.modelscope.cn/api/v1"
+    modelscope_base_url = CONFIG["llm"].get("modelscope_base_url") or "https://api-inference.modelscope.cn/v1"
     modelscope_client_factory: Optional[Callable[[], ModelScopeClient]] = None
 
     if standards_txt_filtered_files or exam_txt_files:

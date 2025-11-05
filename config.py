@@ -28,7 +28,7 @@ CONFIG = {
         "openai_model": "gpt-3.5-turbo",
         "modelscope_api_key": "ms-904d9f24-1285-416c-bb27-89856822d536",
         "modelscope_model": "deepseek-ai/DeepSeek-V3.1",
-        "modelscope_base_url": "https://api-inference.modelscope.cn/api/v1",
+        "modelscope_base_url": "https://api-inference.modelscope.cn/v1",
     },
     "bisheng": {
         # Bisheng workflow service defaults; can be overridden by environment variables
