@@ -337,7 +337,7 @@ def render_parameters_check_tab(session_id: str | None) -> None:
                         backend_client.pause_parameters_job(job_id)
                         st.rerun()
             with col_resume:
-                if st.button("▶️ 恢复", disabled=not job_paused, key=f"parameters_resume_{session_id}"):
+                if st.button("▶️ 继续", disabled=not job_paused, key=f"parameters_resume_{session_id}"):
                     if backend_client is not None and job_status:
                         job_id = str(job_status.get("job_id"))
                         backend_client.resume_parameters_job(job_id)

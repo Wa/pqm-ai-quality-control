@@ -277,7 +277,7 @@ def render_history_issues_avoidance_tab(session_id: str | None) -> None:
                         backend_client.pause_history_job(job_id)
                         st.rerun()
             with col_resume:
-                if st.button("▶️ 恢复", disabled=not job_paused, key=f"history_resume_{session_id}"):
+                if st.button("▶️ 继续", disabled=not job_paused, key=f"history_resume_{session_id}"):
                     if backend_client is not None and job_status:
                         job_id = str(job_status.get("job_id"))
                         backend_client.resume_history_job(job_id)
