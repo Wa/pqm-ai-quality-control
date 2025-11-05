@@ -307,7 +307,7 @@ def render_special_symbols_check_tab(session_id):
             turbo_checkbox = st.checkbox(
                 "高性能模式",
                 key=turbo_state_key,
-                help="启用后使用云端 Ollama 并行处理以加速符号提取。",
+                help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
                 disabled=job_running or (not cloud_available),
             )
             if not cloud_available:
