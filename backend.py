@@ -81,6 +81,11 @@ class EnterpriseJobRequest(BaseModel):
     session_id: str
 
 
+class SpecialSymbolsJobRequest(BaseModel):
+    session_id: str
+    turbo_mode: bool = False
+
+
 class EnterpriseJobStatus(BaseModel):
     job_id: str
     session_id: str
@@ -252,6 +257,7 @@ def _job_process_entry(
     session_id: str,
     queue: "Queue[Tuple[str, Dict[str, Any]]]",
     job_type: str,
+    runner_kwargs: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Entry point executed within a separate process for long-running jobs."""
     # Backward-compat signature retained; control_dir resolved from metadata if available.
@@ -279,6 +285,8 @@ def _job_process_entry(
         except Exception:
             return {"paused": False, "stopped": False}
 
+    runner_kwargs = dict(runner_kwargs or {})
+
     runner_def = JOB_DEFINITIONS.get(job_type)
     if not runner_def:
         publish(
@@ -292,7 +300,7 @@ def _job_process_entry(
         return
 
     try:
-        runner_def["runner"](session_id, publish, check_control=check_control)
+        runner_def["runner"](session_id, publish, check_control=check_control, **runner_kwargs)
     except Exception as error:
         publish(
             {
@@ -348,7 +356,13 @@ def _monitor_process(job_id: str, process: Process) -> None:
                 record.error = f"任务进程异常退出(code={exit_code})"
 
 
-def _start_job(job_type: str, session_id: str) -> JobRecord:
+def _start_job(
+    job_type: str,
+    session_id: str,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+    runner_kwargs: Optional[Dict[str, Any]] = None,
+) -> JobRecord:
     if job_type not in JOB_DEFINITIONS:
         raise HTTPException(status_code=404, detail="未知任务类型")
 
@@ -366,6 +380,11 @@ def _start_job(job_type: str, session_id: str) -> JobRecord:
         record.stage = "queued"
         record.message = "任务已加入队列"
         record.created_at = record.updated_at = time.time()
+        if metadata:
+            try:
+                record.metadata.update(dict(metadata))
+            except Exception:
+                record.metadata.update({})
         jobs[job_id] = record
 
     try:
@@ -376,14 +395,14 @@ def _start_job(job_type: str, session_id: str) -> JobRecord:
         with jobs_lock:
             jobs[job_id].metadata["control_dir"] = control_dir
             jobs[job_id].metadata["job_type"] = job_type
-
+        
         _ctrl_key = f"PQM_JOB_CONTROL_DIR_{job_id}"
         _prev_env = os.environ.get(_ctrl_key)
         os.environ[_ctrl_key] = control_dir
         try:
             process = Process(
                 target=_job_process_entry,
-                args=(job_id, session_id, _update_queue, job_type),
+                args=(job_id, session_id, _update_queue, job_type, dict(runner_kwargs or {})),
                 daemon=False,
             )
             process.start()
@@ -648,8 +667,14 @@ async def list_enterprise_standard_jobs(session_id: Optional[str] = None):
 
 
 @app.post("/special-symbols/jobs", response_model=EnterpriseJobStatus)
-async def start_special_symbols_job(request: EnterpriseJobRequest):
-    record = _start_job("special_symbols", request.session_id)
+async def start_special_symbols_job(request: SpecialSymbolsJobRequest):
+    turbo_mode = bool(request.turbo_mode)
+    record = _start_job(
+        "special_symbols",
+        request.session_id,
+        metadata={"turbo_mode": turbo_mode},
+        runner_kwargs={"turbo_mode": turbo_mode},
+    )
     return _record_to_status(record)
 
 
@@ -683,6 +708,8 @@ async def pause_special_symbols_job(job_id: str):
         record = jobs.get(job_id)
         if not record or record.job_type != "special_symbols":
             raise HTTPException(status_code=404, detail="未找到任务")
+        if record.metadata.get("turbo_mode"):
+            raise HTTPException(status_code=400, detail="高性能模式任务不支持暂停")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持暂停")
@@ -702,6 +729,8 @@ async def resume_special_symbols_job(job_id: str):
         record = jobs.get(job_id)
         if not record or record.job_type != "special_symbols":
             raise HTTPException(status_code=404, detail="未找到任务")
+        if record.metadata.get("turbo_mode"):
+            raise HTTPException(status_code=400, detail="高性能模式任务不支持恢复")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持恢复")
@@ -723,6 +752,8 @@ async def stop_special_symbols_job(job_id: str):
         record = jobs.get(job_id)
         if not record or record.job_type != "special_symbols":
             raise HTTPException(status_code=404, detail="未找到任务")
+        if record.metadata.get("turbo_mode"):
+            raise HTTPException(status_code=400, detail="高性能模式任务不支持停止")
         control_dir = record.metadata.get("control_dir")
         if not control_dir:
             raise HTTPException(status_code=400, detail="任务不支持停止")

@@ -76,6 +76,12 @@ def render_special_symbols_check_tab(session_id):
     status_str = str(job_status.get("status")) if job_status else ""
     job_running = bool(job_status and status_str in {"queued", "running"})
     job_paused = bool(job_status and status_str == "paused")
+    turbo_job_active = bool(
+        job_status and isinstance(job_status.get("metadata"), dict) and job_status["metadata"].get("turbo_mode")
+    )
+    cloud_available = bool(
+        CONFIG["llm"].get("ollama_cloud_host") and CONFIG["llm"].get("ollama_cloud_api_key")
+    )
 
     # Layout: right column for info, left for main content
     col_main, col_info = st.columns([2, 1])
@@ -266,6 +272,8 @@ def render_special_symbols_check_tab(session_id):
 
     with col_main:
         st.subheader("🔍 特殊特性符号检查")
+        if turbo_job_active:
+            st.info("当前任务正在以高性能模式运行，暂停/停止功能暂不可用。")
         st.markdown(
             "第1步：重要！在右侧文件列表清空上一轮任务的文件（可保留分析结果）。  \n"
             "第2步：上传基准文件与待检查文件，一次可上传多份文件。  \n"
@@ -292,7 +300,19 @@ def render_special_symbols_check_tab(session_id):
         btn_col1, btn_col_stop, btn_col2 = st.columns([1, 1, 1])
         with btn_col1:
             start_disabled = (not backend_ready) or job_running
-            if st.button("开始", key=f"special_symbols_start_button_{session_id}", disabled=start_disabled):
+            turbo_state_key = f"special_symbols_turbo_mode_{session_id}"
+            start_clicked = st.button(
+                "开始", key=f"special_symbols_start_button_{session_id}", disabled=start_disabled
+            )
+            turbo_checkbox = st.checkbox(
+                "高性能模式",
+                key=turbo_state_key,
+                help="启用后使用云端 Ollama 并行处理以加速符号提取。",
+                disabled=job_running or (not cloud_available),
+            )
+            if not cloud_available:
+                st.caption("需配置云端 Ollama 才能启用高性能模式。")
+            if start_clicked:
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法启动特殊特性符号检查。")
                 else:
@@ -319,7 +339,10 @@ def render_special_symbols_check_tab(session_id):
                                         pass
                     except Exception:
                         pass
-                    response = backend_client.start_special_symbols_job(session_id)
+                    selected_turbo = bool(st.session_state.get(turbo_state_key, turbo_checkbox))
+                    response = backend_client.start_special_symbols_job(
+                        session_id, turbo_mode=selected_turbo
+                    )
                     if isinstance(response, dict) and response.get("job_id"):
                         st.session_state[job_state_key] = response["job_id"]
                         st.success("已提交后台任务，刷新或稍后查看进度。")
@@ -335,7 +358,9 @@ def render_special_symbols_check_tab(session_id):
         with btn_col_stop:
             stop_disabled = (not backend_ready) or (not job_status) or job_paused
             if st.button("停止", key=f"special_symbols_stop_button_{session_id}", disabled=stop_disabled):
-                if not backend_ready or backend_client is None or not job_status:
+                if turbo_job_active:
+                    st.info("高性能模式暂不支持暂停，请等待任务完成。")
+                elif not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
                     resp = backend_client.pause_special_symbols_job(job_status.get("job_id"))
@@ -347,7 +372,9 @@ def render_special_symbols_check_tab(session_id):
 
             cont_disabled = (not backend_ready) or (not job_status) or (not job_paused)
             if st.button("继续", key=f"special_symbols_continue_button_{session_id}", disabled=cont_disabled):
-                if not backend_ready or backend_client is None or not job_status:
+                if turbo_job_active:
+                    st.info("高性能模式任务不支持恢复。")
+                elif not backend_ready or backend_client is None or not job_status:
                     st.error("后台服务不可用或暂无任务。")
                 else:
                     resp = backend_client.resume_special_symbols_job(job_status.get("job_id"))

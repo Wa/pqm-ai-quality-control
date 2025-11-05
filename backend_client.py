@@ -114,10 +114,10 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def start_special_symbols_job(self, session_id: str) -> Dict:
+    def start_special_symbols_job(self, session_id: str, turbo_mode: bool = False) -> Dict:
         """Start a special symbols check job."""
         try:
-            payload = {"session_id": session_id}
+            payload = {"session_id": session_id, "turbo_mode": bool(turbo_mode)}
             response = requests.post(f"{self.base_url}/special-symbols/jobs", json=payload)
             return response.json()
         except Exception as e:
