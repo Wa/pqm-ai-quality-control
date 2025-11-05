@@ -13,6 +13,7 @@ from .evaluator import (
     ElementEvaluation,
     EvaluationOrchestrator,
     EvaluationResult,
+    auto_convert_sources,
     parse_deliverable_stub,
     save_result_payload,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "ElementEvaluation",
     "EvaluationOrchestrator",
     "EvaluationResult",
+    "auto_convert_sources",
     "parse_deliverable_stub",
     "save_result_payload",
 ]
