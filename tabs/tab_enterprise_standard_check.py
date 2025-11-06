@@ -80,8 +80,7 @@ def render_enterprise_standard_check_tab(session_id):
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
-        # Right column intentionally limited to file manager and utilities only
-        # File manager utilities (mirroring completeness tab behavior)
+        st.subheader("📁 文件管理")
         def get_file_list(folder):
             if not folder or not os.path.exists(folder):
                 return []

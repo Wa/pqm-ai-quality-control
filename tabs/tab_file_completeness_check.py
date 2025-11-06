@@ -309,15 +309,6 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
         st.warning("请先登录以使用此功能。")
         return
 
-    st.subheader("📁 文件齐套性检查")
-    st.markdown(
-        "第1步：重要！在右边文件列表处清空上次任务的文件（不需要清空分析结果）。  \n"
-        "第2步：上传每个阶段的文件。  \n"
-        "第3步：点击开始，AI会根据预设的清单检查并输出结果。  \n"
-        "第4步：在右边文件列表处下载结果。  \n"
-        "审核时间取决于文件数量和长度，一般在1分钟到10分钟之间。"
-    )
-
     uploads_root = str(CONFIG["directories"]["uploads"])
     base_dirs: Dict[str, object] = {}
     for stage_name in STAGE_ORDER:
@@ -407,6 +398,7 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
+        st.subheader("📁 文件管理")
         tab_labels = list(STAGE_ORDER) + ["分析结果"]
         tabs = st.tabs(tab_labels)
         for idx, stage_name in enumerate(STAGE_ORDER):
@@ -458,6 +450,15 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
                 st.write("（暂无分析结果）")
 
     with col_main:
+
+        st.subheader("📁 文件齐套性检查")
+        st.markdown(
+            "第1步：重要！在右边文件列表处清空上次任务的文件（不需要清空分析结果）。  \n"
+            "第2步：上传每个阶段的文件。  \n"
+            "第3步：点击开始，AI会根据预设的清单检查并输出结果。  \n"
+            "第4步：在右边文件列表处下载结果。  \n"
+            "审核时间取决于文件数量和长度，一般在1分钟到10分钟之间。"
+        )
         upload_cols = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"uploader_{stage_name}_{session_id}"

@@ -36,9 +36,11 @@ if username:
     HELP = "📖 帮助文档"
     ADMIN = "🛡️ 网站管理"
 
-    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
+    # Hide Settings for non-admin users; show both Admin and Settings for admin users
+    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, HELP]
     if is_admin(username):
         tab_labels.insert(8, ADMIN)
+        tab_labels.insert(9, SETTINGS)
 
     tabs = st.tabs(tab_labels)
     idx = {label: i for i, label in enumerate(tab_labels)}
@@ -62,8 +64,9 @@ if username:
     if ADMIN in idx:
         with tabs[idx[ADMIN]]:
             render_admin_tab(session_id)
-    with tabs[idx[SETTINGS]]:
-        render_settings_tab(session_id)
+    if SETTINGS in idx:
+        with tabs[idx[SETTINGS]]:
+            render_settings_tab(session_id)
     with tabs[idx[HELP]]:
         render_help_documentation_tab(session_id)
 else:

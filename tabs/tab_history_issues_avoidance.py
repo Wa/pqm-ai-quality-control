@@ -73,8 +73,6 @@ def render_history_issues_avoidance_tab(session_id: str | None) -> None:
         st.warning("请先登录以使用此功能。")
         return
 
-    st.subheader("📋 历史问题规避")
-
     base_dirs = {"generated": str(CONFIG["directories"]["generated_files"])}
     session_dirs = ensure_session_dirs(base_dirs, session_id)
 
@@ -145,7 +143,6 @@ def render_history_issues_avoidance_tab(session_id: str | None) -> None:
 
     with col_info:
         st.subheader("📁 文件管理")
-
         col_clear1, col_clear2 = st.columns(2)
         col_clear3, col_clear4 = st.columns(2)
         clear_buttons = [col_clear1, col_clear2, col_clear3, col_clear4]
@@ -221,6 +218,7 @@ def render_history_issues_avoidance_tab(session_id: str | None) -> None:
                     )
 
     with col_main:
+        st.subheader("📋 历史问题规避")
         st.markdown(
             "第1步：在右侧文件列表中清理上一轮任务遗留的文件。  \n"
             "第2步：在下方上传本次需要处理的历史问题清单与DFMEA/PFMEA/控制计划文件。  \n"
