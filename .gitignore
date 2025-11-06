@@ -116,3 +116,6 @@ history_issues_avoidance_files/
 # Ignore root-level special symbols artifacts; keep demonstration/special_symbols_files tracked
 /special_symbols_files/
 
+# Restart signal file
+.restart_signal
+

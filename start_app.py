@@ -122,6 +122,21 @@ def start_frontend():
         return None, False
 
 
+def check_restart_signal():
+    """Check if restart signal file exists and remove it.
+    Returns True if restart signal was detected, False otherwise.
+    """
+    restart_file = Path(__file__).parent / ".restart_signal"
+    if restart_file.exists():
+        try:
+            restart_file.unlink()  # Delete the signal file
+            return True
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to delete restart signal file: {e}")
+            return True  # Still return True to trigger restart
+    return False
+
+
 def main():
     """Main startup function"""
     print("🎯 PQM AI Application Startup")
@@ -157,6 +172,49 @@ def main():
         # Keep both services healthy
         while True:
             time.sleep(1)
+
+            # Check for restart signal
+            if check_restart_signal():
+                print("\n🔄 Restart signal detected. Restarting services...")
+                # Gracefully stop services we started
+                if backend_process:
+                    try:
+                        backend_process.terminate()
+                        backend_process.wait(timeout=5)
+                        print("✅ Backend stopped")
+                    except subprocess.TimeoutExpired:
+                        backend_process.kill()
+                        print("⚠️ Backend force-killed")
+                    except Exception as e:
+                        print(f"⚠️ Error stopping backend: {e}")
+                
+                if frontend_process:
+                    try:
+                        frontend_process.terminate()
+                        frontend_process.wait(timeout=5)
+                        print("✅ Frontend stopped")
+                    except subprocess.TimeoutExpired:
+                        frontend_process.kill()
+                        print("⚠️ Frontend force-killed")
+                    except Exception as e:
+                        print(f"⚠️ Error stopping frontend: {e}")
+                
+                # Wait a moment for ports to be released
+                time.sleep(1)
+                
+                # Restart services
+                backend_process_new, backend_existing_new = start_backend()
+                frontend_process_new, frontend_existing_new = start_frontend()
+                
+                if backend_process_new or backend_existing_new:
+                    if frontend_process_new or frontend_existing_new:
+                        backend_process = backend_process_new
+                        frontend_process = frontend_process_new
+                        print("✅ Services restarted successfully!")
+                        continue
+                
+                print("❌ Restart failed. Exiting.")
+                break
 
             # Monitor backend: if we started it, prefer process; otherwise health
             if backend_process is not None:
