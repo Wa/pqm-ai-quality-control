@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+import contextlib
+import io
+import json
+import multiprocessing
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -14,6 +19,19 @@ from tabs.shared.file_conversion import (
     process_textlike_folder,
     process_archives,
 )
+
+
+def _safe_jsonable(value: Any) -> Any:
+    """Best-effort conversion of objects to JSON-serialisable forms."""
+
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        try:
+            return json.loads(json.dumps(str(value)))
+        except Exception:
+            return repr(value)
 
 
 def _safe_join(base: str, *paths: str) -> str:
@@ -114,6 +132,121 @@ def tool_http_fetch(
     return {"url": url, "status": resp.status_code, "text": text}
 
 
+def tool_web_search(
+    query: str,
+    *,
+    max_results: int = 5,
+    timeout: float = 15.0,
+) -> Dict[str, object]:
+    """Perform a lightweight DuckDuckGo instant-answer search."""
+
+    if not query or not query.strip():
+        raise ValueError("query is required")
+
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": "1",
+        "no_html": "1",
+        "t": "pqm-ai-agent",
+    }
+    url = "https://duckduckgo.com/"
+    resp = requests.get(url, params=params, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+
+    results: List[Dict[str, str]] = []
+
+    def _extract(items: List[Dict[str, object]]) -> None:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if "FirstURL" in item and "Text" in item:
+                results.append({
+                    "title": str(item.get("Text", "")),
+                    "url": str(item.get("FirstURL", "")),
+                })
+            if "Topics" in item and isinstance(item.get("Topics"), list):
+                _extract(item["Topics"])  # type: ignore[arg-type]
+
+    related = data.get("RelatedTopics") or []
+    if isinstance(related, list):
+        _extract(related)  # type: ignore[arg-type]
+
+    abstract_text = data.get("AbstractText")
+    abstract_url = data.get("AbstractURL")
+    if abstract_text and abstract_url:
+        results.insert(0, {"title": str(abstract_text), "url": str(abstract_url)})
+
+    return {
+        "query": query,
+        "results": results[: max(1, max_results)],
+        "source": "duckduckgo",
+    }
+
+
+def tool_python_exec(
+    code: str,
+    *,
+    inputs: Optional[Dict[str, Any]] = None,
+    timeout: float = 8.0,
+) -> Dict[str, object]:
+    """Execute Python code in a restricted subprocess sandbox."""
+
+    if not code or not code.strip():
+        raise ValueError("code is required")
+
+    inputs = inputs or {}
+    queue: multiprocessing.Queue = multiprocessing.Queue()
+
+    def _worker(payload: str, params: Dict[str, Any], out_queue: multiprocessing.Queue) -> None:
+        allowed_builtins = {
+            "abs": abs,
+            "min": min,
+            "max": max,
+            "sum": sum,
+            "len": len,
+            "range": range,
+            "enumerate": enumerate,
+            "sorted": sorted,
+            "round": round,
+        }
+        stdout_capture = io.StringIO()
+        locals_env: Dict[str, Any] = {"inputs": params}
+        try:
+            with contextlib.redirect_stdout(stdout_capture):
+                exec(payload, {"__builtins__": allowed_builtins}, locals_env)
+            safe_locals = {
+                key: _safe_jsonable(value)
+                for key, value in locals_env.items()
+                if not key.startswith("__")
+            }
+            out_queue.put({
+                "stdout": stdout_capture.getvalue(),
+                "locals": safe_locals,
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            out_queue.put({
+                "error": f"{type(exc).__name__}: {exc}",
+                "stdout": stdout_capture.getvalue(),
+                "traceback": traceback.format_exc(),
+            })
+
+    process = multiprocessing.Process(target=_worker, args=(code, inputs, queue), daemon=True)
+    process.start()
+    process.join(timeout)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        raise TimeoutError("Code execution timed out")
+
+    if queue.empty():
+        return {"stdout": "", "locals": {}, "warning": "no output"}
+
+    return queue.get_nowait()
+
+
 def tool_convert_to_text(session_dirs: Dict[str, str], progress_area=None) -> Dict[str, object]:
     """Convert uploaded inputs into text into examined_txt using shared converters."""
 
@@ -171,6 +304,8 @@ __all__ = [
     "tool_filesystem",
     "tool_http_fetch",
     "tool_convert_to_text",
+    "tool_web_search",
+    "tool_python_exec",
 ]
 
 

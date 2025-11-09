@@ -29,12 +29,14 @@ def _build_system_prompt() -> str:
         "按照 ReAct 风格逐步思考，但只输出严格的 JSON：\n"
         "{\n"
         "  \"thought\": \"你在想什么，中文\",\n"
-        "  \"tool\": \"filesystem|http_fetch|convert_to_text|none\",\n"
+        "  \"tool\": \"filesystem|http_fetch|convert_to_text|web_search|python_exec|none\",\n"
         "  \"input\": { \"...\": \"...\" }\n"
         "}\n"
         "- 当需要读取/写入文件时，使用 filesystem 工具，input 包含 action、path、content（写入时）。\n"
         "- 当需要从网络获取页面时，使用 http_fetch 工具，input 包含 url。\n"
         "- 当需要将已上传文件转为文本时，使用 convert_to_text 工具，input 为空对象。\n"
+        "- 当需要查找开放信息时，使用 web_search 工具，input 包含 query 与可选 max_results。\n"
+        "- 当需要运行受限的Python代码时，使用 python_exec 工具，input 包含 code、可选 inputs 与 timeout。\n"
         "- 当你认为任务已完成或已给出最终答案时，tool=none，并在 thought 中给出结论。\n"
         "- 只输出 JSON，不要输出任何非JSON字符；如失败请重试直至给出合法JSON。\n"
     )
@@ -87,7 +89,7 @@ def build_agent_graph(
             return state
         action = _safe_json_loads(reply)
         # Retry once with stricter instruction if parsing failed or tool invalid
-        allowed = {"filesystem", "http_fetch", "convert_to_text", "none"}
+        allowed = {"filesystem", "http_fetch", "convert_to_text", "web_search", "python_exec", "none"}
         if not action or str(action.get("tool", "")).lower() not in allowed:
             try:
                 messages = messages + [{"role": "user", "content": "只输出JSON，严格遵循字段与取值，不要其它字符。"}]
