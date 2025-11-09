@@ -1,0 +1,176 @@
+"""MCP-style tool adapters for the AI Agent (filesystem + http + conversion)."""
+from __future__ import annotations
+
+import os
+import re
+from typing import Dict, List, Optional, Tuple
+
+import requests
+
+from tabs.shared.file_conversion import (
+    process_pdf_folder,
+    process_word_ppt_folder,
+    process_excel_folder,
+    process_textlike_folder,
+    process_archives,
+)
+
+
+def _safe_join(base: str, *paths: str) -> str:
+    base_abs = os.path.abspath(base)
+    candidate = os.path.abspath(os.path.join(base_abs, *paths))
+    if not candidate.startswith(base_abs + os.sep) and candidate != base_abs:
+        raise PermissionError("Path escapes base directory")
+    return candidate
+
+
+def get_agent_paths(session_dirs: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "uploads_inputs": session_dirs.get("ai_agent_inputs", ""),
+        "generated_root": session_dirs.get("generated_ai_agent", ""),
+        "examined_txt": session_dirs.get("generated_ai_agent_examined_txt", ""),
+        "initial_results": session_dirs.get("generated_ai_agent_initial_results", ""),
+        "final_results": session_dirs.get("generated_ai_agent_final_results", ""),
+        "checkpoint": session_dirs.get("generated_ai_agent_checkpoint", ""),
+        "logs": session_dirs.get("generated_ai_agent_logs", ""),
+    }
+
+
+def tool_filesystem(
+    action: str,
+    path: str,
+    *,
+    session_dirs: Dict[str, str],
+    content: Optional[str] = None,
+) -> Dict[str, object]:
+    """Restricted filesystem operations under this session's ai_agent roots."""
+
+    paths = get_agent_paths(session_dirs)
+    allowed_roots = [p for p in (paths["uploads_inputs"], paths["generated_root"]) if p]
+    if not allowed_roots:
+        raise RuntimeError("AI agent directories not initialized")
+
+    # Determine root by longest prefix match
+    target = None
+    for root in sorted(allowed_roots, key=len, reverse=True):
+        if os.path.isabs(path) and os.path.abspath(path).startswith(os.path.abspath(root)):
+            target = path
+            break
+        try:
+            target = _safe_join(root, path)
+            break
+        except Exception:
+            continue
+    if not target:
+        raise PermissionError("Path not under allowed roots")
+
+    if action == "read_text":
+        with open(target, "r", encoding="utf-8", errors="ignore") as handle:
+            return {"path": target, "text": handle.read()}
+    if action == "write_text":
+        if content is None:
+            raise ValueError("content required for write_text")
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return {"path": target, "written": len(content)}
+    if action == "list":
+        if os.path.isdir(target):
+            return {
+                "path": target,
+                "files": sorted([name for name in os.listdir(target)]),
+            }
+        return {"path": target, "files": []}
+
+    raise ValueError(f"Unsupported filesystem action: {action}")
+
+
+def tool_http_fetch(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    max_bytes: int = 2_000_000,
+    allowed_domains: Optional[List[str]] = None,
+) -> Dict[str, object]:
+    """Restricted HTTP GET for planning/execution steps."""
+
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        raise ValueError("Only http/https URLs are allowed")
+    if allowed_domains:
+        import urllib.parse as _url
+
+        host = _url.urlparse(url).hostname or ""
+        if host not in set(allowed_domains):
+            raise PermissionError("Domain not allowed")
+
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.content[: max_bytes]
+    text = None
+    try:
+        text = data.decode("utf-8")
+    except Exception:
+        text = data.decode("utf-8", errors="ignore")
+    return {"url": url, "status": resp.status_code, "text": text}
+
+
+def tool_convert_to_text(session_dirs: Dict[str, str], progress_area=None) -> Dict[str, object]:
+    """Convert uploaded inputs into text into examined_txt using shared converters."""
+
+    paths = get_agent_paths(session_dirs)
+    uploads = paths["uploads_inputs"]
+    txt_dir = paths["examined_txt"]
+    os.makedirs(txt_dir, exist_ok=True)
+
+    created: List[str] = []
+    # Snapshot current uploads directory content for debugging/traceability
+    try:
+        uploads_listing = sorted(os.listdir(uploads)) if os.path.isdir(uploads) else []
+    except Exception:
+        uploads_listing = []
+    # A lightweight progress shim
+    class _Pg:
+        def info(self, msg: str) -> None:
+            if progress_area is not None:
+                try:
+                    progress_area.info(msg)
+                except Exception:
+                    pass
+        write = info
+        warning = info
+        error = info
+
+    pg = progress_area or _Pg()
+
+    created += process_pdf_folder(uploads, txt_dir, pg, annotate_sources=True)
+    created += process_word_ppt_folder(uploads, txt_dir, pg, annotate_sources=True)
+    created += process_excel_folder(uploads, txt_dir, pg, annotate_sources=True)
+    created += process_textlike_folder(uploads, txt_dir, pg) or []
+    process_archives(uploads, txt_dir, pg)
+    # Also report any pre-existing txts (from earlier runs)
+    try:
+        existing_txts = [
+            os.path.join(txt_dir, name)
+            for name in sorted(os.listdir(txt_dir))
+            if os.path.isfile(os.path.join(txt_dir, name)) and name.lower().endswith(".txt")
+        ]
+    except Exception:
+        existing_txts = []
+
+    return {
+        "uploads": uploads,
+        "uploads_files": uploads_listing,
+        "examined_txt": txt_dir,
+        "files": created,
+        "existing_txts": existing_txts,
+    }
+
+
+__all__ = [
+    "get_agent_paths",
+    "tool_filesystem",
+    "tool_http_fetch",
+    "tool_convert_to_text",
+]
+
+

@@ -52,6 +52,7 @@ Thumbs.db
 *.temp
 *.log
 temp.py
+debug_ollama_llm.py
 
 # Session directories (user uploaded files)
 CP_files/

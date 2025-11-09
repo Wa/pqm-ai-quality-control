@@ -233,6 +233,7 @@ def ensure_session_dirs(base_dirs, session_id):
                 "file_elements_check",
                 "file_completeness_check",
                 "history_issues_avoidance",
+                "ai_agent",
             ]
             for name in subfolders:
                 os.makedirs(os.path.join(generated_root, name), exist_ok=True)
@@ -241,6 +242,16 @@ def ensure_session_dirs(base_dirs, session_id):
             session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
             session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
             session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
+            # AI agent output tree
+            ai_root = os.path.join(generated_root, "ai_agent")
+            for name in ("examined_txt", "initial_results", "final_results", "checkpoint", "logs"):
+                os.makedirs(os.path.join(ai_root, name), exist_ok=True)
+            session_dirs["generated_ai_agent"] = ai_root
+            session_dirs["generated_ai_agent_examined_txt"] = os.path.join(ai_root, "examined_txt")
+            session_dirs["generated_ai_agent_initial_results"] = os.path.join(ai_root, "initial_results")
+            session_dirs["generated_ai_agent_final_results"] = os.path.join(ai_root, "final_results")
+            session_dirs["generated_ai_agent_checkpoint"] = os.path.join(ai_root, "checkpoint")
+            session_dirs["generated_ai_agent_logs"] = os.path.join(ai_root, "logs")
 
     # Ensure enterprise, special symbols, and history issue directories live under uploads/<session>/<tab>
     def _ensure_upload_subdir(key: str, *parts: str) -> None:
@@ -257,6 +268,7 @@ def ensure_session_dirs(base_dirs, session_id):
         _ensure_upload_subdir("history_dfmea", "history_issues", "dfmea")
         _ensure_upload_subdir("history_pfmea", "history_issues", "pfmea")
         _ensure_upload_subdir("history_cp", "history_issues", "cp")
+        _ensure_upload_subdir("ai_agent_inputs", "ai_agent", "inputs")
     except Exception:
         # Fail-safe: do not break callers if path operations fail
         pass

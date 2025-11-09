@@ -14,6 +14,7 @@ import requests
 from config import CONFIG
 
 from ollama import Client as OllamaClient
+from tabs.shared.modelscope_client import ModelScopeClient
 
 from util import ensure_session_dirs, resolve_ollama_host
 
@@ -51,7 +52,7 @@ GPT_OSS_PROMPT_PREFIX = (
 )
 
 
-class ModelScopeClient:
+class _ModelScopeClientLegacy:
     """Minimal HTTP client for invoking ModelScope chat completions."""
 
     def __init__(
