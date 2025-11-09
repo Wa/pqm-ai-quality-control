@@ -193,7 +193,7 @@ def render_ai_agent_tab(session_id):
                     else:
                         st.session_state[plan_key] = plan_result
                         st.session_state[plan_status_key] = "ready"
-                st.experimental_rerun()
+                st.rerun()
 
             def _ensure_plan_message() -> None:
                 current_plan = st.session_state.get(plan_key)
@@ -286,7 +286,7 @@ def render_ai_agent_tab(session_id):
                             st.session_state[plan_key] = None
                             st.session_state[plan_error_key] = None
                             st.session_state[plan_msg_idx_key] = None
-                            st.experimental_rerun()
+                            st.rerun()
                     elif plan_status in ("ready", "approved", "running", "completed") and plan_data:
                         for step in plan_data.get("plan", []):
                             if not isinstance(step, dict):
@@ -323,7 +323,7 @@ def render_ai_agent_tab(session_id):
                             disabled=execute_disabled,
                         ):
                             st.session_state[plan_status_key] = "approved"
-                            st.experimental_rerun()
+                            st.rerun()
                         if action_cols[1].button(
                             "♻️ 重新规划",
                             key=f"regen_plan_{session_id}",
@@ -334,7 +334,7 @@ def render_ai_agent_tab(session_id):
                             st.session_state[plan_key] = None
                             st.session_state[plan_error_key] = None
                             st.session_state[plan_msg_idx_key] = None
-                            st.experimental_rerun()
+                            st.rerun()
                         if plan_status == "approved":
                             st.info("计划已确认，智能体即将开始执行。")
                         elif plan_status == "running":
@@ -354,7 +354,7 @@ def render_ai_agent_tab(session_id):
                 st.session_state[plan_error_key] = None
                 st.session_state[plan_msg_idx_key] = None
                 st.session_state[last_msg_processed_key] = None
-                st.experimental_rerun()
+                st.rerun()
 
             if pending_goal and st.session_state.get(plan_status_key) == "approved" and not running:
                 st.session_state[last_msg_processed_key] = pending_goal
@@ -472,14 +472,14 @@ def render_ai_agent_tab(session_id):
                     running = False
                     plan_status = "completed"
                     _ensure_plan_message()
-                    st.experimental_rerun()
+                    st.rerun()
 
             if st.session_state.get(running_key, False):
                 if st.button("⏹️ 停止执行", use_container_width=True):
                     st.session_state[running_key] = False
                     st.session_state[plan_status_key] = "completed"
                     st.session_state[pending_key] = None
-                    st.experimental_rerun()
+                    st.rerun()
 
             with st.expander("🔍 调试信息", expanded=False):
                 for msg in st.session_state.get(debug_key, [])[-20:]:
