@@ -288,6 +288,11 @@ def render_ai_agent_tab(session_id):
             pending_goal = st.session_state.get(pending_key)
             running = st.session_state.get(running_key, False)
 
+            turbo_checkbox_key = f"turbo_mode_{session_id}"
+            if turbo_checkbox_key not in st.session_state:
+                st.session_state[turbo_checkbox_key] = False
+            turbo_enabled = st.session_state[turbo_checkbox_key]
+
             base_context = [
                 {"role": msg.get("role"), "content": msg.get("content")}
                 for msg in chat_history
@@ -479,7 +484,7 @@ def render_ai_agent_tab(session_id):
             # Turbo mode checkbox placed after chat container
             turbo_enabled = st.checkbox(
                 "高性能模式",
-                key=f"turbo_mode_{session_id}",
+                key=turbo_checkbox_key,
                 help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
             )
 
