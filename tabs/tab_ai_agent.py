@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -201,6 +202,8 @@ def render_ai_agent_tab(session_id):
                     if timestamp:
                         row.caption(f"更新于 {str(timestamp)[:19]}")
 
+        uploaded_files_list: List[str] = []
+
         with col_info:
             st.markdown("📁 文件管理")
 
@@ -224,16 +227,16 @@ def render_ai_agent_tab(session_id):
             # Show uploaded files
             try:
                 if uploads_dir and os.path.exists(uploads_dir):
-                    uploaded_files = [
+                    uploaded_files_list = [
                         f for f in os.listdir(uploads_dir)
                         if os.path.isfile(os.path.join(uploads_dir, f))
                     ]
-                    if uploaded_files:
-                        st.caption(f"已上传文件 ({len(uploaded_files)}):")
-                        for fname in uploaded_files[:5]:  # Show first 5
+                    if uploaded_files_list:
+                        st.caption(f"已上传文件 ({len(uploaded_files_list)}):")
+                        for fname in uploaded_files_list[:5]:  # Show first 5
                             st.text(f"• {fname}")
-                        if len(uploaded_files) > 5:
-                            st.caption(f"... 还有 {len(uploaded_files) - 5} 个文件")
+                        if len(uploaded_files_list) > 5:
+                            st.caption(f"... 还有 {len(uploaded_files_list) - 5} 个文件")
                     else:
                         st.caption("当前对话暂无上传文件")
             except Exception:
@@ -252,6 +255,7 @@ def render_ai_agent_tab(session_id):
             plan_msg_idx_key = _state_key("ai_agent_plan_message_idx")
             last_msg_processed_key = _state_key("last_msg_processed")
             title_key = _state_key("ai_agent_conversation_title")
+            auto_run_key = _state_key("ai_agent_auto_run")
 
             if history_key not in st.session_state:
                 st.session_state[history_key] = list(conversation_data.get("messages") or [])
@@ -271,6 +275,8 @@ def render_ai_agent_tab(session_id):
                 st.session_state[plan_error_key] = None
             if pending_key not in st.session_state:
                 st.session_state[pending_key] = None
+            if auto_run_key not in st.session_state:
+                st.session_state[auto_run_key] = False
             
             streaming_text_key = _state_key("ai_agent_streaming_text")
             if streaming_text_key not in st.session_state:
@@ -287,6 +293,7 @@ def render_ai_agent_tab(session_id):
             plan_error = st.session_state.get(plan_error_key)
             pending_goal = st.session_state.get(pending_key)
             running = st.session_state.get(running_key, False)
+            auto_run_active = st.session_state.get(auto_run_key, False)
 
             turbo_checkbox_key = f"turbo_mode_{session_id}"
             if turbo_checkbox_key not in st.session_state:
@@ -413,7 +420,16 @@ def render_ai_agent_tab(session_id):
                 # Chat input inside the container
                 user_input = st.chat_input("输入问题或任务，AI智能体会帮你完成...")
 
-            if pending_goal or plan_status in ("generating", "ready", "approved", "running", "completed", "error"):
+            show_plan_panel = (
+                not auto_run_active
+                and (
+                    pending_goal
+                    or plan_status in ("generating", "ready", "approved", "running", "completed", "error")
+                    or plan_data
+                )
+            )
+
+            if show_plan_panel:
                 with st.container():
                     st.markdown("### 🧭 执行计划")
                     if plan_status == "generating":
@@ -488,16 +504,85 @@ def render_ai_agent_tab(session_id):
                 help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
             )
 
+            def _should_auto_run(goal: str) -> bool:
+                text = (goal or "").strip()
+                if not text:
+                    return False
+                if len(text) > 120:
+                    return False
+                if "\n" in text or "\r" in text:
+                    return False
+                lowered = text.lower()
+                complex_keywords = (
+                    "analysis",
+                    "analyze",
+                    "analyse",
+                    "summarize",
+                    "summary",
+                    "plan",
+                    "workflow",
+                    "steps",
+                    "generate",
+                    "implement",
+                    "write",
+                    "code",
+                    "script",
+                    "translate",
+                    "compare",
+                    "explain",
+                    "document",
+                    "file",
+                    "pdf",
+                    "upload",
+                )
+                if any(keyword in lowered for keyword in complex_keywords):
+                    return False
+                complex_keywords_zh = (
+                    "分析",
+                    "总结",
+                    "计划",
+                    "流程",
+                    "步骤",
+                    "方案",
+                    "生成",
+                    "编写",
+                    "写",
+                    "代码",
+                    "脚本",
+                    "翻译",
+                    "比较",
+                    "解释",
+                    "报告",
+                    "文档",
+                    "文件",
+                )
+                if any(keyword in text for keyword in complex_keywords_zh):
+                    return False
+                if uploaded_files_list:
+                    return False
+                if re.search(r"[。！？!?]{2,}$", text):
+                    return False
+                return True
+
             if user_input:
                 chat_history.append({"role": "user", "content": user_input})
                 if not st.session_state.get(title_key) or st.session_state[title_key] == "新对话":
                     summary = user_input.strip().splitlines()[0][:20]
                     if summary:
                         st.session_state[title_key] = summary
+                auto_mode = _should_auto_run(user_input)
+                st.session_state[auto_run_key] = auto_mode
+                if auto_mode:
+                    assistant_note = {
+                        "role": "assistant",
+                        "content": "这个问题较为简单，我会直接处理并给出答案，无需生成详细执行计划。",
+                        "metadata": {"type": "note", "auto_run": True},
+                    }
+                    chat_history.append(assistant_note)
                 st.session_state[history_key] = chat_history
                 _persist_history(chat_history)
                 st.session_state[pending_key] = user_input
-                st.session_state[plan_status_key] = "pending"
+                st.session_state[plan_status_key] = "approved" if auto_mode else "pending"
                 st.session_state[plan_key] = None
                 st.session_state[plan_error_key] = None
                 st.session_state[plan_msg_idx_key] = None
@@ -631,11 +716,18 @@ def render_ai_agent_tab(session_id):
                     _persist_history(chat_history)
                 finally:
                     st.session_state[running_key] = False
-                    st.session_state[plan_status_key] = "completed"
                     st.session_state[pending_key] = None
+                    if st.session_state.get(auto_run_key):
+                        st.session_state[plan_status_key] = "idle"
+                        st.session_state[plan_key] = None
+                        st.session_state[plan_error_key] = None
+                        st.session_state[plan_msg_idx_key] = None
+                        st.session_state[auto_run_key] = False
+                    else:
+                        st.session_state[plan_status_key] = "completed"
+                        _ensure_plan_message()
                     running = False
-                    plan_status = "completed"
-                    _ensure_plan_message()
+                    plan_status = st.session_state.get(plan_status_key, "idle")
                     st.rerun()
 
             if st.session_state.get(running_key, False):
