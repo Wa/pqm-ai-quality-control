@@ -42,6 +42,50 @@ def _safe_join(base: str, *paths: str) -> str:
     return candidate
 
 
+def prepare_conversation_dirs(
+    session_dirs: Dict[str, str],
+    conversation_id: Optional[str],
+) -> Dict[str, str]:
+    """Return session dirs scoped to a specific conversation, creating folders if needed."""
+
+    if not conversation_id:
+        return dict(session_dirs)
+
+    conv_dirs = dict(session_dirs)
+
+    def _ensure(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    uploads_base = session_dirs.get("ai_agent_inputs")
+    if uploads_base:
+        uploads_path = os.path.join(uploads_base, conversation_id)
+        _ensure(uploads_path)
+        conv_dirs["ai_agent_inputs"] = uploads_path
+
+    generated_base = session_dirs.get("generated_ai_agent")
+    if generated_base:
+        generated_root = os.path.join(generated_base, conversation_id)
+        _ensure(generated_root)
+        conv_dirs["generated_ai_agent"] = generated_root
+        for name in ("examined_txt", "initial_results", "final_results", "checkpoint", "logs"):
+            sub_path = os.path.join(generated_root, name)
+            _ensure(sub_path)
+            conv_dirs[f"generated_ai_agent_{name}"] = sub_path
+    else:
+        for name in ("examined_txt", "initial_results", "final_results", "checkpoint", "logs"):
+            key = f"generated_ai_agent_{name}"
+            base = session_dirs.get(key)
+            if base:
+                sub_path = os.path.join(base, conversation_id)
+                _ensure(sub_path)
+                conv_dirs[key] = sub_path
+
+    return conv_dirs
+
+
 def get_agent_paths(session_dirs: Dict[str, str]) -> Dict[str, str]:
     return {
         "uploads_inputs": session_dirs.get("ai_agent_inputs", ""),
@@ -300,6 +344,7 @@ def tool_convert_to_text(session_dirs: Dict[str, str], progress_area=None) -> Di
 
 
 __all__ = [
+    "prepare_conversation_dirs",
     "get_agent_paths",
     "tool_filesystem",
     "tool_http_fetch",

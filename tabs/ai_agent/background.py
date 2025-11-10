@@ -16,6 +16,7 @@ from util import ensure_session_dirs, resolve_ollama_host
 from .graph import AgentState, build_agent_graph
 from .mcp_tools import (
     get_agent_paths,
+    prepare_conversation_dirs,
     tool_convert_to_text,
     tool_filesystem,
     tool_http_fetch,
@@ -174,6 +175,7 @@ def generate_agent_plan(
     turbo_mode: bool = False,
     primary: str = "local",
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a structured execution plan for the agent."""
 
@@ -182,6 +184,7 @@ def generate_agent_plan(
         "generated_files": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
+    session_dirs = prepare_conversation_dirs(session_dirs, conversation_id)
     paths = get_agent_paths(session_dirs)
     if paths.get("logs"):
         os.makedirs(paths["logs"], exist_ok=True)
@@ -302,6 +305,7 @@ def run_ai_agent_job(
     turbo_mode: bool = False,
     max_steps: int = 20,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run an agent session until completion or stop.
 
@@ -314,6 +318,7 @@ def run_ai_agent_job(
         "generated_files": str(CONFIG["directories"]["generated_files"]),
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
+    session_dirs = prepare_conversation_dirs(session_dirs, conversation_id)
     paths = get_agent_paths(session_dirs)
     os.makedirs(paths.get("logs", "") or ".", exist_ok=True)
     actions_log = os.path.join(paths["logs"], "actions.jsonl")

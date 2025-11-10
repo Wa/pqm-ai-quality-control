@@ -1,6 +1,9 @@
 import json
 import os
-from typing import Dict, List
+import shutil
+from datetime import datetime
+from typing import Dict, List, Optional
+from uuid import uuid4
 
 import streamlit as st
 
@@ -8,7 +11,7 @@ from config import CONFIG
 from util import ensure_session_dirs, handle_file_upload
 
 from tabs.ai_agent.background import generate_agent_plan, run_ai_agent_job
-from tabs.ai_agent.mcp_tools import get_agent_paths
+from tabs.ai_agent.mcp_tools import get_agent_paths, prepare_conversation_dirs
 
 
 def render_ai_agent_tab(session_id):
@@ -38,104 +41,234 @@ def render_ai_agent_tab(session_id):
         }
         session_dirs: Dict[str, str] = ensure_session_dirs(base_dirs, session_id)
         agent_paths = get_agent_paths(session_dirs)
-        history_file = None
+        history_dir: Optional[str] = None
         logs_dir = agent_paths.get("logs")
         if logs_dir:
             os.makedirs(logs_dir, exist_ok=True)
-            history_file = os.path.join(logs_dir, "chat_history.json")
+            history_dir = os.path.join(logs_dir, "chat_sessions")
+            os.makedirs(history_dir, exist_ok=True)
 
-        # Create main and right column layout (like other tabs)
-        col_main, col_info = st.columns([2, 1])
-        
+        def _conversation_path(conversation_id: str) -> Optional[str]:
+            if not history_dir:
+                return None
+            return os.path.join(history_dir, f"{conversation_id}.json")
+
+        def _load_conversation(conversation_id: str) -> Dict[str, object]:
+            path = _conversation_path(conversation_id)
+            if not path or not os.path.exists(path):
+                return {"id": conversation_id, "messages": [], "title": "新对话"}
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception:
+                return {"id": conversation_id, "messages": [], "title": "新对话"}
+            data.setdefault("id", conversation_id)
+            data.setdefault("messages", [])
+            data.setdefault("title", "新对话")
+            return data
+
+        def _save_conversation(
+            conversation_id: str,
+            messages: List[Dict[str, object]],
+            *,
+            title: Optional[str] = None,
+        ) -> None:
+            path = _conversation_path(conversation_id)
+            if not path:
+                return
+            now = datetime.utcnow().isoformat()
+            existing = _load_conversation(conversation_id)
+            created_at = existing.get("created_at") or now
+            payload = {
+                "id": conversation_id,
+                "title": title or existing.get("title") or "新对话",
+                "created_at": created_at,
+                "updated_at": now,
+                "messages": messages,
+            }
+            try:
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+        def _list_conversations() -> List[Dict[str, object]]:
+            items: List[Dict[str, object]] = []
+            if not history_dir or not os.path.isdir(history_dir):
+                return items
+            for name in sorted(os.listdir(history_dir)):
+                if not name.endswith(".json"):
+                    continue
+                cid = name[:-5]
+                data = _load_conversation(cid)
+                items.append(
+                    {
+                        "id": cid,
+                        "title": data.get("title") or "新对话",
+                        "created_at": data.get("created_at"),
+                        "updated_at": data.get("updated_at"),
+                    }
+                )
+            items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+            return items
+
+        def _create_conversation() -> str:
+            conversation_id = datetime.utcnow().strftime("%Y%m%d%H%M%S") + f"-{uuid4().hex[:6]}"
+            _save_conversation(conversation_id, [], title="新对话")
+            prepare_conversation_dirs(session_dirs, conversation_id)
+            return conversation_id
+
+        def _delete_conversation(conversation_id: str) -> None:
+            path = _conversation_path(conversation_id)
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            uploads_root = session_dirs.get("ai_agent_inputs", "")
+            if uploads_root:
+                shutil.rmtree(os.path.join(uploads_root, conversation_id), ignore_errors=True)
+            generated_root = session_dirs.get("generated_ai_agent", "")
+            if generated_root:
+                shutil.rmtree(os.path.join(generated_root, conversation_id), ignore_errors=True)
+            suffix = f"_{session_id}_{conversation_id}"
+            for key in list(st.session_state.keys()):
+                if key.endswith(suffix):
+                    st.session_state.pop(key, None)
+
+        conversations = _list_conversations()
+        active_key = f"ai_agent_active_conversation_{session_id}"
+
+        if not conversations:
+            new_id = _create_conversation()
+            conversations = _list_conversations()
+            st.session_state[active_key] = new_id
+
+        active_conversation_id = st.session_state.get(active_key)
+        if not active_conversation_id or all(c["id"] != active_conversation_id for c in conversations):
+            active_conversation_id = conversations[0]["id"]
+            st.session_state[active_key] = active_conversation_id
+
+        conversation_data = _load_conversation(active_conversation_id)
+
+        # Prepare per-conversation directories and paths
+        conversation_dirs = prepare_conversation_dirs(session_dirs, active_conversation_id)
+
+        def _state_key(name: str) -> str:
+            return f"{name}_{session_id}_{active_conversation_id}"
+
+        # Create chat history, main chat, and file management columns
+        col_history, col_main, col_info = st.columns([1, 2, 1])
+
+        with col_history:
+            st.subheader("🗂️ 对话历史")
+            if st.button("➕ 新建对话", use_container_width=True):
+                new_id = _create_conversation()
+                st.session_state[active_key] = new_id
+                st.rerun()
+
+            st.divider()
+
+            if not conversations:
+                st.info("暂无历史对话")
+            else:
+                for conv in conversations:
+                    is_active = conv["id"] == active_conversation_id
+                    display_title = str(conv.get("title") or "新对话").strip() or "新对话"
+                    if len(display_title) > 20:
+                        display_title = display_title[:20] + "…"
+                    prefix = "👉 " if is_active else ""
+                    row = st.container()
+                    left_col, right_col = row.columns([5, 1])
+                    if left_col.button(
+                        f"{prefix}{display_title}",
+                        key=f"select_conv_{conv['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[active_key] = conv["id"]
+                        st.rerun()
+                    if right_col.button(
+                        "🗑️",
+                        key=f"delete_conv_{conv['id']}",
+                        use_container_width=True,
+                    ):
+                        _delete_conversation(conv["id"])
+                        remaining = [c for c in conversations if c["id"] != conv["id"]]
+                        if remaining:
+                            st.session_state[active_key] = remaining[0]["id"]
+                        else:
+                            st.session_state[active_key] = _create_conversation()
+                        st.rerun()
+                    timestamp = conv.get("updated_at")
+                    if timestamp:
+                        row.caption(f"更新于 {str(timestamp)[:19]}")
+
         with col_info:
             st.subheader("📁 文件管理")
-            
-            files = st.file_uploader("上传文件", type=None, accept_multiple_files=True, key=f"file_upload_{session_id}")
-            if files:
+
+            uploads_dir = conversation_dirs.get("ai_agent_inputs", "")
+            files = st.file_uploader(
+                "上传文件",
+                type=None,
+                accept_multiple_files=True,
+                key=f"file_upload_{session_id}_{active_conversation_id}",
+            )
+            if files and uploads_dir:
                 names = tuple(sorted([f.name for f in files]))
-                state_key = f"ai_agent_last_uploaded_{session_id}"
+                state_key = _state_key("ai_agent_last_uploaded")
                 if st.session_state.get(state_key) != names:
-                    saved = handle_file_upload(files, session_dirs.get("ai_agent_inputs", ""))
+                    saved = handle_file_upload(files, uploads_dir)
                     st.session_state[state_key] = names
                     st.success(f"已保存 {saved} 个文件")
                 else:
                     st.caption(f"已保存 {len(files)} 个文件")
-            
+
             # Show uploaded files
             try:
-                uploads_dir = session_dirs.get("ai_agent_inputs", "")
                 if uploads_dir and os.path.exists(uploads_dir):
-                    uploaded_files = [f for f in os.listdir(uploads_dir) if os.path.isfile(os.path.join(uploads_dir, f))]
+                    uploaded_files = [
+                        f for f in os.listdir(uploads_dir)
+                        if os.path.isfile(os.path.join(uploads_dir, f))
+                    ]
                     if uploaded_files:
                         st.caption(f"已上传文件 ({len(uploaded_files)}):")
                         for fname in uploaded_files[:5]:  # Show first 5
                             st.text(f"• {fname}")
                         if len(uploaded_files) > 5:
                             st.caption(f"... 还有 {len(uploaded_files) - 5} 个文件")
-            except:
-                pass
-            
+                    else:
+                        st.caption("当前对话暂无上传文件")
+            except Exception:
+                st.caption("文件列表读取失败")
+
             st.divider()
-            
+
             st.subheader("⚙️ 设置")
-            
+
             # Turbo mode with tooltip (using Streamlit's built-in help parameter)
             turbo_enabled = st.checkbox(
                 "高性能模式",
                 key=f"turbo_mode_{session_id}",
-                help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。"
+                help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
             )
-            
-            st.divider()
-            
-            if st.button("🗑️ 清空对话历史", use_container_width=True):
-                history_key = f'ai_agent_chat_history_{session_id}'
-                st.session_state[history_key] = []
-                if history_file and os.path.exists(history_file):
-                    try:
-                        os.remove(history_file)
-                    except Exception:
-                        pass
-                plan_related_keys = [
-                    f"ai_agent_plan_{session_id}",
-                    f"ai_agent_plan_status_{session_id}",
-                    f"ai_agent_plan_error_{session_id}",
-                    f"ai_agent_pending_goal_{session_id}",
-                    f"ai_agent_plan_message_idx_{session_id}",
-                    f"last_msg_processed_{session_id}",
-                ]
-                for key in plan_related_keys:
-                    st.session_state.pop(key, None)
-                # Clear step tracking keys to prevent duplicates in new conversation
-                for key in list(st.session_state.keys()):
-                    if key.startswith(f"reasoning_step_") and key.endswith(f"_{session_id}"):
-                        del st.session_state[key]
-                    if key.startswith(f"tool_step_") and key.endswith(f"_{session_id}"):
-                        del st.session_state[key]
-                st.rerun()
-        
+
         with col_main:
-            history_key = f'ai_agent_chat_history_{session_id}'
-            running_key = f"ai_agent_running_{session_id}"
-            debug_key = f"ai_agent_debug_{session_id}"
-            plan_key = f"ai_agent_plan_{session_id}"
-            plan_status_key = f"ai_agent_plan_status_{session_id}"
-            plan_error_key = f"ai_agent_plan_error_{session_id}"
-            pending_key = f"ai_agent_pending_goal_{session_id}"
-            plan_msg_idx_key = f"ai_agent_plan_message_idx_{session_id}"
-            last_msg_processed_key = f"last_msg_processed_{session_id}"
+            history_key = _state_key("ai_agent_chat_history")
+            running_key = _state_key("ai_agent_running")
+            debug_key = _state_key("ai_agent_debug")
+            plan_key = _state_key("ai_agent_plan")
+            plan_status_key = _state_key("ai_agent_plan_status")
+            plan_error_key = _state_key("ai_agent_plan_error")
+            pending_key = _state_key("ai_agent_pending_goal")
+            plan_msg_idx_key = _state_key("ai_agent_plan_message_idx")
+            last_msg_processed_key = _state_key("last_msg_processed")
+            title_key = _state_key("ai_agent_conversation_title")
 
             if history_key not in st.session_state:
-                loaded: List[Dict[str, object]] = []
-                if history_file and os.path.exists(history_file):
-                    try:
-                        with open(history_file, "r", encoding="utf-8") as handle:
-                            data = json.load(handle)
-                            if isinstance(data, list):
-                                loaded = data
-                    except Exception:
-                        loaded = []
-                st.session_state[history_key] = loaded
+                st.session_state[history_key] = list(conversation_data.get("messages") or [])
+
+            if title_key not in st.session_state:
+                st.session_state[title_key] = str(conversation_data.get("title") or "新对话")
 
             if running_key not in st.session_state:
                 st.session_state[running_key] = False
@@ -153,13 +286,8 @@ def render_ai_agent_tab(session_id):
             chat_history: List[Dict[str, object]] = st.session_state[history_key]
 
             def _persist_history(history: List[Dict[str, object]]) -> None:
-                if not history_file:
-                    return
-                try:
-                    with open(history_file, "w", encoding="utf-8") as handle:
-                        json.dump(history, handle, ensure_ascii=False, indent=2)
-                except Exception:
-                    pass
+                title = st.session_state.get(title_key) or "新对话"
+                _save_conversation(active_conversation_id, history, title=title)
 
             plan_data = st.session_state.get(plan_key)
             plan_status = st.session_state.get(plan_status_key, "idle")
@@ -186,6 +314,7 @@ def render_ai_agent_tab(session_id):
                             turbo_mode=bool(turbo_enabled),
                             primary="local",
                             conversation_history=base_context,
+                            conversation_id=active_conversation_id,
                         )
                     except Exception as exc:
                         st.session_state[plan_error_key] = str(exc)
@@ -281,7 +410,7 @@ def render_ai_agent_tab(session_id):
                         st.info("智能体正在制定执行计划，请稍候…")
                     elif plan_status == "error":
                         st.error(f"规划失败：{plan_error or '未知错误'}")
-                        if st.button("重新规划", key=f"retry_plan_{session_id}", use_container_width=True):
+                        if st.button("重新规划", key=f"retry_plan_{session_id}_{active_conversation_id}", use_container_width=True):
                             st.session_state[plan_status_key] = "pending"
                             st.session_state[plan_key] = None
                             st.session_state[plan_error_key] = None
@@ -318,7 +447,7 @@ def render_ai_agent_tab(session_id):
                         action_cols = st.columns(2)
                         if action_cols[0].button(
                             "✅ 执行计划",
-                            key=f"confirm_plan_{session_id}",
+                            key=f"confirm_plan_{session_id}_{active_conversation_id}",
                             use_container_width=True,
                             disabled=execute_disabled,
                         ):
@@ -326,7 +455,7 @@ def render_ai_agent_tab(session_id):
                             st.rerun()
                         if action_cols[1].button(
                             "♻️ 重新规划",
-                            key=f"regen_plan_{session_id}",
+                            key=f"regen_plan_{session_id}_{active_conversation_id}",
                             use_container_width=True,
                             disabled=regenerate_disabled,
                         ):
@@ -346,6 +475,10 @@ def render_ai_agent_tab(session_id):
 
             if user_input:
                 chat_history.append({"role": "user", "content": user_input})
+                if not st.session_state.get(title_key) or st.session_state[title_key] == "新对话":
+                    summary = user_input.strip().splitlines()[0][:20]
+                    if summary:
+                        st.session_state[title_key] = summary
                 st.session_state[history_key] = chat_history
                 _persist_history(chat_history)
                 st.session_state[pending_key] = user_input
@@ -396,7 +529,7 @@ def render_ai_agent_tab(session_id):
                             thought = last_action.get("thought", "")
                             tool = last_action.get("tool", "")
 
-                            step_key = f"reasoning_step_{step_num}_{session_id}"
+                            step_key = f"reasoning_step_{step_num}_{session_id}_{active_conversation_id}"
                             if thought and not st.session_state.get(step_key, False):
                                 reasoning_msg = {
                                     "role": "assistant",
@@ -412,7 +545,7 @@ def render_ai_agent_tab(session_id):
                                 st.session_state[step_key] = True
                                 _persist_history(chat_history)
 
-                                tool_step_key = f"tool_step_{step_num}_{tool}_{session_id}"
+                                tool_step_key = f"tool_step_{step_num}_{tool}_{session_id}_{active_conversation_id}"
                                 if tool and tool != "none" and not st.session_state.get(tool_step_key, False):
                                     tool_msg = {
                                         "role": "assistant",
@@ -442,6 +575,7 @@ def render_ai_agent_tab(session_id):
                         turbo_mode=bool(turbo_enabled),
                         max_steps=20,
                         conversation_history=conversation_context,
+                        conversation_id=active_conversation_id,
                     )
 
                     final_list = res.get("final_results") or []
@@ -475,7 +609,11 @@ def render_ai_agent_tab(session_id):
                     st.rerun()
 
             if st.session_state.get(running_key, False):
-                if st.button("⏹️ 停止执行", use_container_width=True):
+                if st.button(
+                    "⏹️ 停止执行",
+                    key=f"stop_agent_{session_id}_{active_conversation_id}",
+                    use_container_width=True,
+                ):
                     st.session_state[running_key] = False
                     st.session_state[plan_status_key] = "completed"
                     st.session_state[pending_key] = None
