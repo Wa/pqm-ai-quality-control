@@ -21,8 +21,6 @@ def render_ai_agent_tab(session_id):
         return
 
     with st.container(key="ai_agent_root"):
-        st.subheader("🤖 AI智能体")
-
         # Ensure the global chat input is visible (other tabs may hide it via CSS)
         st.markdown(
             """
@@ -161,7 +159,7 @@ def render_ai_agent_tab(session_id):
         col_history, col_main, col_info = st.columns([1, 2, 1])
 
         with col_history:
-            st.subheader("🗂️ 对话历史")
+            st.markdown("🗂️ 对话历史")
             if st.button("➕ 新建对话", use_container_width=True):
                 new_id = _create_conversation()
                 st.session_state[active_key] = new_id
@@ -204,7 +202,7 @@ def render_ai_agent_tab(session_id):
                         row.caption(f"更新于 {str(timestamp)[:19]}")
 
         with col_info:
-            st.subheader("📁 文件管理")
+            st.markdown("📁 文件管理")
 
             uploads_dir = conversation_dirs.get("ai_agent_inputs", "")
             files = st.file_uploader(
@@ -241,18 +239,9 @@ def render_ai_agent_tab(session_id):
             except Exception:
                 st.caption("文件列表读取失败")
 
-            st.divider()
-
-            st.subheader("⚙️ 设置")
-
-            # Turbo mode with tooltip (using Streamlit's built-in help parameter)
-            turbo_enabled = st.checkbox(
-                "高性能模式",
-                key=f"turbo_mode_{session_id}",
-                help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
-            )
-
         with col_main:
+            st.subheader("🤖 AI智能体")
+            
             history_key = _state_key("ai_agent_chat_history")
             running_key = _state_key("ai_agent_running")
             debug_key = _state_key("ai_agent_debug")
@@ -282,6 +271,10 @@ def render_ai_agent_tab(session_id):
                 st.session_state[plan_error_key] = None
             if pending_key not in st.session_state:
                 st.session_state[pending_key] = None
+            
+            streaming_text_key = _state_key("ai_agent_streaming_text")
+            if streaming_text_key not in st.session_state:
+                st.session_state[streaming_text_key] = ""
 
             chat_history: List[Dict[str, object]] = st.session_state[history_key]
 
@@ -384,24 +377,36 @@ def render_ai_agent_tab(session_id):
                 and msg.get("metadata", {}).get("type") not in ("reasoning", "tool_use")
             ]
 
-            for msg in chat_history:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                metadata = msg.get("metadata", {})
+            # Create boxed chat container
+            chat_container = st.container(height=500)
+            
+            with chat_container:
+                for msg in chat_history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    metadata = msg.get("metadata", {})
 
-                with st.chat_message(role):
-                    if role == "assistant" and metadata.get("type") == "reasoning":
-                        with st.expander(f"💭 思考过程 (步骤 {metadata.get('step', '?')})", expanded=False):
-                            st.json(metadata.get("action", {}))
-                        st.write(content)
-                    elif role == "assistant" and metadata.get("type") == "tool_use":
-                        tool_name = metadata.get("tool", "unknown")
-                        st.caption(f"🔧 使用工具: {tool_name}")
-                        with st.expander("查看详情", expanded=False):
-                            st.json(metadata.get("result", {}))
-                        st.write(content)
-                    else:
-                        st.write(content)
+                    with st.chat_message(role):
+                        if role == "assistant" and metadata.get("type") == "reasoning":
+                            with st.expander(f"💭 思考过程 (步骤 {metadata.get('step', '?')})", expanded=False):
+                                st.json(metadata.get("action", {}))
+                            st.write(content)
+                        elif role == "assistant" and metadata.get("type") == "tool_use":
+                            tool_name = metadata.get("tool", "unknown")
+                            st.caption(f"🔧 使用工具: {tool_name}")
+                            with st.expander("查看详情", expanded=False):
+                                st.json(metadata.get("result", {}))
+                            st.write(content)
+                        else:
+                            st.write(content)
+                
+                # Show streaming text if available
+                if st.session_state.get(streaming_text_key):
+                    with st.chat_message("assistant"):
+                        st.write(st.session_state[streaming_text_key])
+                
+                # Chat input inside the container
+                user_input = st.chat_input("输入问题或任务，AI智能体会帮你完成...")
 
             if pending_goal or plan_status in ("generating", "ready", "approved", "running", "completed", "error"):
                 with st.container():
@@ -471,7 +476,12 @@ def render_ai_agent_tab(session_id):
                         elif plan_status == "completed":
                             st.success("计划执行完成，欢迎继续提问。")
 
-            user_input = st.chat_input("输入问题或任务，AI智能体会帮你完成...")
+            # Turbo mode checkbox placed after chat container
+            turbo_enabled = st.checkbox(
+                "高性能模式",
+                key=f"turbo_mode_{session_id}",
+                help="用阿里云服务器，速度提升10倍以上，涉密文件勿勾选此模式。",
+            )
 
             if user_input:
                 chat_history.append({"role": "user", "content": user_input})
@@ -487,6 +497,7 @@ def render_ai_agent_tab(session_id):
                 st.session_state[plan_error_key] = None
                 st.session_state[plan_msg_idx_key] = None
                 st.session_state[last_msg_processed_key] = None
+                st.session_state[streaming_text_key] = ""
                 st.rerun()
 
             if pending_goal and st.session_state.get(plan_status_key) == "approved" and not running:
@@ -498,13 +509,24 @@ def render_ai_agent_tab(session_id):
                 _ensure_plan_message()
 
                 assistant_msg_placeholder = None
+                streaming_placeholder = None
 
                 def _publish(event: Dict[str, object]) -> None:
-                    nonlocal assistant_msg_placeholder
+                    nonlocal assistant_msg_placeholder, streaming_placeholder
 
                     kind = event.get("status") or (event.get("stream") and (event["stream"].get("kind")))
                     stage = event.get("stage", "")
                     message = event.get("message", "")
+
+                    # Handle streaming chunks
+                    if "stream_chunk" in event:
+                        if streaming_placeholder is None:
+                            streaming_placeholder = st.chat_message("assistant").empty()
+                        current_text = st.session_state.get(streaming_text_key, "")
+                        current_text += event["stream_chunk"]
+                        st.session_state[streaming_text_key] = current_text
+                        streaming_placeholder.write(current_text)
+                        return
 
                     if kind == "running":
                         if stage == "initializing":
@@ -581,6 +603,8 @@ def render_ai_agent_tab(session_id):
                     final_list = res.get("final_results") or []
                     final_text = final_list[0] if final_list else "任务已完成，但没有返回结果。"
 
+                    # Clear streaming text and add final message
+                    st.session_state[streaming_text_key] = ""
                     final_msg = {
                         "role": "assistant",
                         "content": final_text,
@@ -591,6 +615,7 @@ def render_ai_agent_tab(session_id):
                     _persist_history(chat_history)
 
                 except Exception as e:
+                    st.session_state[streaming_text_key] = ""
                     error_msg = {
                         "role": "assistant",
                         "content": f"❌ 执行出错: {str(e)}",

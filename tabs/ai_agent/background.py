@@ -141,6 +141,9 @@ def _make_chat_completion(
                         )
                         if piece:
                             response_text += piece
+                            # Publish streaming chunk for UI updates
+                            if publish:
+                                publish({"stream_chunk": piece})
                     if response_text and response_text.strip():
                         _emit("llm_call", f"✓ 成功调用 {label}，返回文本长度: {len(response_text)}")
                         return response_text
