@@ -229,6 +229,41 @@ def tool_web_search(
     }
 
 
+def _python_exec_worker(payload: str, params: Dict[str, Any], out_queue: multiprocessing.Queue) -> None:
+    """Worker function for python_exec - must be at module level for pickling."""
+    allowed_builtins = {
+        "abs": abs,
+        "min": min,
+        "max": max,
+        "sum": sum,
+        "len": len,
+        "range": range,
+        "enumerate": enumerate,
+        "sorted": sorted,
+        "round": round,
+    }
+    stdout_capture = io.StringIO()
+    locals_env: Dict[str, Any] = {"inputs": params}
+    try:
+        with contextlib.redirect_stdout(stdout_capture):
+            exec(payload, {"__builtins__": allowed_builtins}, locals_env)
+        safe_locals = {
+            key: _safe_jsonable(value)
+            for key, value in locals_env.items()
+            if not key.startswith("__")
+        }
+        out_queue.put({
+            "stdout": stdout_capture.getvalue(),
+            "locals": safe_locals,
+        })
+    except Exception as exc:  # pragma: no cover - defensive
+        out_queue.put({
+            "error": f"{type(exc).__name__}: {exc}",
+            "stdout": stdout_capture.getvalue(),
+            "traceback": traceback.format_exc(),
+        })
+
+
 def tool_python_exec(
     code: str,
     *,
@@ -243,40 +278,7 @@ def tool_python_exec(
     inputs = inputs or {}
     queue: multiprocessing.Queue = multiprocessing.Queue()
 
-    def _worker(payload: str, params: Dict[str, Any], out_queue: multiprocessing.Queue) -> None:
-        allowed_builtins = {
-            "abs": abs,
-            "min": min,
-            "max": max,
-            "sum": sum,
-            "len": len,
-            "range": range,
-            "enumerate": enumerate,
-            "sorted": sorted,
-            "round": round,
-        }
-        stdout_capture = io.StringIO()
-        locals_env: Dict[str, Any] = {"inputs": params}
-        try:
-            with contextlib.redirect_stdout(stdout_capture):
-                exec(payload, {"__builtins__": allowed_builtins}, locals_env)
-            safe_locals = {
-                key: _safe_jsonable(value)
-                for key, value in locals_env.items()
-                if not key.startswith("__")
-            }
-            out_queue.put({
-                "stdout": stdout_capture.getvalue(),
-                "locals": safe_locals,
-            })
-        except Exception as exc:  # pragma: no cover - defensive
-            out_queue.put({
-                "error": f"{type(exc).__name__}: {exc}",
-                "stdout": stdout_capture.getvalue(),
-                "traceback": traceback.format_exc(),
-            })
-
-    process = multiprocessing.Process(target=_worker, args=(code, inputs, queue), daemon=True)
+    process = multiprocessing.Process(target=_python_exec_worker, args=(code, inputs, queue), daemon=True)
     process.start()
     process.join(timeout)
 

@@ -78,38 +78,60 @@ def build_agent_graph(
         try:
             reply = chat_completion(messages)
             # Log successful reply (truncated for debugging)
+            print(f"[DEBUG graph] node_plan step={state.step}: 收到LLM回复，长度={len(reply) if reply else 0}")
+            if reply:
+                print(f"[DEBUG graph] node_plan step={state.step}: 回复前500字符: {reply[:500]}")
             if not reply or not reply.strip():
+                print(f"[DEBUG graph] node_plan step={state.step}: 回复为空或仅空白")
                 state.error = f"步骤 {state.step}: LLM返回了空响应"
                 state.done = True
                 return state
         except Exception as error:
             error_msg = str(error)[:500]
+            print(f"[DEBUG graph] node_plan step={state.step}: LLM调用异常: {type(error).__name__}: {error_msg}")
+            import traceback
+            print(f"[DEBUG graph] node_plan step={state.step}: 异常堆栈: {traceback.format_exc()[:500]}")
             state.error = f"步骤 {state.step}: LLM调用失败: {error_msg}"
             state.done = True
             return state
+        print(f"[DEBUG graph] node_plan step={state.step}: 开始解析JSON，回复长度={len(reply)}")
         action = _safe_json_loads(reply)
+        print(f"[DEBUG graph] node_plan step={state.step}: JSON解析结果: {action}")
         # Retry once with stricter instruction if parsing failed or tool invalid
         allowed = {"filesystem", "http_fetch", "convert_to_text", "web_search", "python_exec", "none"}
-        if not action or str(action.get("tool", "")).lower() not in allowed:
+        tool_name = str(action.get("tool", "")).lower() if action else None
+        print(f"[DEBUG graph] node_plan step={state.step}: 工具名称={tool_name}, 是否允许={tool_name in allowed if tool_name else False}")
+        if not action or tool_name not in allowed:
+            print(f"[DEBUG graph] node_plan step={state.step}: JSON解析失败或工具无效，开始重试")
             try:
                 messages = messages + [{"role": "user", "content": "只输出JSON，严格遵循字段与取值，不要其它字符。"}]
                 reply = chat_completion(messages)
+                print(f"[DEBUG graph] node_plan step={state.step}: 重试收到回复，长度={len(reply) if reply else 0}")
+                if reply:
+                    print(f"[DEBUG graph] node_plan step={state.step}: 重试回复前500字符: {reply[:500]}")
                 if not reply or not reply.strip():
+                    print(f"[DEBUG graph] node_plan step={state.step}: 重试回复为空")
                     state.error = f"步骤 {state.step}: LLM重试返回了空响应"
                     state.done = True
                     return state
             except Exception as error:
+                print(f"[DEBUG graph] node_plan step={state.step}: 重试调用异常: {type(error).__name__}: {str(error)[:500]}")
                 state.error = f"步骤 {state.step}: LLM重试调用失败: {str(error)[:500]}"
                 state.done = True
                 return state
             action = _safe_json_loads(reply)
+            print(f"[DEBUG graph] node_plan step={state.step}: 重试后JSON解析结果: {action}")
         # If still invalid after retry, set error state instead of falling back
-        if not action or str(action.get("tool", "")).lower() not in allowed:
-            state.error = f"步骤 {state.step}: LLM返回了无效的JSON或工具名称。工具: {action.get('tool') if action else 'None'}, 原始回复前200字符: {reply[:200]}"
+        final_tool = str(action.get("tool", "")).lower() if action else None
+        if not action or final_tool not in allowed:
+            error_detail = f"工具: {action.get('tool') if action else 'None'}, 原始回复前500字符: {reply[:500] if reply else '(无回复)'}"
+            print(f"[DEBUG graph] node_plan step={state.step}: 最终验证失败: {error_detail}")
+            state.error = f"步骤 {state.step}: LLM返回了无效的JSON或工具名称。{error_detail}"
             state.done = True
             return state
         # Use the parsed action (or fallback to none if somehow still invalid)
         action = action or {"tool": "none", "thought": reply[:500] if reply else "无响应", "input": {}}
+        print(f"[DEBUG graph] node_plan step={state.step}: 最终action设置: tool={action.get('tool')}, thought长度={len(str(action.get('thought', '')))}")
         state.last_action = action
         return state
 
