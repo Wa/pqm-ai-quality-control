@@ -34,6 +34,16 @@ def _extract_message_text(resp: Dict[str, Any]) -> str:
     )
 
 
+def _extract_tool_calls_from_chunk(chunk) -> Optional[List[Dict[str, Any]]]:
+    """Extract tool_calls from a ChatResponse chunk if available."""
+    if not hasattr(chunk, 'message'):
+        return None
+    message_obj = chunk.message
+    if not hasattr(message_obj, 'tool_calls') or not message_obj.tool_calls:
+        return None
+    return message_obj.tool_calls
+
+
 def _parse_json_block(text: str) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(text)
@@ -103,6 +113,15 @@ def _make_chat_completion(
         last_empty_response_label: Optional[str] = None
 
         _emit("llm_call", f"开始尝试LLM调用，提供商序列: {[label for label, _, _, _ in provider_sequence]}")
+        
+        # Debug: Log message structure
+        _emit("llm_call", f"[DEBUG] 消息总数: {len(messages)}")
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = str(msg.get("content", ""))
+            content_preview = content[:200] + ("..." if len(content) > 200 else "")
+            has_web_search = "web_search" in content.lower() or "搜索" in content or "search" in content.lower()
+            _emit("llm_call", f"[DEBUG] 消息[{i}] role={role}, len={len(content)}, has_web_search={has_web_search}, preview={content_preview}")
 
         for label, factory, model, engine in provider_sequence:
             _emit("llm_call", f"尝试提供商: {label} (模型: {model}, 引擎: {engine})")
@@ -127,27 +146,294 @@ def _make_chat_completion(
                     last_empty_response_label = label
                 else:
                     _emit("llm_call", f"调用 {label} (流式)...")
+                    _emit("llm_call", f"[DEBUG] {label} 开始流式调用，模型={model}, 消息数={len(messages)}")
                     response_text = ""
-                    for chunk in client.chat(
-                        model=model,
-                        messages=messages,
-                        stream=True,
-                        options={"num_ctx": 40001},
-                    ):
-                        piece = (
-                            chunk.get("message", {}).get("content")
-                            or chunk.get("response")
-                            or ""
+                    chunk_count = 0
+                    first_chunk_logged = False
+                    last_chunk_sample = None
+                    empty_chunk_count = 0
+                    non_empty_chunk_count = 0
+                    
+                    try:
+                        stream_iterator = client.chat(
+                            model=model,
+                            messages=messages,
+                            stream=True,
+                            options={"num_ctx": 40001},
                         )
-                        if piece:
-                            response_text += piece
-                            # Publish streaming chunk for UI updates
-                            if publish:
-                                publish({"stream_chunk": piece})
+                        _emit("llm_call", f"[DEBUG] {label} 流式迭代器已创建，开始迭代...")
+                        
+                        for chunk in stream_iterator:
+                            chunk_count += 1
+                            
+                            # Log first chunk structure in detail
+                            if not first_chunk_logged:
+                                first_chunk_logged = True
+                                chunk_type = type(chunk).__name__
+                                _emit("llm_call", f"[DEBUG] {label} 第一个chunk: type={chunk_type}")
+                                if isinstance(chunk, dict):
+                                    chunk_keys = list(chunk.keys())
+                                    _emit("llm_call", f"[DEBUG] {label} 第一个chunk键: {chunk_keys}")
+                                    # Log all key-value pairs (truncated)
+                                    for key in chunk_keys:
+                                        value = chunk[key]
+                                        value_str = str(value)
+                                        if len(value_str) > 200:
+                                            value_str = value_str[:200] + "..."
+                                        _emit("llm_call", f"[DEBUG] {label} chunk['{key}'] = {value_str}")
+                                elif hasattr(chunk, 'message'):
+                                    # ChatResponse object
+                                    _emit("llm_call", f"[DEBUG] {label} 第一个chunk是ChatResponse对象")
+                                    _emit("llm_call", f"[DEBUG] {label} ChatResponse属性: {[attr for attr in dir(chunk) if not attr.startswith('_')]}")
+                                    message_obj = chunk.message
+                                    if message_obj:
+                                        _emit("llm_call", f"[DEBUG] {label} message对象属性: {[attr for attr in dir(message_obj) if not attr.startswith('_')]}")
+                                        # Check all possible content fields
+                                        content_val = getattr(message_obj, 'content', None)
+                                        thinking_val = getattr(message_obj, 'thinking', None)
+                                        text_val = getattr(message_obj, 'text', None)
+                                        _emit("llm_call", f"[DEBUG] {label} message.content = {repr(content_val)}")
+                                        _emit("llm_call", f"[DEBUG] {label} message.thinking = {repr(thinking_val)}")
+                                        _emit("llm_call", f"[DEBUG] {label} message.text = {repr(text_val)}")
+                                        _emit("llm_call", f"[DEBUG] {label} message.role = {getattr(message_obj, 'role', 'N/A')}")
+                                        # Check if message_obj itself is a string or has other attributes
+                                        if isinstance(message_obj, str):
+                                            _emit("llm_call", f"[DEBUG] {label} message对象本身是字符串: {message_obj[:100]}")
+                                        # Try to see all attributes and their values
+                                        for attr in ['content', 'thinking', 'text', 'response', 'role', 'tool_calls']:
+                                            if hasattr(message_obj, attr):
+                                                val = getattr(message_obj, attr)
+                                                _emit("llm_call", f"[DEBUG] {label} message.{attr} = {repr(val)[:200]}")
+                                else:
+                                    chunk_str = str(chunk)
+                                    _emit("llm_call", f"[DEBUG] {label} 第一个chunk值: {chunk_str[:500]}")
+                            
+                            # Try to extract content
+                            piece = None
+                            if isinstance(chunk, dict):
+                                # Try multiple extraction methods
+                                msg_content = chunk.get("message", {}).get("content") if isinstance(chunk.get("message"), dict) else None
+                                response_val = chunk.get("response")
+                                content_val = chunk.get("content")
+                                text_val = chunk.get("text")
+                                
+                                piece = msg_content or response_val or content_val or text_val or ""
+                                
+                                # Debug: log what we found
+                                if chunk_count <= 3:  # Log first 3 chunks
+                                    _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}]: msg.content={msg_content}, response={response_val}, content={content_val}, text={text_val}, piece={piece[:50] if piece else '(empty)'}")
+                                
+                                # Check for done flag
+                                if chunk.get("done") is True:
+                                    _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 包含 done=True")
+                                
+                                last_chunk_sample = {
+                                    "chunk_num": chunk_count,
+                                    "keys": list(chunk.keys()),
+                                    "has_content": bool(piece),
+                                    "done": chunk.get("done"),
+                                }
+                            elif isinstance(chunk, str):
+                                piece = chunk
+                                if chunk_count <= 3:
+                                    _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 是字符串类型，长度={len(chunk)}, 内容={chunk[:100]}")
+                            else:
+                                # Handle ChatResponse objects from Ollama
+                                # Check if it's a ChatResponse-like object with message attribute
+                                if hasattr(chunk, 'message'):
+                                    message_obj = chunk.message
+                                    
+                                    # Try multiple ways to extract content
+                                    # 1. Try content field (standard)
+                                    if hasattr(message_obj, 'content'):
+                                        piece = message_obj.content or ""
+                                        if piece is None:
+                                            piece = ""
+                                    
+                                    # 2. If content is empty, check if thinking contains the actual response
+                                    # Some models stream to thinking field instead of content
+                                    if not piece and hasattr(message_obj, 'thinking'):
+                                        thinking_val = message_obj.thinking or ""
+                                        if thinking_val:
+                                            # For some models, thinking might be the actual response stream
+                                            piece = thinking_val
+                                            if chunk_count <= 3:
+                                                _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 使用thinking字段作为内容: {repr(piece[:50])}")
+                                    
+                                    # 3. Try other possible fields
+                                    if not piece:
+                                        for field_name in ['text', 'response', 'output']:
+                                            if hasattr(message_obj, field_name):
+                                                field_val = getattr(message_obj, field_name)
+                                                if field_val:
+                                                    piece = str(field_val)
+                                                    if chunk_count <= 3:
+                                                        _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 使用{field_name}字段作为内容: {repr(piece[:50])}")
+                                                    break
+                                    
+                                    if chunk_count <= 3:
+                                        content_val = getattr(message_obj, 'content', None) if hasattr(message_obj, 'content') else None
+                                        thinking_val = getattr(message_obj, 'thinking', None) if hasattr(message_obj, 'thinking') else None
+                                        _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] ChatResponse: content={repr(content_val)}, thinking={repr(thinking_val)}, piece={repr(piece[:50]) if piece else '(empty)'}")
+                                    
+                                    # Check for done flag and tool_calls
+                                    tool_calls_detected = False
+                                    json_extracted = False
+                                    if hasattr(chunk, 'done') and chunk.done is True:
+                                        _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] ChatResponse包含 done=True")
+                                        # On final chunk, log all available fields
+                                        _emit("llm_call", f"[DEBUG] {label} 最终chunk的所有message字段:")
+                                        for attr in ['content', 'thinking', 'text', 'response', 'role', 'tool_calls']:
+                                            if hasattr(message_obj, attr):
+                                                val = getattr(message_obj, attr)
+                                                if val:
+                                                    _emit("llm_call", f"[DEBUG] {label}   message.{attr} = {repr(str(val)[:200])}")
+                                        
+                                        # Check for tool_calls - if present, we'll convert them to JSON format
+                                        if hasattr(message_obj, 'tool_calls') and message_obj.tool_calls:
+                                            tool_calls_detected = True
+                                            _emit("llm_call", f"[DEBUG] {label} 检测到tool_calls，将转换为JSON格式")
+                                            tool_calls = message_obj.tool_calls
+                                            # Convert tool_calls to our JSON format
+                                            if tool_calls and len(tool_calls) > 0:
+                                                first_call = tool_calls[0]
+                                                # Extract function name and arguments
+                                                if hasattr(first_call, 'function'):
+                                                    func = first_call.function
+                                                    func_name = getattr(func, 'name', '') if hasattr(func, 'name') else ''
+                                                    func_args = getattr(func, 'arguments', {}) if hasattr(func, 'arguments') else {}
+                                                    
+                                                    # Convert arguments if it's a string (JSON)
+                                                    if isinstance(func_args, str):
+                                                        try:
+                                                            import json
+                                                            func_args = json.loads(func_args)
+                                                        except Exception:
+                                                            func_args = {}
+                                                    
+                                                    # Build our expected JSON format using accumulated thinking as thought
+                                                    thought_text = response_text.strip() if response_text.strip() else "使用工具完成任务"
+                                                    converted_json = {
+                                                        "thought": thought_text,
+                                                        "tool": func_name,
+                                                        "input": func_args
+                                                    }
+                                                    # Replace response_text with the converted JSON
+                                                    import json
+                                                    response_text = json.dumps(converted_json, ensure_ascii=False)
+                                                    _emit("llm_call", f"[DEBUG] {label} 已将tool_calls转换为JSON: {response_text[:200]}")
+                                                    piece = ""  # Don't add thinking content since we have JSON now
+                                        else:
+                                            # No tool_calls - try to extract JSON from thinking text or convert to JSON
+                                            thinking_text = response_text.strip()
+                                            if thinking_text:
+                                                # First, try to parse as JSON (might be embedded)
+                                                import json
+                                                import re
+                                                # Try to find JSON in the text
+                                                json_match = re.search(r'\{[^{}]*"tool"[^{}]*\}', thinking_text)
+                                                if json_match:
+                                                    try:
+                                                        parsed = json.loads(json_match.group(0))
+                                                        if isinstance(parsed, dict) and "tool" in parsed:
+                                                            response_text = json_match.group(0)
+                                                            _emit("llm_call", f"[DEBUG] {label} 从thinking文本中提取到JSON: {response_text[:200]}")
+                                                            piece = ""
+                                                            json_extracted = True
+                                                    except Exception:
+                                                        pass
+                                                
+                                                # If no JSON found, try to infer tool from text
+                                                if not json_extracted:
+                                                    tool_name = "none"
+                                                    # Try to infer tool from thinking text
+                                                    thinking_lower = thinking_text.lower()
+                                                    if "web_search" in thinking_lower or "搜索" in thinking_text or "search" in thinking_lower:
+                                                        tool_name = "web_search"
+                                                        # Try to extract query
+                                                        query_match = re.search(r'(?:query|搜索|search)[:：\s]+["\']?([^"\']+)["\']?', thinking_text, re.IGNORECASE)
+                                                        query = query_match.group(1) if query_match else "latest information"
+                                                        converted_json = {
+                                                            "thought": thinking_text,
+                                                            "tool": tool_name,
+                                                            "input": {"query": query}
+                                                        }
+                                                        response_text = json.dumps(converted_json, ensure_ascii=False)
+                                                        _emit("llm_call", f"[DEBUG] {label} 从thinking文本推断并转换为JSON: {response_text[:200]}")
+                                                        piece = ""
+                                                        json_extracted = True
+                                                    elif "http_fetch" in thinking_lower or "fetch" in thinking_lower or "获取网页" in thinking_text:
+                                                        tool_name = "http_fetch"
+                                                        url_match = re.search(r'(?:url|网址)[:：\s]+(https?://[^\s]+)', thinking_text, re.IGNORECASE)
+                                                        url = url_match.group(1) if url_match else "https://www.example.com"
+                                                        converted_json = {
+                                                            "thought": thinking_text,
+                                                            "tool": tool_name,
+                                                            "input": {"url": url}
+                                                        }
+                                                        response_text = json.dumps(converted_json, ensure_ascii=False)
+                                                        _emit("llm_call", f"[DEBUG] {label} 从thinking文本推断并转换为JSON: {response_text[:200]}")
+                                                        piece = ""
+                                                        json_extracted = True
+                                                    elif "完成" in thinking_text or "done" in thinking_lower or "结论" in thinking_text or "cannot" in thinking_lower or "unable" in thinking_lower:
+                                                        # Task is complete or cannot proceed
+                                                        converted_json = {
+                                                            "thought": thinking_text,
+                                                            "tool": "none",
+                                                            "input": {}
+                                                        }
+                                                        response_text = json.dumps(converted_json, ensure_ascii=False)
+                                                        _emit("llm_call", f"[DEBUG] {label} 从thinking文本推断任务完成: {response_text[:200]}")
+                                                        piece = ""
+                                                        json_extracted = True
+                                    
+                                    # If we detected tool_calls or converted to JSON, skip adding piece to avoid double accumulation
+                                    if tool_calls_detected or json_extracted:
+                                        piece = ""
+                                    
+                                    last_chunk_sample = {
+                                        "chunk_num": chunk_count,
+                                        "type": "ChatResponse",
+                                        "has_content": bool(piece),
+                                        "done": getattr(chunk, 'done', None),
+                                        "message_content": getattr(message_obj, 'content', None),
+                                        "message_thinking": getattr(message_obj, 'thinking', None) if hasattr(message_obj, 'thinking') else None,
+                                        "message_content_len": len(getattr(message_obj, 'content', '')) if hasattr(message_obj, 'content') and getattr(message_obj, 'content') else 0,
+                                        "message_thinking_len": len(getattr(message_obj, 'thinking', '')) if hasattr(message_obj, 'thinking') and getattr(message_obj, 'thinking') else 0,
+                                    }
+                                else:
+                                    # Unknown type - don't convert to string, just skip
+                                    _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 未知类型且无message属性: {type(chunk)}, 跳过")
+                                    piece = ""
+                            
+                            if piece:
+                                response_text += piece
+                                non_empty_chunk_count += 1
+                                # Publish streaming chunk for UI updates
+                                if publish:
+                                    publish({"stream_chunk": piece})
+                            else:
+                                empty_chunk_count += 1
+                                if chunk_count <= 5:  # Log first 5 empty chunks
+                                    _emit("llm_call", f"[DEBUG] {label} chunk[{chunk_count}] 为空")
+                        
+                        _emit("llm_call", f"[DEBUG] {label} 流式迭代完成: 总chunks={chunk_count}, 空chunks={empty_chunk_count}, 有内容chunks={non_empty_chunk_count}")
+                        if last_chunk_sample:
+                            _emit("llm_call", f"[DEBUG] {label} 最后一个chunk样本: {last_chunk_sample}")
+                        
+                    except StopIteration:
+                        _emit("llm_call", f"[DEBUG] {label} 迭代器抛出 StopIteration")
+                    except Exception as stream_error:
+                        _emit("llm_call", f"[DEBUG] {label} 流式迭代异常: {type(stream_error).__name__}: {str(stream_error)[:300]}")
+                        raise
+                    
+                    _emit("llm_call", f"[DEBUG] {label} 最终response_text长度: {len(response_text)}, 内容预览: {response_text[:200] if response_text else '(empty)'}")
+                    
                     if response_text and response_text.strip():
                         _emit("llm_call", f"✓ 成功调用 {label}，返回文本长度: {len(response_text)}")
                         return response_text
                     _emit("llm_call", f"✗ {label} 返回空响应")
+                    _emit("llm_call", f"[DEBUG] {label} 空响应详情: chunk_count={chunk_count}, empty_chunks={empty_chunk_count}, non_empty_chunks={non_empty_chunk_count}, response_text_len={len(response_text)}")
                     last_empty_response_label = label
             except Exception as error:  # pragma: no cover - defensive
                 last_err = error
