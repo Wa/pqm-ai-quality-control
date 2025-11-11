@@ -1,7 +1,10 @@
 import json
 import os
+import queue
 import re
 import shutil
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
@@ -277,6 +280,21 @@ def render_ai_agent_tab(session_id):
                 st.session_state[pending_key] = None
             if auto_run_key not in st.session_state:
                 st.session_state[auto_run_key] = False
+            worker_thread_key = _state_key("ai_agent_worker_thread")
+            worker_queue_key = _state_key("ai_agent_event_queue")
+            worker_stop_key = _state_key("ai_agent_stop_event")
+            worker_goal_key = _state_key("ai_agent_worker_goal")
+            worker_poll_key = _state_key("ai_agent_worker_last_poll")
+            if worker_thread_key not in st.session_state:
+                st.session_state[worker_thread_key] = None
+            if worker_queue_key not in st.session_state:
+                st.session_state[worker_queue_key] = None
+            if worker_stop_key not in st.session_state:
+                st.session_state[worker_stop_key] = None
+            if worker_goal_key not in st.session_state:
+                st.session_state[worker_goal_key] = None
+            if worker_poll_key not in st.session_state:
+                st.session_state[worker_poll_key] = 0.0
             
             streaming_text_key = _state_key("ai_agent_streaming_text")
             if streaming_text_key not in st.session_state:
@@ -379,7 +397,145 @@ def render_ai_agent_tab(session_id):
                     st.session_state[history_key] = chat_history
                     _persist_history(chat_history)
 
+            def _log_debug(message: str) -> None:
+                logs = st.session_state.get(debug_key, [])
+                logs.append(message)
+                st.session_state[debug_key] = logs[-200:]
+
+            def _drain_worker_events() -> None:
+                queue_obj = st.session_state.get(worker_queue_key)
+                if not queue_obj:
+                    return
+                done_received = False
+                while True:
+                    try:
+                        item = queue_obj.get_nowait()
+                    except queue.Empty:
+                        break
+                    if not isinstance(item, dict):
+                        continue
+                    kind = item.get("type")
+                    if kind == "publish":
+                        event = item.get("event") or {}
+                        if "stream_chunk" in event:
+                            current_text = st.session_state.get(streaming_text_key, "")
+                            current_text += event["stream_chunk"]
+                            st.session_state[streaming_text_key] = current_text
+                            continue
+                        status = event.get("status")
+                        stage = event.get("stage", "")
+                        message = event.get("message", "")
+                        if status:
+                            if message:
+                                _log_debug(f"[{status}] {stage or '-'} {message}")
+                            else:
+                                _log_debug(f"[{status}] {stage or '-'}")
+                        stream_payload = event.get("stream")
+                        if status == "failed" and message:
+                            last_meta = chat_history[-1].get("metadata", {}) if chat_history else {}
+                            last_content = chat_history[-1].get("content") if chat_history else ""
+                            if last_meta.get("type") != "error" or last_content != f"❌ {message}":
+                                error_msg = {
+                                    "role": "assistant",
+                                    "content": f"❌ {message}",
+                                    "metadata": {"type": "error", "stage": stage},
+                                }
+                                chat_history.append(error_msg)
+                                st.session_state[history_key] = chat_history
+                                _persist_history(chat_history)
+                        if status == "succeeded" and stage == "done":
+                            final_text = event.get("result") or message or "任务已完成，但没有返回结果。"
+                            if not chat_history or chat_history[-1].get("metadata", {}).get("type") != "final_response":
+                                final_msg = {
+                                    "role": "assistant",
+                                    "content": final_text,
+                                    "metadata": {"type": "final_response"},
+                                }
+                                chat_history.append(final_msg)
+                                st.session_state[history_key] = chat_history
+                                st.session_state[streaming_text_key] = ""
+                                _persist_history(chat_history)
+                        if isinstance(stream_payload, dict) and stream_payload.get("kind") == "step":
+                            step_num = stream_payload.get("step", 0)
+                            last_action = stream_payload.get("last_action", {})
+                            artifacts = stream_payload.get("artifacts", [])
+                            if isinstance(last_action, dict):
+                                thought = last_action.get("thought", "")
+                                tool = last_action.get("tool", "")
+                                step_key = f"reasoning_step_{step_num}_{session_id}_{active_conversation_id}"
+                                if thought and not st.session_state.get(step_key, False):
+                                    reasoning_msg = {
+                                        "role": "assistant",
+                                        "content": thought,
+                                        "metadata": {
+                                            "type": "reasoning",
+                                            "step": step_num,
+                                            "action": last_action,
+                                        },
+                                    }
+                                    chat_history.append(reasoning_msg)
+                                    st.session_state[history_key] = chat_history
+                                    st.session_state[step_key] = True
+                                    _persist_history(chat_history)
+                                tool_step_key = f"tool_step_{step_num}_{tool}_{session_id}_{active_conversation_id}"
+                                if tool and tool != "none" and not st.session_state.get(tool_step_key, False):
+                                    tool_msg = {
+                                        "role": "assistant",
+                                        "content": f"正在使用工具: {tool}",
+                                        "metadata": {
+                                            "type": "tool_use",
+                                            "step": step_num,
+                                            "tool": tool,
+                                            "result": artifacts[-1] if artifacts else {},
+                                        },
+                                    }
+                                    chat_history.append(tool_msg)
+                                    st.session_state[history_key] = chat_history
+                                    st.session_state[tool_step_key] = True
+                                    _persist_history(chat_history)
+                    elif kind == "error":
+                        error_text = item.get("error")
+                        if error_text:
+                            _log_debug(f"[error] {error_text}")
+                            error_msg = {
+                                "role": "assistant",
+                                "content": f"❌ 执行出错: {error_text}",
+                                "metadata": {"type": "error"},
+                            }
+                            chat_history.append(error_msg)
+                            st.session_state[history_key] = chat_history
+                            _persist_history(chat_history)
+                    elif kind == "done":
+                        done_received = True
+                if done_received:
+                    st.session_state[running_key] = False
+                    st.session_state[pending_key] = None
+                    st.session_state[last_msg_processed_key] = None
+                    st.session_state[worker_thread_key] = None
+                    st.session_state[worker_queue_key] = None
+                    st.session_state[worker_stop_key] = None
+                    st.session_state[worker_goal_key] = None
+                    st.session_state[worker_poll_key] = 0.0
+                    st.session_state[streaming_text_key] = ""
+                    if st.session_state.get(auto_run_key):
+                        st.session_state[plan_status_key] = "idle"
+                        st.session_state[plan_key] = None
+                        st.session_state[plan_error_key] = None
+                        st.session_state[plan_msg_idx_key] = None
+                        st.session_state[auto_run_key] = False
+                    else:
+                        st.session_state[plan_status_key] = "completed"
+                        _ensure_plan_message()
+
+            _drain_worker_events()
             _ensure_plan_message()
+
+            plan_data = st.session_state.get(plan_key)
+            plan_status = st.session_state.get(plan_status_key, "idle")
+            plan_error = st.session_state.get(plan_error_key)
+            pending_goal = st.session_state.get(pending_key)
+            running = st.session_state.get(running_key, False)
+            auto_run_active = st.session_state.get(auto_run_key, False)
 
             conversation_context = [
                 {"role": msg.get("role"), "content": msg.get("content")}
@@ -590,156 +746,65 @@ def render_ai_agent_tab(session_id):
                 st.session_state[streaming_text_key] = ""
                 st.rerun()
 
-            if pending_goal and st.session_state.get(plan_status_key) == "approved" and not running:
+            if pending_goal and plan_status == "approved" and not running:
+                queue_obj = queue.Queue()
+                stop_event = threading.Event()
+                st.session_state[worker_queue_key] = queue_obj
+                st.session_state[worker_stop_key] = stop_event
+                st.session_state[worker_goal_key] = pending_goal
                 st.session_state[last_msg_processed_key] = pending_goal
                 st.session_state[running_key] = True
                 st.session_state[plan_status_key] = "running"
-                running = True
-                plan_status = "running"
+                st.session_state[plan_error_key] = None
+                st.session_state[streaming_text_key] = ""
+
+                def _worker() -> None:
+                    def _publish(event: Dict[str, object]) -> None:
+                        queue_obj.put({"type": "publish", "event": event})
+
+                    def _check_control() -> Dict[str, bool]:
+                        return {"paused": False, "stopped": stop_event.is_set()}
+
+                    try:
+                        run_ai_agent_job(
+                            session_id=session_id,
+                            goal=pending_goal,
+                            publish=_publish,
+                            check_control=_check_control,
+                            primary="local",
+                            turbo_mode=bool(turbo_enabled),
+                            max_steps=20,
+                            conversation_history=conversation_context,
+                            conversation_id=active_conversation_id,
+                        )
+                    except Exception as exc:
+                        queue_obj.put({"type": "error", "error": str(exc)})
+                    finally:
+                        queue_obj.put({"type": "done"})
+
+                worker = threading.Thread(
+                    target=_worker,
+                    name=f"ai_agent_worker_{session_id}_{active_conversation_id}",
+                    daemon=True,
+                )
+                worker.start()
+                st.session_state[worker_thread_key] = worker
                 _ensure_plan_message()
+                st.rerun()
 
-                assistant_msg_placeholder = None
-                streaming_placeholder = None
-
-                def _publish(event: Dict[str, object]) -> None:
-                    nonlocal assistant_msg_placeholder, streaming_placeholder
-
-                    kind = event.get("status") or (event.get("stream") and (event["stream"].get("kind")))
-                    stage = event.get("stage", "")
-                    message = event.get("message", "")
-
-                    # Handle streaming chunks
-                    if "stream_chunk" in event:
-                        if streaming_placeholder is None:
-                            streaming_placeholder = st.chat_message("assistant").empty()
-                        current_text = st.session_state.get(streaming_text_key, "")
-                        current_text += event["stream_chunk"]
-                        st.session_state[streaming_text_key] = current_text
-                        streaming_placeholder.write(current_text)
-                        return
-
-                    if kind == "running":
-                        if stage == "initializing":
-                            if assistant_msg_placeholder is None:
-                                assistant_msg_placeholder = st.chat_message("assistant").empty()
-                            assistant_msg_placeholder.info(f"🚀 {message}")
-                        elif stage in ("llm_call", "graph_execution"):
-                            st.session_state[debug_key].append(f"[{stage}] {message}")
-                    elif kind == "failed":
-                        if assistant_msg_placeholder:
-                            assistant_msg_placeholder.error(f"❌ {message}")
-                    elif kind == "succeeded":
-                        if assistant_msg_placeholder:
-                            assistant_msg_placeholder.success(f"✅ {message}")
-
-                    stream = event.get("stream")
-                    if isinstance(stream, dict) and stream.get("kind") == "step":
-                        step_num = stream.get("step", 0)
-                        last_action = stream.get("last_action", {})
-
-                        if isinstance(last_action, dict):
-                            thought = last_action.get("thought", "")
-                            tool = last_action.get("tool", "")
-
-                            step_key = f"reasoning_step_{step_num}_{session_id}_{active_conversation_id}"
-                            if thought and not st.session_state.get(step_key, False):
-                                reasoning_msg = {
-                                    "role": "assistant",
-                                    "content": thought,
-                                    "metadata": {
-                                        "type": "reasoning",
-                                        "step": step_num,
-                                        "action": last_action
-                                    }
-                                }
-                                chat_history.append(reasoning_msg)
-                                st.session_state[history_key] = chat_history
-                                st.session_state[step_key] = True
-                                _persist_history(chat_history)
-
-                                tool_step_key = f"tool_step_{step_num}_{tool}_{session_id}_{active_conversation_id}"
-                                if tool and tool != "none" and not st.session_state.get(tool_step_key, False):
-                                    tool_msg = {
-                                        "role": "assistant",
-                                        "content": f"正在使用工具: {tool}",
-                                        "metadata": {
-                                            "type": "tool_use",
-                                            "step": step_num,
-                                            "tool": tool,
-                                            "result": stream.get("artifacts", [{}])[-1] if stream.get("artifacts") else {},
-                                        }
-                                    }
-                                    chat_history.append(tool_msg)
-                                    st.session_state[history_key] = chat_history
-                                    st.session_state[tool_step_key] = True
-                                    _persist_history(chat_history)
-
-                def _check_control() -> Dict[str, bool]:
-                    return {"paused": False, "stopped": not st.session_state.get(running_key, False)}
-
-                try:
-                    res = run_ai_agent_job(
-                        session_id=session_id,
-                        goal=pending_goal,
-                        publish=_publish,
-                        check_control=_check_control,
-                        primary="local",
-                        turbo_mode=bool(turbo_enabled),
-                        max_steps=20,
-                        conversation_history=conversation_context,
-                        conversation_id=active_conversation_id,
-                    )
-
-                    final_list = res.get("final_results") or []
-                    final_text = final_list[0] if final_list else "任务已完成，但没有返回结果。"
-
-                    # Clear streaming text and add final message
-                    st.session_state[streaming_text_key] = ""
-                    final_msg = {
-                        "role": "assistant",
-                        "content": final_text,
-                        "metadata": {"type": "final_response"}
-                    }
-                    chat_history.append(final_msg)
-                    st.session_state[history_key] = chat_history
-                    _persist_history(chat_history)
-
-                except Exception as e:
-                    st.session_state[streaming_text_key] = ""
-                    error_msg = {
-                        "role": "assistant",
-                        "content": f"❌ 执行出错: {str(e)}",
-                        "metadata": {"type": "error"}
-                    }
-                    chat_history.append(error_msg)
-                    st.session_state[history_key] = chat_history
-                    _persist_history(chat_history)
-                finally:
-                    st.session_state[running_key] = False
-                    st.session_state[pending_key] = None
-                    if st.session_state.get(auto_run_key):
-                        st.session_state[plan_status_key] = "idle"
-                        st.session_state[plan_key] = None
-                        st.session_state[plan_error_key] = None
-                        st.session_state[plan_msg_idx_key] = None
-                        st.session_state[auto_run_key] = False
-                    else:
-                        st.session_state[plan_status_key] = "completed"
-                        _ensure_plan_message()
-                    running = False
-                    plan_status = st.session_state.get(plan_status_key, "idle")
-                    st.rerun()
-
-            if st.session_state.get(running_key, False):
+            worker_thread = st.session_state.get(worker_thread_key)
+            if running and worker_thread and worker_thread.is_alive():
                 if st.button(
                     "⏹️ 停止执行",
                     key=f"stop_agent_{session_id}_{active_conversation_id}",
                     use_container_width=True,
                 ):
-                    st.session_state[running_key] = False
-                    st.session_state[plan_status_key] = "completed"
-                    st.session_state[pending_key] = None
-                    st.rerun()
+                    stop_event = st.session_state.get(worker_stop_key)
+                    if stop_event:
+                        stop_event.set()
+                    _log_debug("收到停止指令，智能体将尽快终止当前任务")
+                time.sleep(0.2)
+                st.rerun()
 
             with st.expander("🔍 调试信息", expanded=False):
                 for msg in st.session_state.get(debug_key, [])[-20:]:
