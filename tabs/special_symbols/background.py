@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -50,6 +51,51 @@ GPT_OSS_PROMPT_PREFIX = (
     "5) 若整段文本中没有任何被上述分类列标记为★/☆/ /的行，则仅回复：无。\n\n"
     "以下提供表头参考与数据片段。请务必依据表头中的“特殊特性分类/Classification”列来判断：\n"
 )
+
+OLLAMA_CALL_TIMEOUT = 600  # seconds
+MODELSCOPE_COMPARISON_MODELS: List[Tuple[str, str]] = [
+    ("ModelScope DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.2-Exp"),
+    ("ModelScope DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),
+    ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
+]
+
+
+def _execute_ollama_chat_with_timeout(
+    client: OllamaClient,
+    model_name: str,
+    prompt_text: str,
+    provider_label: str,
+    timeout_s: int = OLLAMA_CALL_TIMEOUT,
+) -> Tuple[str, Dict[str, object], str, int]:
+    """Invoke an Ollama client with a hard timeout and return (text, stats, model, duration_ms)."""
+
+    start_ts = time.time()
+
+    def _invoke_call() -> Dict[str, object]:
+        return client.chat(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt_text}],
+            stream=False,
+            options={"num_ctx": 40001},
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as single_executor:
+        future = single_executor.submit(_invoke_call)
+        try:
+            response = future.result(timeout=timeout_s)
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"{provider_label} 调用超时（超过{timeout_s}秒未返回）") from exc
+
+    duration_ms = int((time.time() - start_ts) * 1000)
+    text = (
+        response.get("message", {}).get("content")
+        or response.get("response")
+        or ""
+    )
+    stats = response.get("eval_info") or response.get("stats") or {}
+    used_model = response.get("model") or model_name
+    return text, stats, used_model, duration_ms
 
 
 class _ModelScopeClientLegacy:
@@ -211,6 +257,90 @@ def _clear_directory(directory: str) -> int:
     return cleared
 
 
+def _strip_code_fences(value: str) -> str:
+    value = (value or "").strip()
+    if value.startswith("```") and value.endswith("```"):
+        value = value[3:-3].strip()
+        if value.lower().startswith("json"):
+            value = value[4:].strip()
+    return value
+
+
+def _extract_json_text(text: str) -> str:
+    s = (text or "").strip().lstrip("\ufeff")
+    s = _strip_code_fences(s)
+    try:
+        json.loads(s)
+        return s
+    except json.JSONDecodeError:
+        pass
+    start_arr = s.find("[")
+    end_arr = s.rfind("]")
+    if start_arr != -1 and end_arr != -1 and end_arr > start_arr:
+        candidate = s[start_arr : end_arr + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            merged = re.sub(r"\]\s*,?\s*\[", ",", candidate)
+            try:
+                json.loads(merged)
+                return merged
+            except json.JSONDecodeError:
+                pass
+    start_obj = s.find("{")
+    end_obj = s.rfind("}")
+    if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
+        candidate = s[start_obj : end_obj + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+    return s
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    status_code = getattr(getattr(error, "response", None), "status_code", None)
+    if status_code == 429:
+        return True
+    text = str(error)
+    return "429" in text and "Too Many Requests" in text
+
+
+def _should_retry_response(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    lowered = stripped.lower()
+    if lowered.startswith("[error") or lowered.startswith("error"):
+        return True
+    extracted = _extract_json_text(stripped)
+    return extracted in ("[]", "")
+
+
+def _is_plain_symbol(value: str) -> bool:
+    return value in {"★", "☆", "/"}
+
+
+def _filter_identical_matches(rows: List[Dict[str, object]]) -> Tuple[List[Dict[str, object]], int]:
+    filtered: List[Dict[str, object]] = []
+    removed = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        base_symbol = str(row.get("基准特殊特性分类") or "").strip()
+        exam_symbol = str(row.get("待检查特殊特性分类") or "").strip()
+        if _is_plain_symbol(base_symbol) and base_symbol == exam_symbol:
+            removed += 1
+            continue
+        filtered.append(row)
+
+    return filtered, removed
+
+
 def _run_gpt_extraction(
     emitter: ProgressEmitter,
     publish: Callable[[Dict[str, object]], None],
@@ -300,27 +430,62 @@ def _run_gpt_extraction(
             start_ts = time.time()
             response_text = ""
             last_stats = None
+            duration_ms = 0
+            is_cloud_fallback = (
+                fallback_client is not None and attempt_client is fallback_client
+            )
 
             try:
-                for chunk in attempt_client.chat(
-                    model=attempt_model,
-                    messages=[{"role": "user", "content": prompt_text}],
-                    stream=True,
-                    options={"num_ctx": 40001},
-                ):
-                    piece = (
-                        chunk.get("message", {}).get("content")
-                        or chunk.get("response")
-                        or ""
+                if is_cloud_fallback:
+                    response_text_raw, last_stats, used_model_name, duration_ms = _execute_ollama_chat_with_timeout(
+                        attempt_client,
+                        attempt_model,
+                        prompt_text,
+                        attempt_label,
                     )
-                    if piece:
-                        response_text += piece
-                    last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-                    if control_handler and not control_handler(stage_label, f"{attempt_label} 流式响应（{name}）"):
-                        return outputs
-                used_model_name = attempt_model
+                    response_text = response_text_raw
+                else:
+                    for chunk in attempt_client.chat(
+                        model=attempt_model,
+                        messages=[{"role": "user", "content": prompt_text}],
+                        stream=True,
+                        options={"num_ctx": 40001},
+                    ):
+                        piece = (
+                            chunk.get("message", {}).get("content")
+                            or chunk.get("response")
+                            or ""
+                        )
+                        if piece:
+                            response_text += piece
+                        last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
+                        if control_handler and not control_handler(stage_label, f"{attempt_label} 流式响应（{name}）"):
+                            return outputs
+                    used_model_name = attempt_model
+                    duration_ms = int((time.time() - start_ts) * 1000)
                 call_success = True
                 break
+            except TimeoutError as timeout_error:
+                report_exception(
+                    f"调用 {attempt_label} 失败({stage_label}:{name})",
+                    timeout_error,
+                    level="warning",
+                )
+                publish(
+                    {
+                        "stream": {
+                            "kind": "response",
+                            "file": name,
+                            "part": 1,
+                            "total_parts": 1,
+                            "engine": attempt_model,
+                            "text": f"调用 {attempt_label} 超时：{timeout_error}",
+                        }
+                    }
+                )
+                if fallback_client and attempt_client is primary_client:
+                    emitter.warning(f"{attempt_label} 调用失败，尝试 {fallback_label}")
+                continue
             except Exception as error:
                 report_exception(
                     f"调用 {attempt_label} 失败({stage_label}:{name})",
@@ -350,7 +515,8 @@ def _run_gpt_extraction(
                 return outputs
             continue
 
-        duration_ms = int((time.time() - start_ts) * 1000)
+        if not duration_ms:
+            duration_ms = int((time.time() - start_ts) * 1000)
         response_clean = response_text.strip() or "无"
         publish(
             {
@@ -524,26 +690,54 @@ def _run_gpt_extraction_parallel(
                     last_error = client_error
                     continue
 
-                start_ts = time.time()
-                try:
-                    response = client.chat(
-                        model=provider_model,
-                        messages=[{"role": "user", "content": prompt_text}],
-                        stream=False,
-                        options={"num_ctx": 40001},
+                if provider_engine == "modelscope":
+                    start_ts = time.time()
+                    try:
+                        response = client.chat(
+                            model=provider_model,
+                            messages=[{"role": "user", "content": prompt_text}],
+                            stream=False,
+                            options={"num_ctx": 40001},
+                        )
+                    except Exception as call_error:
+                        last_error = call_error
+                        continue
+
+                    message = (
+                        response.get("message", {}).get("content")
+                        or response.get("response")
+                        or ""
                     )
+                    stats = response.get("eval_info") or response.get("stats") or {}
+                    used_model = response.get("model") or provider_model
+                    duration_ms = int((time.time() - start_ts) * 1000)
+                    if not message.strip():
+                        last_error = RuntimeError(f"{provider_label} 未返回有效内容")
+                        continue
+                    return {
+                        "name": name,
+                        "text": message,
+                        "stats": stats,
+                        "model": used_model,
+                        "engine_tag": provider_engine,
+                        "duration_ms": duration_ms,
+                    }
+                try:
+                    message, stats, used_model, duration_ms = _execute_ollama_chat_with_timeout(
+                        client,
+                        provider_model,
+                        prompt_text,
+                        provider_label,
+                    )
+                except TimeoutError as timeout_error:
+                    last_error = timeout_error
+                    continue
                 except Exception as call_error:
                     last_error = call_error
                     continue
-
-                message = (
-                    response.get("message", {}).get("content")
-                    or response.get("response")
-                    or ""
-                )
-                stats = response.get("eval_info") or response.get("stats") or {}
-                used_model = response.get("model") or provider_model
-                duration_ms = int((time.time() - start_ts) * 1000)
+                if not message.strip():
+                    last_error = RuntimeError(f"{provider_label} 未返回有效内容")
+                    continue
                 return {
                     "name": name,
                     "text": message,
@@ -947,6 +1141,7 @@ def run_special_symbols_job(
                         api_key=modelscope_api_key,
                         model=modelscope_model_name,
                         base_url=modelscope_base_url,
+                        timeout=900.0,
                     )
 
                 _make_modelscope_client()
@@ -1208,8 +1403,16 @@ def run_special_symbols_job(
     if not standards_section:
         standards_section = "无"
 
+    output_requirements = (
+        "\n\n输出要求（严格遵守）：\n"
+        "- 仅输出一个 JSON 数组（UTF-8，无额外文本或说明）。\n"
+        '- 数组中的每个对象必须包含以下键："条目", "基准文件名", "基准工作表名", "基准特殊特性分类", "待检查文件名", "待检查工作表名", "待检查特殊特性分类"。\n'
+        '- 如果某个字段在源材料中缺失，请使用空字符串 ""。\n'
+        "- 若未发现任何符号不一致，请输出空数组 []。\n"
+    )
     combined_prompt = (
         f"{SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX}{exam_section}\n\n以下是企业基准文件：\n{standards_section}"
+        f"{output_requirements}"
     )
 
     comparison_base = os.path.basename(exam_combined_path) if exam_combined_path else "examined_txt_filtered_final"
@@ -1218,17 +1421,19 @@ def run_special_symbols_job(
     if not ensure_running("compare", "准备执行对比分析"):
         return {"final_results": []}
     # Prefer ModelScope for final comparison, then cloud Ollama, then local Ollama
-    modelscope_client: Optional[ModelScopeClient] = None
+    modelscope_attempts: List[Tuple[str, Optional[ModelScopeClient], Optional[str], str]] = []
     if modelscope_client_factory is not None:
-        try:
-            modelscope_client = modelscope_client_factory()
-        except Exception as error:
-            report_exception("初始化 ModelScope DeepSeek 客户端失败", error, level="warning")
-            modelscope_client = None
+        for label, model_id in MODELSCOPE_COMPARISON_MODELS:
+            try:
+                client_instance = modelscope_client_factory()
+            except Exception as error:
+                report_exception(f"初始化 {label} 客户端失败", error, level="warning")
+                client_instance = None
+            modelscope_attempts.append((label, client_instance, model_id, "modelscope"))
 
     # attempt tuple: (label, client, model, engine_tag)
     attempt_sequence: List[Tuple[str, object, Optional[str], str]] = [
-        ("ModelScope DeepSeek-V3.1", modelscope_client, modelscope_model_name, "modelscope"),
+        *modelscope_attempts,
         ("云端 deepseek", cloud_ollama_client, cloud_comparison_model, "ollama"),
         ("本地 gpt-oss", local_ollama_client, local_model_name, "ollama"),
     ]
@@ -1271,9 +1476,13 @@ def run_special_symbols_job(
         last_stats = None
         try:
             if isinstance(attempt_client, ModelScopeClient):
-                # ModelScope: non-streaming with up to 3 attempts
+                throttled = False
                 ms_attempt_error: Optional[Exception] = None
-                for _ in range(3):
+                response_text = ""
+                used_model_name_local: Optional[str] = None
+                last_stats = None
+
+                for attempt_index in range(3):
                     try:
                         resp = attempt_client.chat(
                             model=attempt_model,
@@ -1283,6 +1492,10 @@ def run_special_symbols_job(
                         )
                     except Exception as call_error:
                         ms_attempt_error = call_error
+                        if _is_rate_limit_error(call_error):
+                            throttled = True
+                            emitter.warning(f"{attempt_label} 返回 429（第{attempt_index + 1}次尝试），切换至下一个模型。")
+                            break
                         report_exception(f"调用 {attempt_label} 对比分析失败", call_error, level="warning")
                         publish(
                             {
@@ -1300,7 +1513,7 @@ def run_special_symbols_job(
                         or resp.get("response")
                         or ""
                     )
-                    response_text = piece or ""
+                    candidate_text = piece or ""
                     publish(
                         {
                             "stream": {
@@ -1309,20 +1522,35 @@ def run_special_symbols_job(
                                 "part": 1,
                                 "total_parts": 1,
                                 "engine": resp.get("model") or attempt_model,
-                                "text": response_text,
+                                "text": candidate_text,
                             }
                         }
                     )
                     last_stats = resp.get("eval_info") or resp.get("stats") or None
-                    used_model_name = resp.get("model") or attempt_model
+                    used_model_name_local = resp.get("model") or attempt_model
                     used_engine_tag = attempt_engine_tag
                     last_error = None
                     if not ensure_running("compare", f"{attempt_label} 对比分析（{comparison_name}）"):
                         return {"final_results": []}
+                    if _should_retry_response(candidate_text):
+                        emitter.warning(
+                            f"{attempt_label} 第{attempt_index + 1}次返回为空或无效结果，准备重试。"
+                        )
+                        if attempt_index < 2:
+                            time.sleep(1.0)
+                            continue
+                        candidate_text = "[]"
+                    response_text = candidate_text
                     break
-                else:
-                    # exhausted 3 attempts, move to next provider
+
+                if throttled:
                     continue
+                if not response_text:
+                    if ms_attempt_error is not None:
+                        last_error = ms_attempt_error
+                    continue
+                used_model_name = used_model_name_local or attempt_model
+                break
             else:
                 # Ollama: streaming
                 for chunk in attempt_client.chat(
@@ -1380,7 +1608,9 @@ def run_special_symbols_job(
     duration_ms = int((time.time() - start_ts) * 1000)
     if not ensure_running("compare", "对比分析完成"):
         return {"final_results": []}
-    response_clean = response_text.strip() or "无相关发现"
+    response_clean = response_text.strip()
+    if not response_clean:
+        response_clean = "[]"
 
     log_llm_metrics(
         output_root,
@@ -1410,11 +1640,51 @@ def run_special_symbols_job(
     processed_chunks = 1
     publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
 
+    json_output_written = False
+    response_to_save = response_clean
+    parsed_rows: Optional[List[Dict[str, object]]] = None
+    json_block = _extract_json_text(response_clean)
+    try:
+        parsed = json.loads(json_block)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if isinstance(parsed, list):
+            normalized_list: List[Dict[str, object]] = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    normalized_list.append(item)
+            if normalized_list:
+                parsed_rows = normalized_list
+            elif isinstance(parsed, list) and not parsed:
+                parsed_rows = []
+    except json.JSONDecodeError:
+        parsed_rows = None
+
+    if parsed_rows is not None:
+        filtered_rows, removed_matches = _filter_identical_matches(parsed_rows)
+        parsed_rows = filtered_rows
+        if removed_matches:
+            emitter.info(f"已过滤掉 {removed_matches} 条符号完全一致的记录")
+        response_to_save = json.dumps(parsed_rows, ensure_ascii=False, indent=2)
+        json_output_path = os.path.join(initial_results_dir, f"json_{comparison_name}.txt")
+        try:
+            with open(json_output_path, "w", encoding="utf-8") as handle:
+                handle.write(response_to_save)
+        except Exception as error:
+            parsed_rows = None
+            report_exception("写入比对JSON结果失败", error, level="warning")
+        else:
+            json_output_written = True
+            emitter.info(f"比对结果已输出为JSON：{os.path.basename(json_output_path)}")
+    else:
+        emitter.warning("比对结果未生成有效JSON，回退至二次LLM转换流程")
+
     try:
         if not ensure_running("aggregate", "保存对比与摘要结果"):
             return {"final_results": []}
-        persist_compare_outputs(initial_results_dir, comparison_name, [combined_prompt], response_clean)
-        summarize_with_ollama(initial_results_dir, output_root, session_id, comparison_name, response_clean)
+        persist_compare_outputs(initial_results_dir, comparison_name, [combined_prompt], response_to_save)
+        if not json_output_written:
+            summarize_with_ollama(initial_results_dir, output_root, session_id, comparison_name, response_clean)
     except Exception as error:
         report_exception("保存比对结果失败", error, level="warning")
 
