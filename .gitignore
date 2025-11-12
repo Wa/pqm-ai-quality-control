@@ -53,6 +53,7 @@ Thumbs.db
 *.log
 temp.py
 debug_ollama_llm.py
+tabs/debug_special_symbols.py
 
 # Session directories (user uploaded files)
 CP_files/
@@ -119,4 +120,7 @@ history_issues_avoidance_files/
 
 # Restart signal file
 .restart_signal
+
+# Local experiment script
+test_settings.py
 
