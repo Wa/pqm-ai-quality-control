@@ -37,10 +37,10 @@ if username:
     ADMIN = "🛡️ 网站管理"
 
     # Hide Settings for non-admin users; show both Admin and Settings for admin users
-    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, HELP]
+    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
     if is_admin(username):
-        tab_labels.insert(8, ADMIN)
-        tab_labels.insert(9, SETTINGS)
+        insert_pos = tab_labels.index(SETTINGS)
+        tab_labels.insert(insert_pos, ADMIN)
 
     tabs = st.tabs(tab_labels)
     idx = {label: i for i, label in enumerate(tab_labels)}
