@@ -10,6 +10,7 @@ from tabs.tab_ai_agent import render_ai_agent_tab
 from tabs.tab_help_documentation import render_help_documentation_tab
 from tabs.tab_home import render_home_tab
 from tabs.tab_admin import render_admin_tab
+from tabs.tab_apqp_one_click_check import render_apqp_one_click_check_tab
 from util import render_login_widget, get_user_session_id
 from util import is_admin
 
@@ -25,6 +26,7 @@ if username:
     
     # Labels and conditional admin tab
     HOME = "🏠 首页"
+    APQP_ONE_CLICK = "⚡ APQP交付物一键检查"
     SPECIAL = "🔍 特殊特性符号检查"
     PARAMETERS = "📊 设计制程检查"
     ELEMENTS = "✅ 文件要素检查"
@@ -37,7 +39,7 @@ if username:
     ADMIN = "🛡️ 网站管理"
 
     # Hide Settings for non-admin users; show both Admin and Settings for admin users
-    tab_labels = [HOME, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
+    tab_labels = [HOME, APQP_ONE_CLICK, COMPLETE, SPECIAL, PARAMETERS, ELEMENTS, ENTERPRISE, HISTORY, AI, SETTINGS, HELP]
     if is_admin(username):
         insert_pos = tab_labels.index(SETTINGS)
         tab_labels.insert(insert_pos, ADMIN)
@@ -47,6 +49,8 @@ if username:
 
     with tabs[idx[HOME]]:
         render_home_tab(session_id)
+    with tabs[idx[APQP_ONE_CLICK]]:
+        render_apqp_one_click_check_tab(session_id)
     with tabs[idx[COMPLETE]]:
         render_file_completeness_check_tab(session_id)
     with tabs[idx[SPECIAL]]:

@@ -1,6 +1,6 @@
 import requests
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import streamlit as st
 
 class BackendClient:
@@ -51,6 +51,30 @@ class BackendClient:
         try:
             data = {"session_id": session_id}
             response = requests.post(f"{self.base_url}/clear-files", json=data)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def parse_apqp_files(self, session_id: str, stages: Optional[List[str]] = None) -> Dict:
+        """Request backend to parse APQP uploads into text."""
+        try:
+            payload: Dict[str, Any] = {"session_id": session_id}
+            if stages:
+                payload["stages"] = stages
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/parse",
+                json=payload,
+                timeout=600,
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def clear_apqp_files(self, session_id: str, target: str = "all") -> Dict:
+        """Clear APQP uploads and/or parsed outputs via the backend."""
+        try:
+            payload = {"session_id": session_id, "target": target}
+            response = requests.post(f"{self.base_url}/apqp-one-click/clear", json=payload, timeout=120)
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}

@@ -18,10 +18,20 @@ from pydantic import BaseModel, Field
 
 from config import CONFIG
 from tabs.enterprise_standard.background import run_enterprise_standard_job
-from tabs.file_completeness import run_file_completeness_job
+from tabs.file_completeness import (
+    run_file_completeness_job,
+    STAGE_ORDER,
+    STAGE_SLUG_MAP,
+)
 from tabs.parameters.background import run_parameters_job
 from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
+from tabs.shared.file_conversion import (
+    process_excel_folder,
+    process_pdf_folder,
+    process_textlike_folder,
+    process_word_ppt_folder,
+)
 
 
 JOB_DEFINITIONS = {
@@ -84,6 +94,16 @@ class EnterpriseJobRequest(BaseModel):
 class SpecialSymbolsJobRequest(BaseModel):
     session_id: str
     turbo_mode: bool = False
+
+
+class ApqpParseRequest(BaseModel):
+    session_id: str
+    stages: Optional[List[str]] = None
+
+
+class ApqpClearRequest(BaseModel):
+    session_id: str
+    target: Optional[str] = "all"
 
 
 class EnterpriseJobStatus(BaseModel):
@@ -514,6 +534,99 @@ def ensure_session_dirs(session_id: str):
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
 
+
+def _apqp_stage_layout(session_id: str) -> Dict[str, Dict[str, str]]:
+    """Return upload and parsed directories for each APQP stage for a session."""
+
+    uploads_root = str(CONFIG["directories"]["uploads"])
+    generated_root = str(CONFIG["directories"]["generated_files"])
+    stage_layout: Dict[str, Dict[str, str]] = {}
+    for stage_name in STAGE_ORDER:
+        slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
+        upload_dir = os.path.join(uploads_root, session_id, "APQP_one_click_check", slug)
+        parsed_dir = os.path.join(generated_root, session_id, "APQP_one_click_check", slug)
+        os.makedirs(upload_dir, exist_ok=True)
+        os.makedirs(parsed_dir, exist_ok=True)
+        stage_layout[stage_name] = {
+            "slug": slug,
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+        }
+    return stage_layout
+
+
+def _normalize_apqp_stages(
+    layout: Dict[str, Dict[str, str]], requested: Optional[List[str]]
+) -> List[str]:
+    """Normalize requested stage identifiers to canonical stage names."""
+
+    if not requested:
+        return list(layout.keys())
+
+    name_map = {name.lower(): name for name in layout}
+    slug_map = {info["slug"].lower(): name for name, info in layout.items()}
+    result: List[str] = []
+    for item in requested:
+        token = str(item or "").strip().lower()
+        if not token:
+            continue
+        stage_name = name_map.get(token) or slug_map.get(token)
+        if not stage_name:
+            raise HTTPException(status_code=400, detail=f"未知阶段: {item}")
+        if stage_name not in result:
+            result.append(stage_name)
+    if not result:
+        raise HTTPException(status_code=400, detail="未提供有效的阶段名称")
+    return result
+
+
+def _clear_directory_contents(path: str) -> int:
+    """Remove all files/directories inside `path`, returning number of items removed."""
+
+    if not path:
+        return 0
+    removed = 0
+    if not os.path.isdir(path):
+        os.makedirs(path, exist_ok=True)
+        return removed
+    for name in os.listdir(path):
+        item_path = os.path.join(path, name)
+        try:
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
+class _ParseLogger:
+    """Collect progress messages from parsing helpers."""
+
+    def __init__(self) -> None:
+        self.messages: List[Dict[str, str]] = []
+
+    def _add(self, level: str, message: str) -> None:
+        self.messages.append({"level": level, "text": str(message)})
+
+    def write(self, message: str) -> None:
+        self._add("info", message)
+
+    def info(self, message: str) -> None:
+        self._add("info", message)
+
+    def warning(self, message: str) -> None:
+        self._add("warning", message)
+
+    def error(self, message: str) -> None:
+        self._add("error", message)
+
+    def success(self, message: str) -> None:
+        self._add("success", message)
+
+
 @app.get("/")
 async def root():
     return {"message": "PQM AI Backend is running"}
@@ -622,6 +735,119 @@ async def clear_files(request: ClearFilesRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Clear files failed: {str(e)}")
+
+
+@app.post("/apqp-one-click/parse")
+async def apqp_parse(request: ApqpParseRequest):
+    """Parse APQP uploads into text using MinerU/Unstructured pipeline."""
+
+    layout = _apqp_stage_layout(request.session_id)
+    stages = _normalize_apqp_stages(layout, request.stages)
+    summary: Dict[str, Any] = {
+        "stage_order": stages,
+        "stages": {},
+        "total_created": 0,
+    }
+
+    for stage_name in stages:
+        info = layout[stage_name]
+        upload_dir = info["upload_dir"]
+        parsed_dir = info["parsed_dir"]
+        logger = _ParseLogger()
+        stage_report: Dict[str, Any] = {
+            "slug": info["slug"],
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+            "files_found": 0,
+            "pdf_created": 0,
+            "word_ppt_created": 0,
+            "excel_created": 0,
+            "text_created": 0,
+            "total_created": 0,
+        }
+
+        try:
+            files_found = [
+                name
+                for name in os.listdir(upload_dir)
+                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
+            ]
+            stage_report["files_found"] = len(files_found)
+            if not files_found:
+                logger.info("当前阶段没有上传文件，跳过解析。")
+            else:
+                pdf_created = process_pdf_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["pdf_created"] = len(pdf_created)
+
+                office_created = process_word_ppt_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["word_ppt_created"] = len(office_created)
+
+                excel_created = process_excel_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["excel_created"] = len(excel_created)
+
+                text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
+                stage_report["text_created"] = len(text_created)
+
+                total_created = (
+                    len(pdf_created)
+                    + len(office_created)
+                    + len(excel_created)
+                    + len(text_created)
+                )
+                stage_report["total_created"] = total_created
+                summary["total_created"] += total_created
+        except Exception as error:
+            logger.error(f"解析阶段失败: {error}")
+            stage_report["error"] = str(error)
+
+        stage_report["messages"] = logger.messages
+        summary["stages"][stage_name] = stage_report
+
+    return {
+        "status": "success",
+        "summary": summary,
+    }
+
+
+@app.post("/apqp-one-click/clear")
+async def apqp_clear(request: ApqpClearRequest):
+    """Clear APQP uploads and/or parsed outputs for a session."""
+
+    layout = _apqp_stage_layout(request.session_id)
+    target = (request.target or "all").lower()
+    if target not in {"uploads", "parsed", "all"}:
+        raise HTTPException(status_code=400, detail="target 必须是 uploads、parsed 或 all")
+
+    details: Dict[str, Dict[str, int]] = {}
+    total_deleted = 0
+    for stage_name, info in layout.items():
+        uploads_deleted = 0
+        parsed_deleted = 0
+        if target in {"uploads", "all"}:
+            uploads_deleted = _clear_directory_contents(info["upload_dir"])
+            total_deleted += uploads_deleted
+        if target in {"parsed", "all"}:
+            parsed_deleted = _clear_directory_contents(info["parsed_dir"])
+            total_deleted += parsed_deleted
+        details[stage_name] = {
+            "uploads_deleted": uploads_deleted,
+            "parsed_deleted": parsed_deleted,
+        }
+
+    return {
+        "status": "success",
+        "target": target,
+        "deleted": total_deleted,
+        "details": details,
+        "stage_order": list(layout.keys()),
+    }
+
 
 @app.get("/file-exists/{session_id}")
 async def file_exists(session_id: str, file_path: str):
