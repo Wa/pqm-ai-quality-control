@@ -14,7 +14,12 @@ from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
 from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_MAP
 from tabs.shared import stream_text
-from util import ensure_session_dirs, handle_file_upload, get_user_session
+from util import (
+    ensure_session_dirs,
+    get_file_list,
+    get_user_session,
+    handle_file_upload,
+)
 
 
 def clear_folder_contents(folder_path: str) -> int:
@@ -35,25 +40,6 @@ def clear_folder_contents(folder_path: str) -> int:
         except Exception:
             continue
     return removed
-
-
-def get_file_list(folder: str) -> List[Dict[str, object]]:
-    if not os.path.exists(folder):
-        return []
-    files: List[Dict[str, object]] = []
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            stat = os.stat(path)
-            files.append(
-                {
-                    "name": name,
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                    "path": path,
-                }
-            )
-    return sorted(files, key=lambda item: (item["name"].lower(), item["modified"]))
 
 
 def format_file_size(size_bytes: int) -> str:

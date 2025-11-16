@@ -10,7 +10,12 @@ import streamlit as st
 
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
-from util import ensure_session_dirs, handle_file_upload
+from util import (
+    ensure_session_dirs,
+    get_directory_refresh_token,
+    handle_file_upload,
+    list_directory_contents,
+)
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -40,22 +45,12 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
 
 
 def _collect_files(folder: str | None) -> list[dict[str, object]]:
-    if not folder or not os.path.isdir(folder):
+    if not folder:
         return []
-    items = []
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-        if not os.path.isfile(path):
-            continue
-        stat = os.stat(path)
-        items.append(
-            {
-                "name": name,
-                "path": path,
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-            }
-        )
+    token = get_directory_refresh_token(folder)
+    items = [dict(item) for item in list_directory_contents(folder, token)]
+    for item in items:
+        item.setdefault("path", os.path.join(folder, item["name"]))
     items.sort(key=lambda info: info["modified"], reverse=True)
     return items
 

@@ -11,7 +11,12 @@ import pandas as pd
 import streamlit as st
 
 from config import CONFIG
-from util import ensure_session_dirs, handle_file_upload
+from util import (
+    ensure_session_dirs,
+    get_directory_refresh_token,
+    handle_file_upload,
+    list_directory_contents,
+)
 
 from .file_elements import (
     EvaluationOrchestrator,
@@ -47,22 +52,12 @@ def _format_time(timestamp: float) -> str:
 
 
 def _collect_files(folder: str) -> List[Dict[str, object]]:
-    entries: List[Dict[str, object]] = []
-    if not folder or not os.path.isdir(folder):
-        return entries
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-        if not os.path.isfile(path):
-            continue
-        stat = os.stat(path)
-        entries.append(
-            {
-                "name": name,
-                "path": os.path.normpath(path),
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-            }
-        )
+    if not folder:
+        return []
+    token = get_directory_refresh_token(folder)
+    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+    for entry in entries:
+        entry.setdefault("path", os.path.normpath(os.path.join(folder, entry["name"])))
     entries.sort(key=lambda item: item["modified"], reverse=True)
     return entries
 

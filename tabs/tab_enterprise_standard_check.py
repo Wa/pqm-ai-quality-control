@@ -11,7 +11,13 @@ import streamlit as st
 
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
-from util import ensure_session_dirs, handle_file_upload
+from util import (
+    ensure_session_dirs,
+    get_directory_refresh_token,
+    get_file_list,
+    handle_file_upload,
+    list_directory_contents,
+)
 
 from .enterprise_standard import ENTERPRISE_WORKFLOW_SURFACE, stream_text
 
@@ -81,41 +87,40 @@ def render_enterprise_standard_check_tab(session_id):
 
     with col_info:
         st.subheader("📁 文件管理")
-        def get_file_list(folder):
-            if not folder or not os.path.exists(folder):
-                return []
-            files = []
-            
-            def _ts_from_name(name: str) -> tuple[int, int]:
-                # Extract timestamp at end of filename stem: yyyymmdd_hhmmss (or yyyymmddhhmmss)
-                stem, _ = os.path.splitext(name)
-                m = re.search(r"(\d{8})[_-]?(\d{6})$", stem)
-                if not m:
-                    return 0, 0  # (has_ts=0, ts_key=0)
-                try:
-                    ts_key = int(m.group(1) + m.group(2))  # yyyymmddhhmmss as integer
-                    return 1, ts_key
-                except Exception:
-                    return 0, 0
 
-            for f in os.listdir(folder):
-                file_path = os.path.join(folder, f)
-                if os.path.isfile(file_path):
-                    stat = os.stat(file_path)
-                    has_ts, ts_key = _ts_from_name(f)
-                    files.append({
-                        'name': f,
-                        'size': stat.st_size,
-                        'modified': stat.st_mtime,
-                        'path': file_path,
-                        'has_ts': has_ts,
-                        'ts_key': ts_key,
-                    })
-            # Sort by: has_ts desc → ts_key desc → modified desc → name asc
+        def _ts_from_name(name: str) -> tuple[int, int]:
+            stem, _ = os.path.splitext(name)
+            match = re.search(r"(\d{8})[_-]?(\d{6})$", stem)
+            if not match:
+                return 0, 0
+            try:
+                ts_key = int(match.group(1) + match.group(2))
+                return 1, ts_key
+            except Exception:
+                return 0, 0
+
+        def _sorted_files(folder: str) -> list[dict[str, object]]:
+            token = get_directory_refresh_token(folder)
+            base_entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+            enriched: list[dict[str, object]] = []
+            for entry in base_entries:
+                has_ts, ts_key = _ts_from_name(entry["name"])
+                enriched.append(
+                    {
+                        **entry,
+                        "has_ts": has_ts,
+                        "ts_key": ts_key,
+                    }
+                )
             return sorted(
-                files,
-                key=lambda x: (x['has_ts'], x['ts_key'], x['modified'], x['name'].lower()),
-                reverse=True
+                enriched,
+                key=lambda item: (
+                    item["has_ts"],
+                    item["ts_key"],
+                    item["modified"],
+                    item["name"].lower(),
+                ),
+                reverse=True,
             )
 
         def format_file_size(size_bytes):
@@ -180,7 +185,7 @@ def render_enterprise_standard_check_tab(session_id):
         # File lists in tabs (fixed order)
         tab_std, tab_exam, tab_results = st.tabs(["企业标准文件", "待检查文件", "分析结果"])
         with tab_std:
-            std_files = get_file_list(standards_dir)
+            std_files = _sorted_files(standards_dir)
             if std_files:
                 for file_info in std_files:
                     display_name = truncate_filename(file_info['name'])
@@ -202,7 +207,7 @@ def render_enterprise_standard_check_tab(session_id):
                 st.write("（未上传）")
 
         with tab_exam:
-            exam_files = get_file_list(examined_dir)
+            exam_files = _sorted_files(examined_dir)
             if exam_files:
                 for file_info in exam_files:
                     display_name = truncate_filename(file_info['name'])

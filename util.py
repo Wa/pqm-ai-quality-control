@@ -1,14 +1,16 @@
 import os
-import pandas as pd
-from openpyxl import load_workbook
-from pathlib import Path
 import json
-import streamlit as st
-from config import CONFIG
 import time
 import hashlib
+from pathlib import Path
+from typing import Dict, List
+
 import openpyxl
 import pandas as pd
+import streamlit as st
+from openpyxl import load_workbook
+
+from config import CONFIG
 
 # --- LLM Host Resolution ---
 def resolve_ollama_host(llm_backend: str) -> str:
@@ -202,16 +204,11 @@ def is_admin(username: str) -> bool:
 
 # --- Session Directory Utilities ---
 def ensure_session_dirs(base_dirs, session_id):
-    """Ensure session directories exist."""
-    import os
+    """Ensure session directories exist with lightweight session-scoped caching."""
 
-    uploads_root = str(CONFIG["directories"].get("uploads", Path(__file__).resolve().parent / "uploads"))
-    os.makedirs(uploads_root, exist_ok=True)
-    session_root = os.path.join(uploads_root, str(session_id))
-    os.makedirs(session_root, exist_ok=True)
+    cache_store: Dict[str, Dict[str, str]] = st.session_state.setdefault("_session_dir_cache", {})
 
-    # Create session-specific directories
-    session_dirs = {}
+    resolved_roots: Dict[str, str] = {}
     for dir_type, base_dir in base_dirs.items():
         template = base_dir(session_id) if callable(base_dir) else base_dir
         if isinstance(template, (list, tuple)):
@@ -221,10 +218,26 @@ def ensure_session_dirs(base_dirs, session_id):
             session_dir = base_dir_str.format(session_id=session_id)
         else:
             session_dir = os.path.join(base_dir_str, str(session_id))
+        resolved_roots[dir_type] = session_dir
+
+    signature_src = "|".join(f"{key}:{resolved_roots[key]}" for key in sorted(resolved_roots))
+    signature_hash = hashlib.sha1(signature_src.encode("utf-8")).hexdigest()
+    cache_key = f"session_dirs::{session_id}::{signature_hash}"
+
+    cached_dirs = cache_store.get(cache_key)
+    if cached_dirs and all(os.path.isdir(path) for path in cached_dirs.values()):
+        return dict(cached_dirs)
+
+    uploads_root = str(CONFIG["directories"].get("uploads", Path(__file__).resolve().parent / "uploads"))
+    os.makedirs(uploads_root, exist_ok=True)
+    session_root = os.path.join(uploads_root, str(session_id))
+    os.makedirs(session_root, exist_ok=True)
+
+    session_dirs: Dict[str, str] = {}
+    for dir_type, session_dir in resolved_roots.items():
         os.makedirs(session_dir, exist_ok=True)
         session_dirs[dir_type] = session_dir
 
-    # Ensure standard subfolders inside generated/<session_id>
     for gen_key in ("generated", "generated_files"):
         if gen_key in session_dirs:
             generated_root = session_dirs[gen_key]
@@ -237,12 +250,10 @@ def ensure_session_dirs(base_dirs, session_id):
             ]
             for name in subfolders:
                 os.makedirs(os.path.join(generated_root, name), exist_ok=True)
-            # Convenience keys
             session_dirs["generated_parameters_check"] = os.path.join(generated_root, "parameters_check")
             session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
             session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
             session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
-            # AI agent output tree
             ai_root = os.path.join(generated_root, "ai_agent")
             for name in ("examined_txt", "initial_results", "final_results", "checkpoint", "logs"):
                 os.makedirs(os.path.join(ai_root, name), exist_ok=True)
@@ -253,7 +264,6 @@ def ensure_session_dirs(base_dirs, session_id):
             session_dirs["generated_ai_agent_checkpoint"] = os.path.join(ai_root, "checkpoint")
             session_dirs["generated_ai_agent_logs"] = os.path.join(ai_root, "logs")
 
-    # Ensure enterprise, special symbols, and history issue directories live under uploads/<session>/<tab>
     def _ensure_upload_subdir(key: str, *parts: str) -> None:
         path = os.path.join(session_root, *parts)
         os.makedirs(path, exist_ok=True)
@@ -270,10 +280,55 @@ def ensure_session_dirs(base_dirs, session_id):
         _ensure_upload_subdir("history_cp", "history_issues", "cp")
         _ensure_upload_subdir("ai_agent_inputs", "ai_agent", "inputs")
     except Exception:
-        # Fail-safe: do not break callers if path operations fail
         pass
 
+    cache_store[cache_key] = dict(session_dirs)
+    st.session_state["_session_dir_cache"] = cache_store
     return session_dirs
+
+
+def get_directory_refresh_token(path: str) -> float:
+    """Return an mtime-based token for cache busting directory listings."""
+
+    try:
+        return os.stat(path).st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False)
+def list_directory_contents(path: str, refresh_token: float) -> tuple[Dict[str, object], ...]:
+    """Return cached file metadata for ``path`` keyed by ``refresh_token``."""
+
+    if not path or not os.path.isdir(path):
+        return []
+
+    entries: List[Dict[str, object]] = []
+    for name in os.listdir(path):
+        file_path = os.path.join(path, name)
+        if not os.path.isfile(file_path):
+            continue
+        stat_result = os.stat(file_path)
+        entries.append(
+            {
+                "name": name,
+                "path": file_path,
+                "size": stat_result.st_size,
+                "modified": stat_result.st_mtime,
+            }
+        )
+
+    return tuple(entries)
+
+
+def get_file_list(folder: str) -> List[Dict[str, object]]:
+    """Return a sorted list of file metadata for ``folder`` leveraging cache helpers."""
+
+    token = get_directory_refresh_token(folder)
+    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+    for entry in entries:
+        entry.setdefault("path", os.path.join(folder, entry["name"]))
+    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
 
 # --- Structured Session State Management ---
 def get_user_session(session_id, tab_name=None):
