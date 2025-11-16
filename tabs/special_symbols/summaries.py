@@ -470,6 +470,15 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                     columns.append(column_name)
             rows.append(normalized)
 
+    # Filter out rows with matching symbols
+    if rows:
+        # Lazy import to avoid circular dependency
+        from .background import _filter_identical_matches
+
+        filtered_rows, removed_count = _filter_identical_matches(rows)
+        rows = filtered_rows
+        # Note: removed_count rows with matching symbols have been filtered out
+
     csv_path: str | None = None
     xlsx_path: str | None = None
 
