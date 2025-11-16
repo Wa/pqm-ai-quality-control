@@ -320,6 +320,16 @@ def list_directory_contents(path: str, refresh_token: float) -> tuple[Dict[str, 
 
     return tuple(entries)
 
+
+def get_file_list(folder: str) -> List[Dict[str, object]]:
+    """Return a sorted list of file metadata for ``folder`` leveraging cache helpers."""
+
+    token = get_directory_refresh_token(folder)
+    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+    for entry in entries:
+        entry.setdefault("path", os.path.join(folder, entry["name"]))
+    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
+
 # --- Structured Session State Management ---
 def get_user_session(session_id, tab_name=None):
     """Get or create a structured user session with optional tab-specific state."""

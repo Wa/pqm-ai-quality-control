@@ -16,10 +16,9 @@ from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_M
 from tabs.shared import stream_text
 from util import (
     ensure_session_dirs,
-    get_directory_refresh_token,
+    get_file_list,
     get_user_session,
     handle_file_upload,
-    list_directory_contents,
 )
 
 
@@ -41,14 +40,6 @@ def clear_folder_contents(folder_path: str) -> int:
         except Exception:
             continue
     return removed
-
-
-def get_file_list(folder: str) -> List[Dict[str, object]]:
-    token = get_directory_refresh_token(folder)
-    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
-    for entry in entries:
-        entry.setdefault("path", os.path.join(folder, entry["name"]))
-    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
 
 
 def format_file_size(size_bytes: int) -> str:
