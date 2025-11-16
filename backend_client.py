@@ -1,7 +1,19 @@
-import requests
 import os
 from typing import Any, Dict, List, Optional
+
+import requests
 import streamlit as st
+
+
+@st.cache_data(show_spinner=False, ttl=5)
+def _cached_health_check(base_url: str) -> bool:
+    """Return backend health status with a short cache to avoid repeated calls."""
+
+    try:
+        response = requests.get(f"{base_url}/health", timeout=2)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
 
 class BackendClient:
     """Client for communicating with the FastAPI backend"""
@@ -11,11 +23,7 @@ class BackendClient:
     
     def health_check(self) -> bool:
         """Check if backend is running"""
-        try:
-            response = requests.get(f"{self.base_url}/health", timeout=5)
-            return response.status_code == 200
-        except:
-            return False
+        return _cached_health_check(self.base_url)
     
     def upload_file(self, session_id: str, file_type: str, file_path: str) -> Dict:
         """Upload a file to the backend"""
@@ -343,7 +351,10 @@ def get_backend_client():
     """Get backend client instance"""
     return BackendClient()
 
-def is_backend_available() -> bool:
-    """Check if FastAPI backend is available"""
+def is_backend_available(*, force_refresh: bool = False) -> bool:
+    """Check if FastAPI backend is available, optionally forcing a refresh."""
+
+    if force_refresh:
+        _cached_health_check.clear()
     client = get_backend_client()
-    return client.health_check() 
+    return client.health_check()

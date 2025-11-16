@@ -14,7 +14,13 @@ from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
 from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_MAP
 from tabs.shared import stream_text
-from util import ensure_session_dirs, handle_file_upload, get_user_session
+from util import (
+    ensure_session_dirs,
+    get_directory_refresh_token,
+    get_user_session,
+    handle_file_upload,
+    list_directory_contents,
+)
 
 
 def clear_folder_contents(folder_path: str) -> int:
@@ -38,22 +44,11 @@ def clear_folder_contents(folder_path: str) -> int:
 
 
 def get_file_list(folder: str) -> List[Dict[str, object]]:
-    if not os.path.exists(folder):
-        return []
-    files: List[Dict[str, object]] = []
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            stat = os.stat(path)
-            files.append(
-                {
-                    "name": name,
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                    "path": path,
-                }
-            )
-    return sorted(files, key=lambda item: (item["name"].lower(), item["modified"]))
+    token = get_directory_refresh_token(folder)
+    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+    for entry in entries:
+        entry.setdefault("path", os.path.join(folder, entry["name"]))
+    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
 
 
 def format_file_size(size_bytes: int) -> str:

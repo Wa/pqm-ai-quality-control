@@ -11,7 +11,12 @@ import streamlit as st
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
 from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_MAP
-from util import ensure_session_dirs, handle_file_upload
+from util import (
+    ensure_session_dirs,
+    get_directory_refresh_token,
+    handle_file_upload,
+    list_directory_contents,
+)
 from tabs.shared.file_conversion import (
     process_excel_folder,
     process_pdf_folder,
@@ -21,22 +26,15 @@ from tabs.shared.file_conversion import (
 
 
 def _list_files(folder: str) -> List[Dict[str, object]]:
-    if not folder or not os.path.exists(folder):
+    if not folder:
         return []
-    files: List[Dict[str, object]] = []
-    for name in os.listdir(folder):
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            stat = os.stat(path)
-            files.append(
-                {
-                    "name": name,
-                    "size": int(stat.st_size),
-                    "modified": float(stat.st_mtime),
-                    "path": path,
-                }
-            )
-    return sorted(files, key=lambda item: (item["name"].lower(), item["modified"]))
+    token = get_directory_refresh_token(folder)
+    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
+    for entry in entries:
+        entry.setdefault("path", os.path.join(folder, entry["name"]))
+        entry["size"] = int(entry.get("size", 0))
+        entry["modified"] = float(entry.get("modified", 0.0))
+    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
 
 
 def _format_file_size(size_bytes: int) -> str:
