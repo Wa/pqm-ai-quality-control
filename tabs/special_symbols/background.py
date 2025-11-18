@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
+import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -58,6 +61,24 @@ MODELSCOPE_COMPARISON_MODELS: List[Tuple[str, str]] = [
     ("ModelScope DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),
     ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
 ]
+
+CHUNK_SUBMISSION_INTERVAL_SECONDS = 10.0
+
+_MODELSCOPE_THROTTLE_LOCK = threading.Lock()
+_LAST_MODELSCOPE_CALL_TS = 0.0
+
+
+def _await_chunk_submission_window(last_submission_ts: float) -> float:
+    """Wait until the 10s gap between chunk submissions is satisfied."""
+
+    if last_submission_ts <= 0:
+        return time.time()
+
+    now = time.time()
+    elapsed = now - last_submission_ts
+    if elapsed < CHUNK_SUBMISSION_INTERVAL_SECONDS:
+        time.sleep(CHUNK_SUBMISSION_INTERVAL_SECONDS - elapsed)
+    return time.time()
 
 
 def _execute_ollama_chat_with_timeout(
@@ -339,6 +360,138 @@ def _filter_identical_matches(rows: List[Dict[str, object]]) -> Tuple[List[Dict[
         filtered.append(row)
 
     return filtered, removed
+
+
+def _filter_missing_symbol_rows(rows: List[Dict[str, object]]) -> Tuple[List[Dict[str, object]], int]:
+    filtered: List[Dict[str, object]] = []
+    removed = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        base_symbol = str(row.get("基准特殊特性分类") or "").strip()
+        exam_symbol = str(row.get("待检查特殊特性分类") or "").strip()
+        if not base_symbol or not exam_symbol:
+            removed += 1
+            continue
+        filtered.append(row)
+
+    return filtered, removed
+
+
+def _await_modelscope_window() -> None:
+    """Ensure there is a 10s gap between ModelScope invocations."""
+
+    global _LAST_MODELSCOPE_CALL_TS
+    with _MODELSCOPE_THROTTLE_LOCK:
+        now = time.time()
+        elapsed = now - _LAST_MODELSCOPE_CALL_TS
+        if elapsed < CHUNK_SUBMISSION_INTERVAL_SECONDS:
+            time.sleep(CHUNK_SUBMISSION_INTERVAL_SECONDS - elapsed)
+        _LAST_MODELSCOPE_CALL_TS = time.time()
+
+
+def _strip_trailing_commas(value: str) -> str:
+    pattern = re.compile(r",(\s*[}\]])")
+    previous = None
+    current = value
+    while previous != current:
+        previous = current
+        current = pattern.sub(r"\1", current)
+    return current
+
+
+def _loose_json_loads(text: str) -> Optional[object]:
+    candidate = _extract_json_text(text)
+    if not candidate:
+        return None
+    attempts = [candidate]
+    stripped_commas = _strip_trailing_commas(candidate)
+    if stripped_commas not in attempts:
+        attempts.append(stripped_commas)
+    for attempt in attempts:
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError:
+            continue
+    for attempt in attempts:
+        try:
+            return ast.literal_eval(attempt)
+        except (ValueError, SyntaxError):
+            continue
+    return None
+
+
+def _normalize_json_rows(obj: object) -> Optional[List[Dict[str, object]]]:
+    if isinstance(obj, dict):
+        return [obj]
+    if isinstance(obj, list):
+        normalized: List[Dict[str, object]] = []
+        for item in obj:
+            if isinstance(item, dict):
+                normalized.append(item)
+        if normalized or obj == []:
+            return normalized
+    return None
+
+
+def _parse_json_rows_loose(text: str) -> Optional[List[Dict[str, object]]]:
+    data = _loose_json_loads(text)
+    if data is None:
+        return None
+    return _normalize_json_rows(data)
+
+
+def _build_exam_chunks(exam_text: str) -> List[Dict[str, object]]:
+    """Split exam content by source file for chunked comparison."""
+
+    parsed_rows = _parse_json_rows_loose(exam_text)
+    if not parsed_rows:
+        fallback = exam_text.strip() or "无"
+        return [
+            {
+                "file_name": "全部待检内容",
+                "sheet_count": 0,
+                "payload_text": fallback,
+            }
+        ]
+
+    grouped: OrderedDict[str, List[Dict[str, object]]] = OrderedDict()
+    for record in parsed_rows:
+        file_key = str(record.get("文件名") or record.get("待检查文件名") or "未命名文件")
+        grouped.setdefault(file_key, []).append(record)
+
+    chunks: List[Dict[str, object]] = []
+    for file_name, records in grouped.items():
+        payload_text = json.dumps(records, ensure_ascii=False, indent=2)
+        chunks.append(
+            {
+                "file_name": file_name or "未命名文件",
+                "sheet_count": len(records),
+                "payload_text": payload_text,
+            }
+        )
+
+    if not chunks:
+        fallback = exam_text.strip() or "无"
+        return [
+            {
+                "file_name": "全部待检内容",
+                "sheet_count": 0,
+                "payload_text": fallback,
+            }
+        ]
+    return chunks
+
+
+def _make_chunk_stream_name(base: str, chunk_index: int, file_name: str) -> str:
+    safe = re.sub(r"[^0-9A-Za-z]+", "_", file_name or "chunk").strip("_")
+    if not safe:
+        safe = "chunk"
+    if len(safe) > 32:
+        safe = safe[:32]
+    return f"{base}_chunk_{chunk_index:02d}_{safe}"
 
 
 def _run_gpt_extraction(
@@ -692,6 +845,7 @@ def _run_gpt_extraction_parallel(
 
                 if provider_engine == "modelscope":
                     start_ts = time.time()
+                    _await_modelscope_window()
                     try:
                         response = client.chat(
                             model=provider_model,
@@ -1164,10 +1318,11 @@ def run_special_symbols_job(
     if turbo_mode_enabled:
         if modelscope_client_factory is not None:
             turbo_parallel_factory = modelscope_client_factory
-            turbo_parallel_model_name = modelscope_model_name
-            turbo_parallel_label = "ModelScope DeepSeek-V3.1"
+            first_model = MODELSCOPE_COMPARISON_MODELS[0]
+            turbo_parallel_model_name = first_model[1]
+            turbo_parallel_label = first_model[0]
             turbo_unavailable_message = "ModelScope DeepSeek 客户端不可用，已跳过符号提取"
-            turbo_enabled_description = "将使用 ModelScope DeepSeek-V3.1 并行处理待检文本。"
+            turbo_enabled_description = f"将依次使用 {', '.join(label for label, _ in MODELSCOPE_COMPARISON_MODELS)} 并行处理待检文本。"
             turbo_engine_tag = "modelscope"
         elif cloud_client_factory is not None:
             turbo_parallel_factory = cloud_client_factory
@@ -1204,12 +1359,13 @@ def run_special_symbols_job(
             # Build provider sequence: ModelScope (3 attempts) -> Cloud Ollama -> Local Ollama
             provider_sequence: List[Tuple[str, Callable[[], Any], str, str]] = []
             if modelscope_client_factory is not None:
-                provider_sequence.append((
-                    "ModelScope DeepSeek-V3.1",
-                    modelscope_client_factory,
-                    modelscope_model_name,
-                    "modelscope",
-                ))
+                for provider_label, provider_model in MODELSCOPE_COMPARISON_MODELS:
+                    provider_sequence.append((
+                        provider_label,
+                        modelscope_client_factory,
+                        provider_model,
+                        "modelscope",
+                    ))
             if cloud_client_factory is not None:
                 provider_sequence.append((
                     "云端 gpt-oss",
@@ -1283,12 +1439,13 @@ def run_special_symbols_job(
     if turbo_mode_enabled:
         provider_sequence: List[Tuple[str, Callable[[], Any], str, str]] = []
         if modelscope_client_factory is not None:
-            provider_sequence.append((
-                "ModelScope DeepSeek-V3.1",
-                modelscope_client_factory,
-                modelscope_model_name,
-                "modelscope",
-            ))
+            for provider_label, provider_model in MODELSCOPE_COMPARISON_MODELS:
+                provider_sequence.append((
+                    provider_label,
+                    modelscope_client_factory,
+                    provider_model,
+                    "modelscope",
+                ))
         if cloud_client_factory is not None:
             provider_sequence.append((
                 "云端 gpt-oss",
@@ -1361,10 +1518,6 @@ def run_special_symbols_job(
         None,
     )
 
-    total_chunks = 1
-    processed_chunks = 0
-    publish({"total_chunks": total_chunks, "processed_chunks": processed_chunks})
-
     emitter.set_stage("compare")
 
     if cloud_ollama_client is None and local_ollama_client is None and modelscope_client_factory is None:
@@ -1403,6 +1556,11 @@ def run_special_symbols_job(
     if not standards_section:
         standards_section = "无"
 
+    exam_chunks_payloads = _build_exam_chunks(exam_section)
+    total_chunks = max(1, len(exam_chunks_payloads))
+    processed_chunks = 0
+    publish({"total_chunks": total_chunks, "processed_chunks": processed_chunks})
+
     output_requirements = (
         "\n\n输出要求（严格遵守）：\n"
         "- 仅输出一个 JSON 数组（UTF-8，无额外文本或说明）。\n"
@@ -1410,11 +1568,6 @@ def run_special_symbols_job(
         '- 如果某个字段在源材料中缺失，请使用空字符串 ""。\n'
         "- 若未发现任何符号不一致，请输出空数组 []。\n"
     )
-    combined_prompt = (
-        f"{SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX}{exam_section}\n\n以下是企业基准文件：\n{standards_section}"
-        f"{output_requirements}"
-    )
-
     comparison_base = os.path.basename(exam_combined_path) if exam_combined_path else "examined_txt_filtered_final"
     comparison_name = os.path.splitext(comparison_base)[0] + "_comparison"
 
@@ -1446,219 +1599,282 @@ def run_special_symbols_job(
         ),
         cloud_comparison_model,
     )
-    publish(
-        {
-            "stream": {
-                "kind": "prompt",
-                "file": f"{comparison_name}.txt",
-                "part": 1,
-                "total_parts": 1,
-                "engine": first_engine,
-                "text": combined_prompt,
-            }
-        }
-    )
 
-    response_text = ""
-    last_stats = None
-    used_model_name: Optional[str] = None
-    used_engine_tag: str = "ollama"
-    start_ts = 0.0
+    chunk_prompts: List[str] = []
+    chunk_response_sections: List[str] = []
+    aggregated_rows: List[Dict[str, object]] = []
+    parsed_chunk_count = 0
+    failed_chunk_indices: List[int] = []
     last_error: Optional[Exception] = None
 
-    for attempt_label, attempt_client, attempt_model, attempt_engine_tag in attempt_sequence:
-        if attempt_client is None or not attempt_model:
-            continue
+    last_chunk_submission_ts = 0.0
 
-        emitter.info(f"正在调用 {attempt_label} 进行对比分析")
-        start_ts = time.time()
-        response_text = ""
-        last_stats = None
-        try:
-            if isinstance(attempt_client, ModelScopeClient):
-                throttled = False
-                ms_attempt_error: Optional[Exception] = None
-                response_text = ""
-                used_model_name_local: Optional[str] = None
-                last_stats = None
+    for chunk_index, chunk_payload in enumerate(exam_chunks_payloads, start=1):
+        if not ensure_running("compare", f"第{chunk_index}组对比分析"):
+            return {"final_results": []}
 
-                for attempt_index in range(3):
-                    try:
-                        resp = attempt_client.chat(
-                            model=attempt_model,
-                            messages=[{"role": "user", "content": combined_prompt}],
-                            stream=False,
-                            options={"num_ctx": 40001},
+        chunk_file_display = str(chunk_payload.get("file_name") or f"待检文件{chunk_index}")
+        sheet_count = int(chunk_payload.get("sheet_count") or 0)
+        chunk_intro = (
+            f"（提示：本提示仅包含待检文本的第{chunk_index}/{total_chunks}组，源文件：{chunk_file_display}，"
+            f"包含 {sheet_count} 条记录。请独立完成本组比对。）\n"
+        )
+        chunk_exam_section = str(chunk_payload.get("payload_text") or exam_section or "无")
+        chunk_prompt = (
+            f"{SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX}{chunk_intro}{chunk_exam_section}\n\n以下是企业基准文件：\n{standards_section}"
+            f"{output_requirements}"
+        )
+        chunk_prompts.append(chunk_prompt)
+        chunk_stream_name = _make_chunk_stream_name(comparison_name, chunk_index, chunk_file_display)
+        publish(
+            {
+                "stream": {
+                    "kind": "prompt",
+                    "file": f"{chunk_stream_name}.txt",
+                    "part": chunk_index,
+                    "total_parts": total_chunks,
+                    "engine": first_engine,
+                    "text": chunk_prompt,
+                }
+            }
+        )
+
+        if chunk_index == 1:
+            last_chunk_submission_ts = time.time()
+        else:
+            last_chunk_submission_ts = _await_chunk_submission_window(last_chunk_submission_ts)
+
+        chunk_start_ts = last_chunk_submission_ts
+        chunk_response_text = ""
+        chunk_last_stats = None
+        chunk_used_model_name: Optional[str] = None
+        chunk_used_engine_tag = "ollama"
+        chunk_success = False
+
+        for attempt_label, attempt_client, attempt_model, attempt_engine_tag in attempt_sequence:
+            if attempt_client is None or not attempt_model:
+                continue
+
+            emitter.info(
+                f"正在调用 {attempt_label} 处理第{chunk_index}组 ({chunk_file_display})"
+            )
+            try:
+                if isinstance(attempt_client, ModelScopeClient):
+                    throttled = False
+                    ms_attempt_error: Optional[Exception] = None
+                    chunk_response_text = ""
+                    chunk_used_model_candidate: Optional[str] = None
+
+                    for attempt_retry in range(3):
+                        try:
+                            _await_modelscope_window()
+                            resp = attempt_client.chat(
+                                model=attempt_model,
+                                messages=[{"role": "user", "content": chunk_prompt}],
+                                stream=False,
+                                options={"num_ctx": 40001},
+                            )
+                        except Exception as call_error:
+                            ms_attempt_error = call_error
+                            if _is_rate_limit_error(call_error):
+                                throttled = True
+                                emitter.warning(
+                                    f"{attempt_label} 返回 429（第{attempt_retry + 1}次尝试），切换至下一个模型。"
+                                )
+                                break
+                            report_exception(
+                                f"调用 {attempt_label} 对比分析失败",
+                                call_error,
+                                level="warning",
+                            )
+                            publish(
+                                {
+                                    "stage": "compare",
+                                    "message": f"调用 {attempt_label} 失败: {call_error}",
+                                    "error": str(call_error),
+                                }
+                            )
+                            if not ensure_running(
+                                "compare", f"{attempt_label} 对比分析（{chunk_stream_name}）"
+                            ):
+                                return {"final_results": []}
+                            continue
+
+                        piece = (
+                            (resp.get("message", {}) or {}).get("content")
+                            or resp.get("response")
+                            or ""
                         )
-                    except Exception as call_error:
-                        ms_attempt_error = call_error
-                        if _is_rate_limit_error(call_error):
-                            throttled = True
-                            emitter.warning(f"{attempt_label} 返回 429（第{attempt_index + 1}次尝试），切换至下一个模型。")
-                            break
-                        report_exception(f"调用 {attempt_label} 对比分析失败", call_error, level="warning")
+                        candidate_text = piece or ""
                         publish(
                             {
-                                "stage": "compare",
-                                "message": f"调用 {attempt_label} 失败: {call_error}",
-                                "error": str(call_error),
+                                "stream": {
+                                    "kind": "response",
+                                    "file": f"{chunk_stream_name}.txt",
+                                    "part": chunk_index,
+                                    "total_parts": total_chunks,
+                                    "engine": resp.get("model") or attempt_model,
+                                    "text": candidate_text,
+                                }
                             }
                         )
-                        if not ensure_running("compare", f"{attempt_label} 对比分析（{comparison_name}）"):
+                        chunk_last_stats = resp.get("eval_info") or resp.get("stats") or None
+                        chunk_used_model_candidate = resp.get("model") or attempt_model
+                        chunk_used_engine_tag = attempt_engine_tag
+                        last_error = None
+                        if not ensure_running(
+                            "compare", f"{attempt_label} 对比分析（{chunk_stream_name}）"
+                        ):
                             return {"final_results": []}
+                        if _should_retry_response(candidate_text):
+                            emitter.warning(
+                                f"{attempt_label} 第{attempt_retry + 1}次返回为空或无效结果，准备重试。"
+                            )
+                            if attempt_retry < 2:
+                                time.sleep(1.0)
+                                continue
+                            candidate_text = "[]"
+                        chunk_response_text = candidate_text
+                        chunk_used_model_name = chunk_used_model_candidate or attempt_model
+                        chunk_success = True
+                        break
+
+                    if throttled:
                         continue
-
-                    piece = (
-                        (resp.get("message", {}) or {}).get("content")
-                        or resp.get("response")
-                        or ""
-                    )
-                    candidate_text = piece or ""
-                    publish(
-                        {
-                            "stream": {
-                                "kind": "response",
-                                "file": f"{comparison_name}.txt",
-                                "part": 1,
-                                "total_parts": 1,
-                                "engine": resp.get("model") or attempt_model,
-                                "text": candidate_text,
-                            }
-                        }
-                    )
-                    last_stats = resp.get("eval_info") or resp.get("stats") or None
-                    used_model_name_local = resp.get("model") or attempt_model
-                    used_engine_tag = attempt_engine_tag
-                    last_error = None
-                    if not ensure_running("compare", f"{attempt_label} 对比分析（{comparison_name}）"):
-                        return {"final_results": []}
-                    if _should_retry_response(candidate_text):
-                        emitter.warning(
-                            f"{attempt_label} 第{attempt_index + 1}次返回为空或无效结果，准备重试。"
-                        )
-                        if attempt_index < 2:
-                            time.sleep(1.0)
-                            continue
-                        candidate_text = "[]"
-                    response_text = candidate_text
+                    if not chunk_success:
+                        if ms_attempt_error is not None:
+                            last_error = ms_attempt_error
+                        continue
                     break
-
-                if throttled:
-                    continue
-                if not response_text:
-                    if ms_attempt_error is not None:
-                        last_error = ms_attempt_error
-                    continue
-                used_model_name = used_model_name_local or attempt_model
-                break
-            else:
-                # Ollama: streaming
-                for chunk in attempt_client.chat(
-                    model=attempt_model,
-                    messages=[{"role": "user", "content": combined_prompt}],
-                    stream=True,
-                    options={"num_ctx": 40001},
-                ):
-                    piece = (
-                        chunk.get("message", {}).get("content")
-                        or chunk.get("response")
-                        or ""
-                    )
-                    if piece:
-                        response_text += piece
-                    publish(
-                        {
-                            "stream": {
-                                "kind": "response",
-                                "file": f"{comparison_name}.txt",
-                                "part": 1,
-                                "total_parts": 1,
-                                "engine": attempt_model,
-                                "text": response_text,
+                else:
+                    for stream_chunk in attempt_client.chat(
+                        model=attempt_model,
+                        messages=[{"role": "user", "content": chunk_prompt}],
+                        stream=True,
+                        options={"num_ctx": 40001},
+                    ):
+                        piece = (
+                            stream_chunk.get("message", {}).get("content")
+                            or stream_chunk.get("response")
+                            or ""
+                        )
+                        if piece:
+                            chunk_response_text += piece
+                        publish(
+                            {
+                                "stream": {
+                                    "kind": "response",
+                                    "file": f"{chunk_stream_name}.txt",
+                                    "part": chunk_index,
+                                    "total_parts": total_chunks,
+                                    "engine": attempt_model,
+                                    "text": chunk_response_text,
+                                }
                             }
-                        }
-                    )
-                    last_stats = chunk.get("eval_info") or chunk.get("stats") or last_stats
-                    if not ensure_running("compare", f"{attempt_label} 对比分析（{comparison_name}）"):
-                        return {"final_results": []}
-                used_model_name = attempt_model
-                used_engine_tag = attempt_engine_tag
-                last_error = None
-                break
-        except Exception as error:
-            last_error = error
-            report_exception(f"调用 {attempt_label} 对比分析失败", error, level="warning")
-            publish(
+                        )
+                        chunk_last_stats = (
+                            stream_chunk.get("eval_info")
+                            or stream_chunk.get("stats")
+                            or chunk_last_stats
+                        )
+                        if not ensure_running(
+                            "compare", f"{attempt_label} 对比分析（{chunk_stream_name}）"
+                        ):
+                            return {"final_results": []}
+                    chunk_used_model_name = attempt_model
+                    chunk_used_engine_tag = attempt_engine_tag
+                    last_error = None
+                    chunk_success = True
+                    break
+            except Exception as error:
+                last_error = error
+                report_exception(f"调用 {attempt_label} 对比分析失败", error, level="warning")
+                publish(
+                    {
+                        "stage": "compare",
+                        "message": f"调用 {attempt_label} 失败: {error}",
+                        "error": str(error),
+                    }
+                )
+                emitter.warning(f"{attempt_label} 调用失败，尝试备用通道")
+                continue
+
+        if not chunk_success:
+            message = f"第{chunk_index}组对比失败，无法执行对比分析"
+            if last_error:
+                message = f"{message}：{last_error}"
+            publish({"status": "failed", "stage": "compare", "message": message})
+            return {"final_results": []}
+
+        duration_ms = int((time.time() - chunk_start_ts) * 1000)
+        chunk_response_clean = chunk_response_text.strip() or "[]"
+        chunk_response_sections.append(
+            f"【第{chunk_index}/{total_chunks}组：{chunk_file_display}】\n{chunk_response_clean}"
+        )
+
+        if chunk_used_model_name:
+            log_llm_metrics(
+                output_root,
+                session_id,
                 {
-                    "stage": "compare",
-                    "message": f"调用 {attempt_label} 失败: {error}",
-                    "error": str(error),
-                }
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "engine": chunk_used_engine_tag,
+                    "model": chunk_used_model_name,
+                    "session_id": session_id,
+                    "file": chunk_stream_name,
+                    "part": chunk_index,
+                    "phase": "compare",
+                    "prompt_chars": len(chunk_prompt),
+                    "prompt_tokens": estimate_tokens(chunk_prompt, chunk_used_model_name),
+                    "output_chars": len(chunk_response_clean),
+                    "output_tokens": estimate_tokens(chunk_response_clean, chunk_used_model_name),
+                    "duration_ms": duration_ms,
+                    "success": 1 if chunk_response_clean else 0,
+                    "stats": chunk_last_stats or {},
+                    "error": "",
+                },
             )
-            emitter.warning(f"{attempt_label} 调用失败，尝试备用通道")
-            continue
 
-    if used_model_name is None:
-        message = "云端与本地 gpt-oss 均不可用，无法执行对比分析"
-        if last_error:
-            message = f"{message}：{last_error}"
-        publish({"status": "failed", "stage": "compare", "message": message})
+        parsed_chunk = _parse_json_rows_loose(chunk_response_clean)
+        if parsed_chunk is None:
+            failed_chunk_indices.append(chunk_index)
+        else:
+            aggregated_rows.extend(parsed_chunk)
+            parsed_chunk_count += 1
+
+        processed_chunks = chunk_index
+        publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
+
+    if not chunk_response_sections:
+        publish(
+            {
+                "status": "failed",
+                "stage": "compare",
+                "message": "未能获得任何对比结果",
+            }
+        )
         return {"final_results": []}
 
-    duration_ms = int((time.time() - start_ts) * 1000)
-    if not ensure_running("compare", "对比分析完成"):
-        return {"final_results": []}
-    response_clean = response_text.strip()
+    if failed_chunk_indices:
+        emitter.warning(
+            "以下分组未能解析为有效JSON："
+            + ", ".join(str(idx) for idx in failed_chunk_indices)
+        )
+
+    response_clean = "\n\n".join(chunk_response_sections).strip()
     if not response_clean:
         response_clean = "[]"
-
-    log_llm_metrics(
-        output_root,
-        session_id,
-            {
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "engine": used_engine_tag,
-                "model": used_model_name,
-                "session_id": session_id,
-                "file": comparison_name,
-                "part": 1,
-                "phase": "compare",
-                "prompt_chars": len(combined_prompt),
-                "prompt_tokens": estimate_tokens(combined_prompt, used_model_name),
-                "output_chars": len(response_clean),
-                "output_tokens": estimate_tokens(response_clean, used_model_name),
-                "duration_ms": duration_ms,
-                "success": 1 if response_clean else 0,
-                "stats": last_stats or {},
-                "error": "",
-            },
-    )
 
     if increment:
         advance_ollama_progress()
 
-    processed_chunks = 1
-    publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
-
     json_output_written = False
     response_to_save = response_clean
     parsed_rows: Optional[List[Dict[str, object]]] = None
-    json_block = _extract_json_text(response_clean)
-    try:
-        parsed = json.loads(json_block)
-        if isinstance(parsed, dict):
-            parsed = [parsed]
-        if isinstance(parsed, list):
-            normalized_list: List[Dict[str, object]] = []
-            for item in parsed:
-                if isinstance(item, dict):
-                    normalized_list.append(item)
-            if normalized_list:
-                parsed_rows = normalized_list
-            elif isinstance(parsed, list) and not parsed:
-                parsed_rows = []
-    except json.JSONDecodeError:
-        parsed_rows = None
+    if parsed_chunk_count > 0:
+        parsed_rows = aggregated_rows
+    else:
+        parsed_rows = _parse_json_rows_loose(response_clean)
 
     if parsed_rows is not None:
         filtered_rows, removed_matches = _filter_identical_matches(parsed_rows)
@@ -1682,7 +1898,7 @@ def run_special_symbols_job(
     try:
         if not ensure_running("aggregate", "保存对比与摘要结果"):
             return {"final_results": []}
-        persist_compare_outputs(initial_results_dir, comparison_name, [combined_prompt], response_to_save)
+        persist_compare_outputs(initial_results_dir, comparison_name, chunk_prompts, response_to_save)
         if not json_output_written:
             summarize_with_ollama(initial_results_dir, output_root, session_id, comparison_name, response_clean)
     except Exception as error:
