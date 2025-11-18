@@ -362,6 +362,24 @@ def _filter_identical_matches(rows: List[Dict[str, object]]) -> Tuple[List[Dict[
     return filtered, removed
 
 
+def _filter_missing_symbol_rows(rows: List[Dict[str, object]]) -> Tuple[List[Dict[str, object]], int]:
+    filtered: List[Dict[str, object]] = []
+    removed = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        base_symbol = str(row.get("基准特殊特性分类") or "").strip()
+        exam_symbol = str(row.get("待检查特殊特性分类") or "").strip()
+        if not base_symbol or not exam_symbol:
+            removed += 1
+            continue
+        filtered.append(row)
+
+    return filtered, removed
+
+
 def _await_modelscope_window() -> None:
     """Ensure there is a 10s gap between ModelScope invocations."""
 

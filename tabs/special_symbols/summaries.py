@@ -470,14 +470,19 @@ def aggregate_outputs(initial_dir: str, enterprise_out: str, session_id: str) ->
                     columns.append(column_name)
             rows.append(normalized)
 
-    # Filter out rows with matching symbols
+    # Filter out rows with matching symbols or missing symbol entries
     if rows:
         # Lazy import to avoid circular dependency
-        from .background import _filter_identical_matches
+        from .background import _filter_identical_matches, _filter_missing_symbol_rows
 
         filtered_rows, removed_count = _filter_identical_matches(rows)
         rows = filtered_rows
-        # Note: removed_count rows with matching symbols have been filtered out
+        if rows:
+            rows, removed_missing = _filter_missing_symbol_rows(rows)
+        else:
+            removed_missing = 0
+        # Note: removed_count rows with matching symbols and removed_missing rows
+        # lacking symbol data have been filtered out
 
     csv_path: str | None = None
     xlsx_path: str | None = None
