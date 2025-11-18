@@ -68,6 +68,19 @@ _MODELSCOPE_THROTTLE_LOCK = threading.Lock()
 _LAST_MODELSCOPE_CALL_TS = 0.0
 
 
+def _await_chunk_submission_window(last_submission_ts: float) -> float:
+    """Wait until the 10s gap between chunk submissions is satisfied."""
+
+    if last_submission_ts <= 0:
+        return time.time()
+
+    now = time.time()
+    elapsed = now - last_submission_ts
+    if elapsed < CHUNK_SUBMISSION_INTERVAL_SECONDS:
+        time.sleep(CHUNK_SUBMISSION_INTERVAL_SECONDS - elapsed)
+    return time.time()
+
+
 def _execute_ollama_chat_with_timeout(
     client: OllamaClient,
     model_name: str,
@@ -1573,6 +1586,8 @@ def run_special_symbols_job(
     failed_chunk_indices: List[int] = []
     last_error: Optional[Exception] = None
 
+    last_chunk_submission_ts = 0.0
+
     for chunk_index, chunk_payload in enumerate(exam_chunks_payloads, start=1):
         if not ensure_running("compare", f"第{chunk_index}组对比分析"):
             return {"final_results": []}
@@ -1603,7 +1618,12 @@ def run_special_symbols_job(
             }
         )
 
-        chunk_start_ts = time.time()
+        if chunk_index == 1:
+            last_chunk_submission_ts = time.time()
+        else:
+            last_chunk_submission_ts = _await_chunk_submission_window(last_chunk_submission_ts)
+
+        chunk_start_ts = last_chunk_submission_ts
         chunk_response_text = ""
         chunk_last_stats = None
         chunk_used_model_name: Optional[str] = None
@@ -1803,9 +1823,6 @@ def run_special_symbols_job(
 
         processed_chunks = chunk_index
         publish({"processed_chunks": processed_chunks, "total_chunks": total_chunks})
-
-        if chunk_index < total_chunks:
-            time.sleep(CHUNK_SUBMISSION_INTERVAL_SECONDS)
 
     if not chunk_response_sections:
         publish(
