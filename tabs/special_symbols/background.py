@@ -1300,10 +1300,11 @@ def run_special_symbols_job(
     if turbo_mode_enabled:
         if modelscope_client_factory is not None:
             turbo_parallel_factory = modelscope_client_factory
-            turbo_parallel_model_name = modelscope_model_name
-            turbo_parallel_label = "ModelScope DeepSeek-V3.1"
+            first_model = MODELSCOPE_COMPARISON_MODELS[0]
+            turbo_parallel_model_name = first_model[1]
+            turbo_parallel_label = first_model[0]
             turbo_unavailable_message = "ModelScope DeepSeek 客户端不可用，已跳过符号提取"
-            turbo_enabled_description = "将使用 ModelScope DeepSeek-V3.1 并行处理待检文本。"
+            turbo_enabled_description = f"将依次使用 {', '.join(label for label, _ in MODELSCOPE_COMPARISON_MODELS)} 并行处理待检文本。"
             turbo_engine_tag = "modelscope"
         elif cloud_client_factory is not None:
             turbo_parallel_factory = cloud_client_factory
@@ -1340,12 +1341,13 @@ def run_special_symbols_job(
             # Build provider sequence: ModelScope (3 attempts) -> Cloud Ollama -> Local Ollama
             provider_sequence: List[Tuple[str, Callable[[], Any], str, str]] = []
             if modelscope_client_factory is not None:
-                provider_sequence.append((
-                    "ModelScope DeepSeek-V3.1",
-                    modelscope_client_factory,
-                    modelscope_model_name,
-                    "modelscope",
-                ))
+                for provider_label, provider_model in MODELSCOPE_COMPARISON_MODELS:
+                    provider_sequence.append((
+                        provider_label,
+                        modelscope_client_factory,
+                        provider_model,
+                        "modelscope",
+                    ))
             if cloud_client_factory is not None:
                 provider_sequence.append((
                     "云端 gpt-oss",
@@ -1419,12 +1421,13 @@ def run_special_symbols_job(
     if turbo_mode_enabled:
         provider_sequence: List[Tuple[str, Callable[[], Any], str, str]] = []
         if modelscope_client_factory is not None:
-            provider_sequence.append((
-                "ModelScope DeepSeek-V3.1",
-                modelscope_client_factory,
-                modelscope_model_name,
-                "modelscope",
-            ))
+            for provider_label, provider_model in MODELSCOPE_COMPARISON_MODELS:
+                provider_sequence.append((
+                    provider_label,
+                    modelscope_client_factory,
+                    provider_model,
+                    "modelscope",
+                ))
         if cloud_client_factory is not None:
             provider_sequence.append((
                 "云端 gpt-oss",
