@@ -178,6 +178,82 @@ class EvaluationResult:
             json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
         return target_path
 
+    @classmethod
+    def from_dict(cls, payload: Dict[str, object]) -> "EvaluationResult":
+        """Reconstruct an ``EvaluationResult`` from a serialized dictionary."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+
+        generated_at_raw = payload.get("generated_at") or payload.get("generatedAt")
+        if isinstance(generated_at_raw, str):
+            try:
+                generated_at = datetime.fromisoformat(generated_at_raw)
+            except ValueError:
+                generated_at = datetime.utcnow()
+        else:
+            generated_at = datetime.utcnow()
+
+        warnings = payload.get("warnings")
+        if isinstance(warnings, list):
+            warning_list = [str(item) for item in warnings]
+        else:
+            warning_list = []
+
+        evaluations_payload = payload.get("evaluations") or []
+        requirement_objects: List[ElementRequirement] = []
+        evaluations: List[ElementEvaluation] = []
+        if isinstance(evaluations_payload, list):
+            for index, entry in enumerate(evaluations_payload):
+                if not isinstance(entry, dict):
+                    continue
+                requirement = ElementRequirement(
+                    key=str(entry.get("key") or f"item_{index}"),
+                    name=str(entry.get("name") or f"要素{index + 1}"),
+                    severity=str(entry.get("severity") or "major"),
+                    description=str(entry.get("description") or entry.get("描述") or "—"),
+                    guidance=str(entry.get("guidance") or entry.get("核查要点") or "—"),
+                    keywords=(),
+                )
+                requirement_objects.append(requirement)
+                evaluations.append(
+                    ElementEvaluation(
+                        requirement=requirement,
+                        status=_normalize_status(entry.get("status")),
+                        severity=requirement.severity,
+                        message=str(entry.get("message") or entry.get("说明") or ""),
+                        snippet=(
+                            str(entry.get("snippet") or entry.get("evidence") or "")
+                            or None
+                        ),
+                        keyword=str(entry.get("keyword") or "") or None,
+                    )
+                )
+
+        profile = DeliverableProfile(
+            id=str(payload.get("deliverable_id") or payload.get("profile_id") or "file_elements"),
+            stage=str(payload.get("stage") or ""),
+            name=str(payload.get("deliverable") or payload.get("name") or "文件要素交付物"),
+            description=str(payload.get("description") or payload.get("profile_description") or ""),
+            references=tuple(payload.get("references") or ()),
+            requirements=tuple(requirement_objects),
+        )
+
+        return cls(
+            profile=profile,
+            generated_at=generated_at,
+            source_file=str(payload.get("source_file") or "") or None,
+            text_length=int(payload.get("text_length") or 0),
+            evaluations=evaluations,
+            warnings=warning_list,
+        )
+
+    @classmethod
+    def from_json_file(cls, path: str) -> "EvaluationResult":
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return cls.from_dict(data)
+
 
 class EvaluationOrchestrator:
     """Encapsulate requirement evaluation for a given deliverable."""

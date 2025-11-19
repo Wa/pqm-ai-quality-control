@@ -196,6 +196,31 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def start_file_elements_job(self, payload: Dict[str, Any]) -> Dict:
+        """Start a file elements evaluation job."""
+        try:
+            response = requests.post(f"{self.base_url}/file-elements/jobs", json=payload, timeout=60)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_file_elements_job(self, job_id: str) -> Dict:
+        """Fetch a file elements job status."""
+        try:
+            response = requests.get(f"{self.base_url}/file-elements/jobs/{job_id}")
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_file_elements_jobs(self, session_id: Optional[str] = None) -> Dict:
+        """List file elements jobs for a session."""
+        try:
+            params = {"session_id": session_id} if session_id else {}
+            response = requests.get(f"{self.base_url}/file-elements/jobs", params=params)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     def start_parameters_job(self, session_id: str) -> Dict:
         """Start a parameters consistency check job."""
         try:

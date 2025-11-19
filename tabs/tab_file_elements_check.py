@@ -5,15 +5,13 @@ import hashlib
 import json
 import os
 import re
-import threading
-import time
-from io import BytesIO
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
+from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
 from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS
 from util import (
@@ -26,14 +24,10 @@ from util import (
 from .file_elements import (
     DeliverableProfile,
     ElementRequirement,
-    EvaluationOrchestrator,
     EvaluationResult,
     PHASE_TO_DELIVERABLES,
     SEVERITY_LABELS,
     SEVERITY_ORDER,
-    auto_convert_sources,
-    parse_deliverable_stub,
-    save_result_payload,
 )
 from .file_elements.requirement_overview import get_deliverable_overview
 
@@ -78,6 +72,35 @@ def _normalize_severity(value: str | None) -> str:
         if lowered == level.lower():
             return level
     return DEFAULT_SEVERITY
+
+
+def _profile_to_payload(profile: DeliverableProfile) -> Dict[str, object]:
+    return {
+        "id": profile.id,
+        "stage": profile.stage,
+        "name": profile.name,
+        "description": profile.description,
+        "references": list(profile.references or ()),
+        "requirements": [
+            {
+                "key": req.key,
+                "name": req.name,
+                "severity": req.severity,
+                "description": req.description,
+                "guidance": req.guidance,
+            }
+            for req in profile.requirements
+        ],
+    }
+
+
+def _load_result_from_file(path: str) -> Optional[EvaluationResult]:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        return EvaluationResult.from_json_file(path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
 
 
 def _rows_to_element_requirements(
@@ -229,9 +252,36 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     issue_state_key = f"file_elements_issue_{session_id}"
     paths_state_key = f"file_elements_source_paths_{session_id}"
     export_state_key = f"file_elements_export_path_{session_id}"
+    job_state_key = f"file_elements_job_id_{session_id}"
+    loaded_path_key = f"file_elements_loaded_result_{session_id}"
 
     existing_files = _collect_files(source_dir)
     st.session_state[paths_state_key] = _extract_paths(existing_files)
+
+    backend_ready = is_backend_available()
+    backend_client = get_backend_client() if backend_ready else None
+    job_status: Optional[Dict[str, object]] = None
+    job_error: Optional[str] = None
+    if backend_ready and backend_client is not None:
+        stored_job_id = st.session_state.get(job_state_key)
+        if stored_job_id:
+            response = backend_client.get_file_elements_job(stored_job_id)
+            if isinstance(response, dict) and response.get("job_id"):
+                job_status = response
+            elif isinstance(response, dict) and response.get("detail") == "未找到任务":
+                st.session_state.pop(job_state_key, None)
+            elif isinstance(response, dict) and response.get("status") == "error":
+                job_error = str(response.get("message", "后台任务查询失败"))
+        if job_status is None:
+            response = backend_client.list_file_elements_jobs(session_id)
+            if isinstance(response, list) and response:
+                job_status = response[0]
+                if isinstance(job_status, dict) and job_status.get("job_id"):
+                    st.session_state[job_state_key] = job_status["job_id"]
+            elif isinstance(response, dict) and response.get("status") == "error":
+                job_error = str(response.get("message", "后台任务列表查询失败"))
+    else:
+        job_error = "后台服务未连接"
 
     persistence_dir = (
         session_dirs.get("generated_file_elements_check")
@@ -292,17 +342,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 saved = handle_file_upload(uploaded, source_dir)
                 if saved:
                     st.success(f"已保存 {saved} 个文件至 {source_dir}")
-                    conversion_area = st.container()
-                    created, _ = auto_convert_sources(
-                        source_dir,
-                        parsed_dir,
-                        progress_area=conversion_area,
-                        annotate_sources=True,
-                    )
-                    if created:
-                        conversion_area.success(
-                            f"已自动解析生成 {len(created)} 个文本文件，供后续评估使用。"
-                        )
                     existing_files = _collect_files(source_dir)
                     st.session_state[paths_state_key] = _extract_paths(existing_files)
         with col_stage:
@@ -523,55 +562,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         else:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
-        orchestrator = EvaluationOrchestrator(active_profile) if active_profile else None
-        progress_placeholder = st.empty()
-
-        def run_evaluation() -> None:
-            if orchestrator is None or active_profile is None:
-                st.warning("请先完善要素清单后再运行评估。")
-                return
-            progress_bar = progress_placeholder.progress(0.0)
-            current_files = _collect_files(source_dir)
-            normalized_paths = _extract_paths(current_files)
-            st.session_state[paths_state_key] = normalized_paths
-            text, source_file, warnings = parse_deliverable_stub(
-                active_profile,
-                source_dir,
-                parsed_dir,
-                source_paths=normalized_paths,
-            )
-            progress_value = 0.1
-            progress_bar.progress(progress_value)
-
-            result_holder: Dict[str, EvaluationResult] = {}
-            error_holder: Dict[str, BaseException] = {}
-
-            def _run_llm() -> None:
-                try:
-                    result_holder["result"] = orchestrator.evaluate(
-                        text,
-                        source_file=source_file,
-                        warnings=warnings,
-                    )
-                except BaseException as exc:  # noqa: BLE001
-                    error_holder["error"] = exc
-
-            worker = threading.Thread(target=_run_llm, daemon=True)
-            worker.start()
-            while worker.is_alive():
-                delay = 2.0 if progress_value < 0.8 else 20.0
-                time.sleep(delay)
-                if not worker.is_alive():
-                    break
-                progress_value = min(progress_value + 0.01, 0.99)
-                progress_bar.progress(progress_value)
-            worker.join()
-            if "error" in error_holder:
-                progress_placeholder.empty()
-                st.error(f"评估失败：{error_holder['error']}")
-                return
-            result = result_holder.get("result")
-            progress_bar.progress(1.0)
+        def _persist_result(result: EvaluationResult, export_path: Optional[str]) -> None:
             st.session_state[result_state_key] = result
             available_levels = [
                 level
@@ -580,20 +571,89 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             ]
             st.session_state[severity_state_key] = available_levels or list(SEVERITY_ORDER)
             st.session_state.pop(issue_state_key, None)
-            st.session_state[export_state_key] = None
-            if export_dir:
-                try:
-                    saved_path = save_result_payload(result, export_dir)
-                    st.session_state[export_state_key] = saved_path
-                except OSError as error:
-                    st.warning(f"结果保存失败：{error}")
+            if export_path:
+                st.session_state[export_state_key] = export_path
+            else:
+                st.session_state.pop(export_state_key, None)
+
+        def _refresh_result_from_job() -> None:
+            if not job_status:
+                return
+            result_files = job_status.get("result_files") or []
+            if not result_files:
+                return
+            first_path = str(result_files[0])
+            if not first_path:
+                return
+            loaded_path = st.session_state.get(loaded_path_key)
+            if loaded_path == first_path and st.session_state.get(result_state_key):
+                return
+            loaded = _load_result_from_file(first_path)
+            if loaded:
+                _persist_result(loaded, first_path)
+                st.session_state[loaded_path_key] = first_path
+
+        _refresh_result_from_job()
+
+        def run_evaluation() -> None:
+            if active_profile is None:
+                st.warning("请先完善要素清单后再运行评估。")
+                return
+            if not backend_ready or backend_client is None:
+                st.error("后台服务未连接，无法发起评估。")
+                return
+            status_value = str(job_status.get("status")) if job_status else ""
+            if status_value in {"queued", "running"}:
+                st.info("已有后台任务在进行中，请稍候。")
+                return
+            current_files = _collect_files(source_dir)
+            normalized_paths = _extract_paths(current_files)
+            st.session_state[paths_state_key] = normalized_paths
+            payload = {
+                "session_id": session_id,
+                "profile": _profile_to_payload(active_profile),
+                "source_paths": normalized_paths,
+            }
+            response = backend_client.start_file_elements_job(payload)
+            if isinstance(response, dict) and response.get("job_id"):
+                st.session_state[job_state_key] = response["job_id"]
+                st.session_state.pop(loaded_path_key, None)
+                st.session_state.pop(export_state_key, None)
+                st.success("已提交后台评估任务，稍后将自动更新结果。")
+                st.rerun()
+            else:
+                detail = ""
+                if isinstance(response, dict):
+                    detail = str(response.get("detail") or response.get("message") or "")
+                if not detail:
+                    detail = str(response)
+                st.error(f"提交任务失败：{detail}")
+
+        status_value = str(job_status.get("status")) if job_status else ""
+        job_running = status_value in {"queued", "running"}
+        if job_status:
+            stage_label = str(job_status.get("stage") or "后台任务")
+            message = str(job_status.get("message") or "")
+            progress_value = float(job_status.get("progress") or 0.0)
+            if status_value in {"queued", "running"}:
+                info_text = stage_label
+                if message:
+                    info_text += f"：{message}"
+                st.info(info_text)
+                st.progress(max(0.0, min(progress_value / 100.0, 1.0)))
+            elif status_value == "failed":
+                st.error(message or "后台评估失败，请稍后重试。")
+            elif status_value == "succeeded":
+                st.success(message or "后台评估已完成。")
+        elif job_error:
+            st.warning(job_error)
 
         col_run, col_rerun, col_export = st.columns([1, 1, 1])
         with col_run:
             if st.button(
                 "🚀 运行评估",
                 key=f"file_elements_run_{session_id}",
-                disabled=orchestrator is None,
+                disabled=(active_profile is None) or (not backend_ready) or job_running,
             ):
                 run_evaluation()
         with col_rerun:
@@ -601,7 +661,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 "🔄 重新评估",
                 key=f"file_elements_rerun_{session_id}",
                 help="重新加载最新上传的交付物，并刷新评估结果。",
-                disabled=orchestrator is None,
+                disabled=(active_profile is None) or (not backend_ready) or job_running,
             ):
                 run_evaluation()
         with col_export:
