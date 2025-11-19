@@ -1,8 +1,10 @@
 """Streamlit tab for文件要素检查."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, List
@@ -20,6 +22,8 @@ from util import (
 )
 
 from .file_elements import (
+    DeliverableProfile,
+    ElementRequirement,
     EvaluationOrchestrator,
     PHASE_TO_DELIVERABLES,
     SEVERITY_LABELS,
@@ -29,12 +33,6 @@ from .file_elements import (
     save_result_payload,
 )
 from .file_elements.requirement_overview import get_deliverable_overview
-from .shared.file_conversion import (
-    process_excel_folder,
-    process_pdf_folder,
-    process_textlike_folder,
-    process_word_ppt_folder,
-)
 
 
 CUSTOM_DELIVERABLE_OPTION = "其它（自定义）"
@@ -49,12 +47,69 @@ DELIVERABLE_PROFILE_ALIASES = {
 
 PERSISTENCE_FILENAME = "file_elements_prefs.json"
 OVERVIEW_COLUMNS = ("要素", "严重度", "描述", "核查要点")
+LABEL_TO_SEVERITY = {label: level for level, label in SEVERITY_LABELS.items()}
+DEFAULT_SEVERITY = "major"
 
 
 def _compose_table_key(stage: str | None, deliverable: str | None) -> str | None:
     if not stage or not deliverable:
         return None
     return f"{stage}||{deliverable}"
+
+
+def _normalize_severity(value: str | None) -> str:
+    if not value:
+        return DEFAULT_SEVERITY
+    token = str(value).strip()
+    if not token:
+        return DEFAULT_SEVERITY
+    if token in SEVERITY_LABELS:
+        return token
+    if token in LABEL_TO_SEVERITY:
+        return LABEL_TO_SEVERITY[token]
+    lowered = token.lower()
+    for level, label in SEVERITY_LABELS.items():
+        if lowered == label.lower():
+            return level
+    for level in SEVERITY_LABELS.keys():
+        if lowered == level.lower():
+            return level
+    return DEFAULT_SEVERITY
+
+
+def _rows_to_element_requirements(
+    rows: List[Dict[str, str]],
+    profile_id_hint: str | None,
+) -> List[ElementRequirement]:
+    requirements: List[ElementRequirement] = []
+    key_prefix = re.sub(r"[^0-9A-Za-z]+", "_", profile_id_hint or "custom") or "custom"
+    key_prefix = key_prefix.strip("_") or "custom"
+    for idx, row in enumerate(rows):
+        name = str(row.get("要素", "")).strip()
+        if not name:
+            continue
+        severity = _normalize_severity(row.get("严重度"))
+        description = str(row.get("描述", "")).strip() or "—"
+        guidance = str(row.get("核查要点", "")).strip() or "—"
+        slug = re.sub(r"[^0-9A-Za-z]+", "_", name).strip("_").lower()
+        key = f"{key_prefix}_{slug or idx}"
+        requirements.append(
+            ElementRequirement(
+                key=key,
+                name=name,
+                severity=severity,
+                description=description,
+                guidance=guidance,
+                keywords=(),
+            )
+        )
+    return requirements
+
+
+def _compose_custom_profile_id(stage: str, name: str) -> str:
+    payload = f"{stage}:{name or 'custom'}".encode("utf-8", "ignore")
+    digest = hashlib.md5(payload).hexdigest()[:12]
+    return f"custom_{digest}"
 
 
 def _load_user_preferences(path: str | None) -> Dict[str, object]:
@@ -208,6 +263,8 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     profile = None
     selected_deliverable_display = ""
     overview_metadata: Dict[str, object] | None = None
+    overview_summary_text = ""
+    overview_references: tuple[str, ...] = ()
     stage_state_key = f"file_elements_stage_{session_id}"
     saved_stage = preferences.get("selected_stage")
     default_stage = saved_stage if saved_stage in stage_options else stage_options[0]
@@ -320,14 +377,16 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             None,
         )
         overview_metadata = get_deliverable_overview(selected_deliverable_display)
-        references = profile.references if profile and profile.references else overview_metadata[
-            "references"
-        ]
-        summary_text = profile.description if profile else overview_metadata["summary"]
+        overview_references = tuple((overview_metadata or {}).get("references") or ())
+        overview_summary_text = (overview_metadata or {}).get("summary") or ""
+        references = profile.references if profile and profile.references else overview_references
+        summary_text = profile.description if profile else overview_summary_text
         st.markdown(
             f"**交付物说明：** {summary_text}\n\n"
             f"**标准参考：** {'，'.join(references) if references else '—'}"
         )
+
+    requirements_for_eval: List[ElementRequirement] = []
 
     with st.container():
         st.markdown("### 2. 要素要求概览")
@@ -376,6 +435,12 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             key=editor_key,
         )
         edited_rows = _prepare_rows_for_storage(edited_df)
+        requirements_for_eval = _rows_to_element_requirements(
+            edited_rows,
+            profile.id if profile else selected_deliverable_display or selected_stage,
+        )
+        if not requirements_for_eval:
+            st.warning("要素表暂无有效记录，请至少填写一条要素后再运行评估。")
         if table_key:
             stored_rows_list = stored_rows if isinstance(stored_rows, list) else None
             if stored_rows_list is None:
@@ -391,9 +456,30 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                     preferences_dirty = True
         st.caption("严重度标签参考AIAG APQP要求，表格可直接编辑并可根据项目自定义补充。")
         if not profile:
-            st.info("该交付物尚未配置AI自动评估，目前提供模板以便人工核对。")
-            flush_preferences()
-            return
+            st.info("该交付物暂无专用知识库，将直接依据当前要素清单执行AI核查。")
+
+    active_profile: DeliverableProfile | None = None
+    if requirements_for_eval:
+        if profile:
+            active_profile = DeliverableProfile(
+                id=profile.id,
+                stage=profile.stage,
+                name=profile.name,
+                description=profile.description,
+                references=profile.references,
+                requirements=tuple(requirements_for_eval),
+            )
+        else:
+            custom_name = selected_deliverable_display or "自定义交付物"
+            summary_text = overview_summary_text or "参考当前表格的要素进行核查。"
+            active_profile = DeliverableProfile(
+                id=_compose_custom_profile_id(selected_stage, custom_name),
+                stage=selected_stage,
+                name=custom_name,
+                description=summary_text,
+                references=overview_references,
+                requirements=tuple(requirements_for_eval),
+            )
 
     with st.container():
         st.markdown("### 3. 评估执行与结果")
@@ -436,66 +522,17 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         else:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
-        with st.expander("📎 非文本文件解析助手", expanded=False):
-            st.markdown(
-                "系统会在上传后自动尝试解析PDF、Office与Excel文件。如需手动重试，"
-                "或查看进度，可使用下列工具。解析结果统一存入"
-                "`generated_files/{session_id}/file_elements_check/`。"
-            )
-            pdf_status = st.container()
-            office_status = st.container()
-            excel_status = st.container()
-            col_pdf, col_office, col_excel = st.columns(3)
-            with col_pdf:
-                if st.button(
-                    "解析PDF", key=f"file_elements_convert_pdf_{session_id}", help="调用MinerU解析当前目录下的PDF文件。"
-                ):
-                    if not source_dir or not parsed_dir:
-                        pdf_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
-                    else:
-                        created = process_pdf_folder(source_dir, parsed_dir, pdf_status, annotate_sources=True)
-                        if created:
-                            pdf_status.success(f"成功生成 {len(created)} 个文本文件。")
-                        else:
-                            pdf_status.info("未解析出新的文本，请确认PDF文件是否存在或已处理。")
-            with col_office:
-                if st.button(
-                    "解析Word/PPT",
-                    key=f"file_elements_convert_office_{session_id}",
-                    help="调用Unstructured服务解析Word/PPT文件为文本。",
-                ):
-                    if not source_dir or not parsed_dir:
-                        office_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
-                    else:
-                        created = process_word_ppt_folder(source_dir, parsed_dir, office_status, annotate_sources=True)
-                        if created:
-                            office_status.success(f"成功生成 {len(created)} 个文本文件。")
-                        else:
-                            office_status.info("未解析出新的文本，请确认文件格式并重试。")
-            with col_excel:
-                if st.button(
-                    "解析Excel/CSV",
-                    key=f"file_elements_convert_excel_{session_id}",
-                    help="使用pandas将Excel与CSV内容展平为文本。",
-                ):
-                    if not source_dir or not parsed_dir:
-                        excel_status.warning("目录尚未初始化，请刷新页面或重新登录后重试。")
-                    else:
-                        created = process_excel_folder(source_dir, parsed_dir, excel_status, annotate_sources=True)
-                        created.extend(process_textlike_folder(source_dir, parsed_dir, excel_status))
-                        if created:
-                            excel_status.success(f"成功生成 {len(created)} 个文本文件。")
-                        else:
-                            excel_status.info("未转换出新的文本，请确认Excel/CSV文件是否存在或已处理。")
-
-        orchestrator = EvaluationOrchestrator(profile)
+        orchestrator = EvaluationOrchestrator(active_profile) if active_profile else None
 
         def run_evaluation() -> None:
+            if orchestrator is None or active_profile is None:
+                st.warning("请先完善要素清单后再运行评估。")
+                return
             current_files = _collect_files(source_dir)
             normalized_paths = _extract_paths(current_files)
             st.session_state[paths_state_key] = normalized_paths
             text, source_file, warnings = parse_deliverable_stub(
-                profile,
+                active_profile,
                 source_dir,
                 parsed_dir,
                 source_paths=normalized_paths,
@@ -519,13 +556,18 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
         col_run, col_rerun, col_export = st.columns([1, 1, 1])
         with col_run:
-            if st.button("🚀 运行评估", key=f"file_elements_run_{session_id}"):
+            if st.button(
+                "🚀 运行评估",
+                key=f"file_elements_run_{session_id}",
+                disabled=orchestrator is None,
+            ):
                 run_evaluation()
         with col_rerun:
             if st.button(
                 "🔄 重新评估",
                 key=f"file_elements_rerun_{session_id}",
                 help="重新加载最新上传的交付物，并刷新评估结果。",
+                disabled=orchestrator is None,
             ):
                 run_evaluation()
         with col_export:
@@ -547,7 +589,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 st.download_button(
                     "📥 导出JSON",
                     export_content.encode("utf-8"),
-                    file_name=f"{profile.id}_file_elements.json",
+                    file_name=f"{result.profile.id}_file_elements.json",
                     mime="application/json",
                     key=f"file_elements_export_{session_id}",
                     help="导出评估结果以便归档或共享。",
@@ -556,7 +598,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 st.download_button(
                     "📥 导出JSON",
                     data="",
-                    file_name="file_elements.json",
+                    file_name=f"{(active_profile.id if active_profile else 'file_elements')}_file_elements.json",
                     disabled=True,
                     key=f"file_elements_export_{session_id}",
                 )
@@ -705,7 +747,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 st.download_button(
                     "导出CSV",
                     csv_data,
-                    file_name=f"{profile.id}_file_elements_rectify.csv",
+                    file_name=f"{result.profile.id}_file_elements_rectify.csv",
                     mime="text/csv",
                     key=f"file_elements_rectify_csv_{session_id}",
                 )
@@ -713,7 +755,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 st.download_button(
                     "导出Excel",
                     excel_buffer.getvalue(),
-                    file_name=f"{profile.id}_file_elements_rectify.xlsx",
+                    file_name=f"{result.profile.id}_file_elements_rectify.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"file_elements_rectify_excel_{session_id}",
                 )

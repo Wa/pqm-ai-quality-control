@@ -6,22 +6,34 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from ollama import Client as OllamaClient
 
 from .config import (
     DeliverableProfile,
     ElementRequirement,
+    SEVERITY_LABELS,
     SEVERITY_ORDER,
 )
+from ..shared.common import report_exception
 from ..shared.file_conversion import (
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
     process_word_ppt_folder,
 )
+from util import resolve_ollama_host
 
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
+GPT_OSS_MODEL = "gpt-oss:20b"
+GPT_OSS_OPTIONS = {"num_ctx": 40001, "temperature": 0.3}
+LLM_SYSTEM_PROMPT = (
+    "你是汽车行业APQP质量工程师，需要根据APQP阶段要素要求对交付物内容进行逐项评估。"
+    "请仅输出JSON，status字段限定为pass、partial或missing，其含义分别为“满足”、“部分满足/需完善”、“缺失”。"
+    "message字段给出判断理由，evidence字段引用对应的原文或定位信息。"
+)
 
 
 class _SilentProgress:
@@ -162,62 +174,265 @@ class EvaluationOrchestrator:
 
     def __init__(self, profile: DeliverableProfile):
         self.profile = profile
+        self._ollama_client: Optional[OllamaClient] = None
+        self._ollama_init_error: Optional[Exception] = None
 
-    def evaluate(self, text: str, *, source_file: str | None = None, warnings: Sequence[str] | None = None) -> EvaluationResult:
-        evaluations = [self._evaluate_requirement(req, text) for req in self.profile.requirements]
+    def evaluate(
+        self,
+        text: str,
+        *,
+        source_file: str | None = None,
+        warnings: Sequence[str] | None = None,
+    ) -> EvaluationResult:
+        base_warnings = list(warnings or ())
+        text = text or ""
+        if not text.strip():
+            evaluations = [
+                ElementEvaluation(
+                    requirement=req,
+                    status="missing",
+                    severity=req.severity,
+                    message="未提供可解析的文档内容。",
+                    snippet=None,
+                    keyword=None,
+                )
+                for req in self.profile.requirements
+            ]
+            return EvaluationResult(
+                profile=self.profile,
+                generated_at=datetime.utcnow(),
+                source_file=source_file,
+                text_length=0,
+                evaluations=evaluations,
+                warnings=base_warnings,
+            )
+
+        llm_items, llm_warnings = self._analyze_with_llm(text)
+        base_warnings.extend(llm_warnings)
+        evaluations = self._merge_llm_results(llm_items)
         return EvaluationResult(
             profile=self.profile,
             generated_at=datetime.utcnow(),
             source_file=source_file,
-            text_length=len(text or ""),
+            text_length=len(text),
             evaluations=evaluations,
-            warnings=list(warnings or ()),
+            warnings=base_warnings,
         )
 
-    def _evaluate_requirement(self, requirement: ElementRequirement, text: str) -> ElementEvaluation:
-        text = text or ""
-        if not text:
-            return ElementEvaluation(
-                requirement=requirement,
-                status="missing",
-                severity=requirement.severity,
-                message="未提供可解析的文档内容。",
-                snippet=None,
-                keyword=None,
-            )
+    def _merge_llm_results(self, items: List[Dict[str, str]]) -> List[ElementEvaluation]:
+        lookup: Dict[str, Dict[str, str]] = {}
+        for item in items:
+            normalized = _normalize_name(item.get("name"))
+            if normalized:
+                lookup[normalized] = item
 
-        for keyword in requirement.keywords:
-            if not keyword:
-                continue
-            pattern = re.compile(re.escape(keyword), flags=re.IGNORECASE)
-            match = pattern.search(text)
-            if match:
-                snippet = _extract_snippet(text, match.start(), match.end())
-                return ElementEvaluation(
+        evaluations: List[ElementEvaluation] = []
+        for requirement in self.profile.requirements:
+            normalized = _normalize_name(requirement.name)
+            payload = lookup.get(normalized, {})
+            status = _normalize_status(payload.get("status"))
+            message = payload.get("message") or payload.get("analysis") or payload.get("结论")
+            evidence = payload.get("evidence") or payload.get("snippet") or payload.get("引用")
+            if not payload:
+                message = "LLM未返回该要素的判断，请手动核查。"
+            elif not message:
+                message = "LLM未给出明确说明，请结合原文核对。"
+            evaluations.append(
+                ElementEvaluation(
                     requirement=requirement,
-                    status="pass",
+                    status=status,
                     severity=requirement.severity,
-                    message=f"检测到关键字“{keyword}”，初步符合要求。",
-                    snippet=snippet,
-                    keyword=keyword,
+                    message=message,
+                    snippet=evidence or None,
+                    keyword=None,
                 )
+            )
+        return evaluations
 
-        return ElementEvaluation(
-            requirement=requirement,
-            status="missing",
-            severity=requirement.severity,
-            message="未检测到对应关键内容，请补充。",
-            snippet=None,
-            keyword=None,
+    def _analyze_with_llm(self, document_text: str) -> Tuple[List[Dict[str, str]], List[str]]:
+        warnings: List[str] = []
+        client = self._get_ollama_client()
+        if client is None:
+            message = "未能连接本地 gpt-oss，请联系系统管理员。"
+            if self._ollama_init_error:
+                message += f" ({self._ollama_init_error})"
+            warnings.append(message)
+            return [], warnings
+
+        requirements_payload = [
+            {
+                "name": req.name,
+                "severity": req.severity,
+                "severity_label": SEVERITY_LABELS.get(req.severity, req.severity),
+                "description": req.description,
+                "guidance": req.guidance,
+            }
+            for req in self.profile.requirements
+        ]
+        user_prompt = (
+            f"APQP阶段：{self.profile.stage}\n"
+            f"交付物：{self.profile.name}\n"
+            f"要素要求：\n{json.dumps(requirements_payload, ensure_ascii=False, indent=2)}\n"
+            "请结合上述要素要求，逐条审阅交付物文本，判断是否满足。"
+            "如需引用，请在evidence字段中保留原文片段或位置。"
+            "\n\n交付物全文如下：\n<<<DOCUMENT>>>\n"
+            f"{document_text}\n<<<END>>>\n"
+            "请严格按照JSON格式输出，不要添加额外说明。"
+            "示例输出：{\"items\": [{\"name\": \"要素\", \"status\": \"pass\", \"message\": \"说明\", \"evidence\": \"引用\"}]}"
         )
 
+        response_text = ""
+        try:
+            for chunk in client.chat(
+                model=GPT_OSS_MODEL,
+                messages=[
+                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                stream=True,
+                options=GPT_OSS_OPTIONS,
+            ):
+                piece = (
+                    chunk.get("message", {}).get("content")
+                    or chunk.get("response")
+                    or ""
+                )
+                if piece:
+                    response_text += piece
+        except Exception as error:  # pragma: no cover - network/runtime failures
+            report_exception("调用 gpt-oss 失败", error, level="warning")
+            warnings.append(f"调用 gpt-oss 失败：{error}")
+            return [], warnings
 
-def _extract_snippet(text: str, start: int, end: int, *, window: int = 80) -> str:
-    left = max(0, start - window)
-    right = min(len(text), end + window)
-    snippet = text[left:right].strip()
-    snippet = re.sub(r"\s+", " ", snippet)
-    return snippet
+        if not response_text.strip():
+            warnings.append("gpt-oss 未返回内容，请稍后重试。")
+            return [], warnings
+
+        parsed_items = _parse_llm_items(response_text)
+        if not parsed_items:
+            warnings.append("gpt-oss 返回内容无法解析为JSON，请检查交付物内容或稍后重试。")
+        return parsed_items, warnings
+
+    def _get_ollama_client(self) -> Optional[OllamaClient]:
+        if self._ollama_client is not None:
+            return self._ollama_client
+        if self._ollama_init_error is not None:
+            return None
+        try:
+            host = resolve_ollama_host("ollama_9")
+            self._ollama_client = OllamaClient(host=host)
+        except Exception as error:  # pragma: no cover - initialization failure
+            self._ollama_init_error = error
+            report_exception("初始化本地 gpt-oss 客户端失败", error, level="warning")
+            return None
+        return self._ollama_client
+
+
+def _strip_code_fences(value: str) -> str:
+    s = (value or "").strip()
+    if s.startswith("```") and s.endswith("```"):
+        inner = s.split("```", 2)
+        if len(inner) >= 3:
+            return inner[1].strip()
+        return s.strip("`")
+    return s
+
+
+def _extract_json_text(text: str) -> str:
+    s = _strip_code_fences(text)
+    s = s.lstrip("\ufeff")
+    try:
+        json.loads(s)
+        return s
+    except json.JSONDecodeError:
+        pass
+    try:
+        start = s.find("[")
+        end = s.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            candidate = s[start : end + 1]
+            json.loads(candidate)
+            return candidate
+    except json.JSONDecodeError:
+        pass
+    try:
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = s[start : end + 1]
+            json.loads(candidate)
+            return candidate
+    except json.JSONDecodeError:
+        pass
+    return s
+
+
+def _parse_llm_items(response_text: str) -> List[Dict[str, str]]:
+    payload = _extract_json_text(response_text)
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        items = data.get("items") or data.get("results") or data.get("elements")
+        if isinstance(items, list):
+            entries = items
+        else:
+            entries = [data]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        return []
+
+    normalized: List[Dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(
+            entry.get("name")
+            or entry.get("element")
+            or entry.get("要素")
+            or entry.get("title")
+            or ""
+        ).strip()
+        if not name:
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "status": str(entry.get("status") or entry.get("result") or entry.get("状态") or "").strip(),
+                "message": str(
+                    entry.get("message")
+                    or entry.get("analysis")
+                    or entry.get("summary")
+                    or entry.get("说明")
+                    or ""
+                ).strip(),
+                "evidence": str(
+                    entry.get("evidence")
+                    or entry.get("snippet")
+                    or entry.get("quote")
+                    or entry.get("引用")
+                    or ""
+                ).strip(),
+            }
+        )
+    return normalized
+
+
+def _normalize_name(value: str | None) -> str:
+    value = value or ""
+    return re.sub(r"\s+", "", value).lower()
+
+
+def _normalize_status(value: str | None) -> str:
+    token = (value or "").strip().lower()
+    if not token:
+        return "missing"
+    pass_tokens = {"pass", "ok", "符合", "满足", "合格", "是"}
+    if token in pass_tokens:
+        return "pass"
+    return "missing"
 
 
 def parse_deliverable_stub(
