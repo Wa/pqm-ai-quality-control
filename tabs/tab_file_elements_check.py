@@ -227,6 +227,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     paths_state_key = f"file_elements_source_paths_{session_id}"
     export_state_key = f"file_elements_export_path_{session_id}"
 
+    existing_files = _collect_files(source_dir)
+    st.session_state[paths_state_key] = _extract_paths(existing_files)
+
     persistence_dir = (
         session_dirs.get("generated_file_elements_check")
         or session_dirs.get("generated")
@@ -274,14 +277,35 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         st.session_state[stage_state_key] = default_stage
 
     with st.container():
-        st.markdown("### 1. 阶段与交付物选择")
-        col_stage, col_deliverable = st.columns(2)
+        st.markdown("### 1. 交付物上传与选择")
+        col_upload, col_stage, col_deliverable = st.columns(3)
+        with col_upload:
+            uploaded = st.file_uploader(
+                "上传交付物",
+                accept_multiple_files=True,
+                key=f"file_elements_upload_{session_id}",
+            )
+            if uploaded:
+                saved = handle_file_upload(uploaded, source_dir)
+                if saved:
+                    st.success(f"已保存 {saved} 个文件至 {source_dir}")
+                    conversion_area = st.container()
+                    created, _ = auto_convert_sources(
+                        source_dir,
+                        parsed_dir,
+                        progress_area=conversion_area,
+                        annotate_sources=True,
+                    )
+                    if created:
+                        conversion_area.success(
+                            f"已自动解析生成 {len(created)} 个文本文件，供后续评估使用。"
+                        )
+                    existing_files = _collect_files(source_dir)
+                    st.session_state[paths_state_key] = _extract_paths(existing_files)
         with col_stage:
-            stage_index = stage_options.index(st.session_state[stage_state_key])
             selected_stage = st.selectbox(
                 "选择APQP阶段",
                 stage_options,
-                index=stage_index,
                 key=stage_state_key,
                 help="阶段列表来源于AIAG APQP流程，可根据项目推进选择。",
             )
@@ -344,7 +368,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             selected_option = st.selectbox(
                 "选择交付物",
                 deliverable_options,
-                index=deliverable_options.index(st.session_state[deliverable_state_key]),
                 key=deliverable_state_key,
                 help="交付物要求将用于生成要素清单与评估标准。",
             )
@@ -483,31 +506,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
     with st.container():
         st.markdown("### 3. 评估执行与结果")
-
-        existing_files = _collect_files(source_dir)
-        st.session_state[paths_state_key] = _extract_paths(existing_files)
-        uploaded = st.file_uploader(
-            "上传交付物（支持TXT/MD/CSV/TSV，PDF/Word/PPT/Excel将自动解析为文本）",
-            accept_multiple_files=True,
-            key=f"file_elements_upload_{session_id}",
-        )
-        if uploaded:
-            saved = handle_file_upload(uploaded, source_dir)
-            if saved:
-                st.success(f"已保存 {saved} 个文件至 {source_dir}")
-                conversion_area = st.container()
-                created, _ = auto_convert_sources(
-                    source_dir,
-                    parsed_dir,
-                    progress_area=conversion_area,
-                    annotate_sources=True,
-                )
-                if created:
-                    conversion_area.success(
-                        f"已自动解析生成 {len(created)} 个文本文件，供后续评估使用。"
-                    )
-                existing_files = _collect_files(source_dir)
-                st.session_state[paths_state_key] = _extract_paths(existing_files)
 
         if existing_files:
             file_info_rows = [
