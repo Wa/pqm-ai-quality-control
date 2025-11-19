@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from config import CONFIG
+from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS
 from util import (
     ensure_session_dirs,
     get_directory_refresh_token,
@@ -27,12 +28,24 @@ from .file_elements import (
     parse_deliverable_stub,
     save_result_payload,
 )
+from .file_elements.requirement_overview import get_deliverable_overview
 from .shared.file_conversion import (
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
     process_word_ppt_folder,
 )
+
+
+CUSTOM_DELIVERABLE_OPTION = "其它（自定义）"
+DELIVERABLE_PROFILE_ALIASES = {
+    "初始DFMEA": "DFMEA",
+    "更新DFMEA": "DFMEA",
+    "初始过程流程图": "过程流程图",
+    "更新过程流程图": "过程流程图",
+    "初版CP": "控制计划",
+    "更新CP": "控制计划",
+}
 
 
 def _format_size(num_bytes: int) -> str:
@@ -92,52 +105,136 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     paths_state_key = f"file_elements_source_paths_{session_id}"
     export_state_key = f"file_elements_export_path_{session_id}"
 
-    stage_options = list(PHASE_TO_DELIVERABLES.keys())
+    stage_options = list(STAGE_ORDER or [])
+    if not stage_options:
+        stage_options = list(PHASE_TO_DELIVERABLES.keys())
+    for stage_name in PHASE_TO_DELIVERABLES.keys():
+        if stage_name not in stage_options:
+            stage_options.append(stage_name)
     if not stage_options:
         st.error("未配置APQP阶段，请联系系统管理员。")
         return
 
+    profile = None
+    selected_deliverable_display = ""
+    overview_metadata: Dict[str, object] | None = None
+
     with st.container():
         st.markdown("### 1. 阶段与交付物选择")
-        selected_stage = st.selectbox(
-            "选择APQP阶段",
-            stage_options,
-            key=f"file_elements_stage_{session_id}",
-            help="阶段列表来源于AIAG APQP流程，可根据项目推进选择。",
-        )
+        col_stage, col_deliverable = st.columns(2)
+        with col_stage:
+            selected_stage = st.selectbox(
+                "选择APQP阶段",
+                stage_options,
+                key=f"file_elements_stage_{session_id}",
+                help="阶段列表来源于AIAG APQP流程，可根据项目推进选择。",
+            )
+
         stage_deliverables = PHASE_TO_DELIVERABLES.get(selected_stage, ())
-        deliverable_names = [item.name for item in stage_deliverables]
-        if not deliverable_names:
-            st.info("该阶段尚未配置交付物。请在配置文件中维护后重试。")
-            return
+        completeness_candidates = list(STAGE_REQUIREMENTS.get(selected_stage, ()))
+        deliverable_options: List[str] = []
+        seen: set[str] = set()
+        alias_coverage: set[str] = set()
+
+        def _add_option(name: str) -> None:
+            if not name or name in seen:
+                return
+            alias_name = DELIVERABLE_PROFILE_ALIASES.get(name, name)
+            if alias_name in alias_coverage:
+                return
+            deliverable_options.append(name)
+            seen.add(name)
+            alias_coverage.add(alias_name)
+
+        for candidate in completeness_candidates:
+            _add_option(candidate)
+        for profile_candidate in stage_deliverables:
+            _add_option(profile_candidate.name)
+
+        if not deliverable_options:
+            st.info("该阶段尚未配置交付物，请先在文件完整性台账中维护清单。")
+        if CUSTOM_DELIVERABLE_OPTION not in deliverable_options:
+            deliverable_options.append(CUSTOM_DELIVERABLE_OPTION)
+
+        profile_name_pool = {item.name for item in stage_deliverables}
         default_index = 0
-        selected_deliverable_name = st.selectbox(
-            "选择交付物",
-            deliverable_names,
-            index=default_index,
-            key=f"file_elements_deliverable_{session_id}",
-            help="交付物要求将用于生成要素清单与评估标准。",
+        for idx, option in enumerate(deliverable_options):
+            if option == CUSTOM_DELIVERABLE_OPTION:
+                continue
+            alias_name = DELIVERABLE_PROFILE_ALIASES.get(option, option)
+            if alias_name in profile_name_pool:
+                default_index = idx
+                break
+
+        with col_deliverable:
+            selected_option = st.selectbox(
+                "选择交付物",
+                deliverable_options,
+                index=default_index if deliverable_options else 0,
+                key=f"file_elements_deliverable_{session_id}",
+                help="交付物要求将用于生成要素清单与评估标准。",
+            )
+
+        if selected_option == CUSTOM_DELIVERABLE_OPTION:
+            custom_name = st.text_input(
+                "输入交付物名称",
+                key=f"file_elements_custom_deliverable_{session_id}",
+                placeholder="例如：客户特殊要求对照表",
+            ).strip()
+            selected_deliverable_display = custom_name or "自定义交付物"
+        else:
+            selected_deliverable_display = selected_option
+
+        normalized_name = DELIVERABLE_PROFILE_ALIASES.get(
+            selected_deliverable_display, selected_deliverable_display
         )
-        profile = next(item for item in stage_deliverables if item.name == selected_deliverable_name)
+        profile = next(
+            (item for item in stage_deliverables if item.name == normalized_name),
+            None,
+        )
+        overview_metadata = get_deliverable_overview(selected_deliverable_display)
+        references = profile.references if profile and profile.references else overview_metadata[
+            "references"
+        ]
+        summary_text = profile.description if profile else overview_metadata["summary"]
         st.markdown(
-            f"**交付物说明：** {profile.description}\n\n"
-            f"**标准参考：** {'，'.join(profile.references) if profile.references else '—'}"
+            f"**交付物说明：** {summary_text}\n\n"
+            f"**标准参考：** {'，'.join(references) if references else '—'}"
         )
 
     with st.container():
         st.markdown("### 2. 要素要求概览")
-        requirement_rows = [
-            {
-                "要素": req.name,
-                "严重度": SEVERITY_LABELS.get(req.severity, req.severity),
-                "描述": req.description,
-                "核查要点": req.guidance,
-            }
-            for req in profile.requirements
-        ]
-        overview_df = pd.DataFrame(requirement_rows)
-        st.dataframe(overview_df, use_container_width=True)
-        st.caption("严重度标签参考AIAG APQP要求：关键项需优先闭环，提示项用于完善文档可追溯性。")
+        if profile:
+            requirement_rows = [
+                {
+                    "要素": req.name,
+                    "严重度": SEVERITY_LABELS.get(req.severity, req.severity),
+                    "描述": req.description,
+                    "核查要点": req.guidance,
+                }
+                for req in profile.requirements
+            ]
+        else:
+            requirement_rows = [
+                {
+                    "要素": row.get("element", ""),
+                    "严重度": SEVERITY_LABELS.get(row.get("severity", "major"), row.get("severity", "major")),
+                    "描述": row.get("description", ""),
+                    "核查要点": row.get("guidance", ""),
+                }
+                for row in (overview_metadata or {}).get("requirements", [])
+            ]
+        overview_df = pd.DataFrame(requirement_rows or [{}])
+        st.data_editor(
+            overview_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            key=f"file_elements_overview_editor_{session_id}_{selected_deliverable_display}",
+        )
+        st.caption("严重度标签参考AIAG APQP要求，表格可直接编辑并可根据项目自定义补充。")
+        if not profile:
+            st.info("该交付物尚未配置AI自动评估，目前提供模板以便人工核对。")
+            return
 
     with st.container():
         st.markdown("### 3. 评估执行与结果")
