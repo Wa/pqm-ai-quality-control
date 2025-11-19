@@ -26,6 +26,7 @@ from ..shared.file_conversion import (
 from util import resolve_ollama_host
 
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv"}
+EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
 GPT_OSS_MODEL = "gpt-oss:20b"
 GPT_OSS_OPTIONS = {"num_ctx": 40001, "temperature": 0.3}
@@ -435,6 +436,49 @@ def _normalize_status(value: str | None) -> str:
     return "missing"
 
 
+def _collect_parsed_texts(original_path: str, parsed_dir: str) -> List[str]:
+    """Return matching parsed text files for ``original_path`` within ``parsed_dir``."""
+
+    if not parsed_dir or not os.path.isdir(parsed_dir):
+        return []
+
+    raw_name = os.path.basename(original_path)
+    base_name = os.path.splitext(raw_name)[0]
+    ext = os.path.splitext(raw_name)[1].lower()
+
+    def _add(path: str, bucket: List[str], seen: set[str]) -> None:
+        normalized = os.path.normpath(path)
+        if normalized in seen:
+            return
+        if os.path.isfile(normalized):
+            seen.add(normalized)
+            bucket.append(normalized)
+
+    results: List[str] = []
+    seen: set[str] = set()
+
+    _add(os.path.join(parsed_dir, f"{raw_name}.txt"), results, seen)
+    _add(os.path.join(parsed_dir, f"{base_name}.txt"), results, seen)
+
+    if ext in EXCEL_EXTENSIONS:
+        prefix = f"{raw_name}_sheet_".lower()
+        try:
+            for name in os.listdir(parsed_dir):
+                if not name.lower().endswith(".txt"):
+                    continue
+                if not name.lower().startswith(prefix):
+                    continue
+                _add(os.path.join(parsed_dir, name), results, seen)
+        except OSError:
+            pass
+
+    try:
+        results.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+    except OSError:
+        results.sort()
+    return results
+
+
 def parse_deliverable_stub(
     profile: DeliverableProfile,
     source_dir: str,
@@ -517,23 +561,36 @@ def parse_deliverable_stub(
                 continue
 
         if parsed_dir:
-            base_name = os.path.splitext(os.path.basename(path))[0]
-            parsed_candidate = os.path.join(parsed_dir, f"{base_name}.txt")
-            parsed_candidate = os.path.normpath(parsed_candidate)
-            if os.path.isfile(parsed_candidate):
+            parsed_candidates = _collect_parsed_texts(path, parsed_dir)
+            if parsed_candidates:
                 try:
-                    with open(parsed_candidate, "r", encoding="utf-8") as handle:
-                        text_content = handle.read()
-                    source_file = os.path.basename(parsed_candidate)
+                    if len(parsed_candidates) == 1:
+                        with open(parsed_candidates[0], "r", encoding="utf-8") as handle:
+                            text_content = handle.read()
+                        source_file = os.path.basename(parsed_candidates[0])
+                    else:
+                        parts: List[str] = []
+                        for sheet_path in parsed_candidates:
+                            with open(sheet_path, "r", encoding="utf-8") as handle:
+                                sheet_text = handle.read()
+                            parts.append(
+                                f"### 来源：{os.path.basename(sheet_path)}\n{sheet_text.strip()}"
+                                if sheet_text.strip()
+                                else f"### 来源：{os.path.basename(sheet_path)}"
+                            )
+                        text_content = "\n\n".join(parts)
+                        source_file = f"{os.path.basename(parsed_candidates[0])} 等{len(parsed_candidates)}个工作表"
                     if conversion_message and not conversion_noted:
                         warnings.append(conversion_message)
                         conversion_noted = True
                     warnings.append(
-                        f"已使用预解析文本 {os.path.basename(parsed_candidate)}，来源：{os.path.basename(path)}。"
+                        f"已使用预解析文本 {os.path.basename(parsed_candidates[0])}，来源：{os.path.basename(path)}。"
                     )
                     return text_content, source_file, warnings
                 except OSError as error:
-                    warnings.append(f"读取预解析文本失败：{os.path.basename(parsed_candidate)} → {error}")
+                    warnings.append(
+                        f"读取预解析文本失败：{os.path.basename(parsed_candidates[0])} → {error}"
+                    )
 
     if conversion_message and not conversion_noted:
         warnings.append(conversion_message)
