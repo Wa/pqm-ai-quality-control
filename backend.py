@@ -23,6 +23,7 @@ from tabs.file_completeness import (
     STAGE_ORDER,
     STAGE_SLUG_MAP,
 )
+from tabs.file_elements.background import run_file_elements_job
 from tabs.parameters.background import run_parameters_job
 from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
@@ -54,6 +55,10 @@ JOB_DEFINITIONS = {
     "history": {
         "runner": run_history_job,
         "label": "历史问题规避",
+    },
+    "file_elements": {
+        "runner": run_file_elements_job,
+        "label": "文件要素检查",
     },
 }
 
@@ -94,6 +99,29 @@ class EnterpriseJobRequest(BaseModel):
 class SpecialSymbolsJobRequest(BaseModel):
     session_id: str
     turbo_mode: bool = False
+
+
+class FileElementsRequirementPayload(BaseModel):
+    key: Optional[str] = None
+    name: str
+    severity: Optional[str] = None
+    description: Optional[str] = None
+    guidance: Optional[str] = None
+
+
+class FileElementsProfilePayload(BaseModel):
+    id: Optional[str] = None
+    stage: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    references: Optional[List[str]] = None
+    requirements: List[FileElementsRequirementPayload]
+
+
+class FileElementsJobRequest(BaseModel):
+    session_id: str
+    profile: FileElementsProfilePayload
+    source_paths: Optional[List[str]] = None
 
 
 class ApqpParseRequest(BaseModel):
@@ -994,6 +1022,49 @@ async def stop_special_symbols_job(job_id: str):
         record.stage = "stopping"
         record.updated_at = time.time()
         return _record_to_status(record)
+
+
+@app.post("/file-elements/jobs", response_model=EnterpriseJobStatus)
+async def start_file_elements_job(request: FileElementsJobRequest):
+    profile_payload = request.profile.dict()
+    metadata = {
+        "stage": request.profile.stage or "",
+        "deliverable": request.profile.name,
+    }
+    record = _start_job(
+        "file_elements",
+        request.session_id,
+        metadata=metadata,
+        runner_kwargs={
+            "profile_payload": profile_payload,
+            "source_paths": request.source_paths or [],
+        },
+    )
+    return _record_to_status(record)
+
+
+@app.get("/file-elements/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_file_elements_job(job_id: str):
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+    if not record or record.job_type != "file_elements":
+        raise HTTPException(status_code=404, detail="未找到任务")
+    return _record_to_status(record)
+
+
+@app.get("/file-elements/jobs", response_model=List[EnterpriseJobStatus])
+async def list_file_elements_jobs(session_id: Optional[str] = None):
+    _prune_jobs()
+    with jobs_lock:
+        records = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if record.job_type == "file_elements"
+            and (session_id is None or record.session_id == session_id)
+        ]
+    records.sort(key=lambda status: status.created_at, reverse=True)
+    return records
 
 
 @app.post("/parameters/jobs", response_model=EnterpriseJobStatus)
