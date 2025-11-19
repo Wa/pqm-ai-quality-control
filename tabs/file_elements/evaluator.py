@@ -32,10 +32,17 @@ EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
 GPT_OSS_MODEL = CONFIG["llm"]["ollama_model"]
 GPT_OSS_OPTIONS = {"num_ctx": 40001, "temperature": 0.3}
+LONG_TEXT_THRESHOLD = 20_000
+SUMMARY_CHUNK_SIZE = 8_000
+SUMMARY_CHUNK_OVERLAP = 500
 LLM_SYSTEM_PROMPT = (
     "你是汽车行业APQP质量工程师，需要根据APQP阶段要素要求对交付物内容进行逐项评估。"
     "请仅输出JSON，status字段限定为pass、partial或missing，其含义分别为“满足”、“部分满足/需完善”、“缺失”。"
     "message字段给出判断理由，evidence字段引用对应的原文或定位信息。"
+)
+LLM_SUMMARY_SYSTEM_PROMPT = (
+    "你是汽车行业APQP质量工程师助手，需要帮助整理交付物内容供后续要素核查。"
+    "请仅根据输入内容提炼与要素要求相关的事实，不做合规判断，不输出pass/missing等词汇。"
 )
 
 
@@ -189,6 +196,7 @@ class EvaluationOrchestrator:
     ) -> EvaluationResult:
         base_warnings = list(warnings or ())
         text = text or ""
+        original_length = len(text)
         if not text.strip():
             evaluations = [
                 ElementEvaluation(
@@ -210,14 +218,28 @@ class EvaluationOrchestrator:
                 warnings=base_warnings,
             )
 
-        llm_items, llm_warnings = self._analyze_with_llm(text)
+        effective_text = text
+        if original_length > LONG_TEXT_THRESHOLD:
+            summary_text, summary_warnings, chunk_count = self._summarize_long_document(text)
+            base_warnings.extend(summary_warnings)
+            if summary_text:
+                effective_text = summary_text
+                base_warnings.append(
+                    f"原文长度约{original_length}字，已拆分为{chunk_count}段摘要后送审。"
+                )
+            else:
+                base_warnings.append(
+                    "原文较长且摘要阶段失败，已直接使用原文参与评估。"
+                )
+
+        llm_items, llm_warnings = self._analyze_with_llm(effective_text)
         base_warnings.extend(llm_warnings)
         evaluations = self._merge_llm_results(llm_items)
         return EvaluationResult(
             profile=self.profile,
             generated_at=datetime.utcnow(),
             source_file=source_file,
-            text_length=len(text),
+            text_length=original_length,
             evaluations=evaluations,
             warnings=base_warnings,
         )
@@ -252,6 +274,18 @@ class EvaluationOrchestrator:
             )
         return evaluations
 
+    def _build_requirements_payload(self) -> List[Dict[str, str]]:
+        return [
+            {
+                "name": req.name,
+                "severity": req.severity,
+                "severity_label": SEVERITY_LABELS.get(req.severity, req.severity),
+                "description": req.description,
+                "guidance": req.guidance,
+            }
+            for req in self.profile.requirements
+        ]
+
     def _analyze_with_llm(self, document_text: str) -> Tuple[List[Dict[str, str]], List[str]]:
         warnings: List[str] = []
         client = self._get_ollama_client()
@@ -262,16 +296,7 @@ class EvaluationOrchestrator:
             warnings.append(message)
             return [], warnings
 
-        requirements_payload = [
-            {
-                "name": req.name,
-                "severity": req.severity,
-                "severity_label": SEVERITY_LABELS.get(req.severity, req.severity),
-                "description": req.description,
-                "guidance": req.guidance,
-            }
-            for req in self.profile.requirements
-        ]
+        requirements_payload = self._build_requirements_payload()
         user_prompt = (
             f"APQP阶段：{self.profile.stage}\n"
             f"交付物：{self.profile.name}\n"
@@ -284,24 +309,12 @@ class EvaluationOrchestrator:
             "示例输出：{\"items\": [{\"name\": \"要素\", \"status\": \"pass\", \"message\": \"说明\", \"evidence\": \"引用\"}]}"
         )
 
-        response_text = ""
         try:
-            for chunk in client.chat(
-                model=GPT_OSS_MODEL,
-                messages=[
-                    {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=True,
-                options=GPT_OSS_OPTIONS,
-            ):
-                piece = (
-                    chunk.get("message", {}).get("content")
-                    or chunk.get("response")
-                    or ""
-                )
-                if piece:
-                    response_text += piece
+            response_text = self._chat_completion(
+                client,
+                system_prompt=LLM_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+            )
         except Exception as error:  # pragma: no cover - network/runtime failures
             report_exception("调用 gpt-oss 失败", error, level="warning")
             warnings.append(f"调用 gpt-oss 失败：{error}")
@@ -316,6 +329,65 @@ class EvaluationOrchestrator:
             warnings.append("gpt-oss 返回内容无法解析为JSON，请检查交付物内容或稍后重试。")
         return parsed_items, warnings
 
+    def _summarize_long_document(
+        self, document_text: str
+    ) -> Tuple[str, List[str], int]:
+        warnings: List[str] = []
+        client = self._get_ollama_client()
+        if client is None:
+            message = "未能连接本地 gpt-oss，请联系系统管理员（摘要阶段）。"
+            if self._ollama_init_error:
+                message += f" ({self._ollama_init_error})"
+            warnings.append(message)
+            return "", warnings, 0
+
+        chunks = _chunk_text(
+            document_text,
+            chunk_size=SUMMARY_CHUNK_SIZE,
+            overlap=SUMMARY_CHUNK_OVERLAP,
+        )
+        if not chunks:
+            return "", warnings, 0
+
+        requirements_payload = self._build_requirements_payload()
+        summaries: List[str] = []
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, 1):
+            user_prompt = (
+                f"我们正在进行汽车行业APQP要素核查准备工作。\n"
+                f"APQP阶段：{self.profile.stage}\n"
+                f"交付物：{self.profile.name}\n"
+                f"要素要求：\n{json.dumps(requirements_payload, ensure_ascii=False, indent=2)}\n"
+                "请仅根据以下交付物片段提炼与这些要素相关的重要事实，用于后续人工+AI核查。"
+                "禁止做出“满足/不满足”等判断，也不要输出pass/missing等词汇。"
+                "输出JSON：{\"summary\": \"整体概述\", \"highlights\": [\"要点1\", ...]}。"
+                f"\n交付物片段（第{index}/{total}部分）如下：\n<<<DOCUMENT>>>\n"
+                f"{chunk}\n<<<END>>>\n"
+                "只需返回概述和要点，勿添加其它文本。"
+            )
+
+            try:
+                response_text = self._chat_completion(
+                    client,
+                    system_prompt=LLM_SUMMARY_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                )
+            except Exception as error:  # pragma: no cover - network/runtime failures
+                report_exception("调用 gpt-oss 摘要失败", error, level="warning")
+                warnings.append(f"第{index}段摘要调用失败：{error}")
+                continue
+
+            summary_text = _parse_summary_response(response_text)
+            if summary_text:
+                summaries.append(f"【第{index}部分摘要】\n{summary_text}")
+            else:
+                warnings.append(f"第{index}段摘要返回内容为空，请注意原文。")
+
+        combined = "\n\n".join(summaries).strip()
+        if not combined:
+            warnings.append("长文摘要阶段未获得有效内容，将直接使用原文评估。")
+        return combined, warnings, total
+
     def _get_ollama_client(self) -> Optional[OllamaClient]:
         if self._ollama_client is not None:
             return self._ollama_client
@@ -329,6 +401,28 @@ class EvaluationOrchestrator:
             report_exception("初始化本地 gpt-oss 客户端失败", error, level="warning")
             return None
         return self._ollama_client
+
+    def _chat_completion(
+        self,
+        client: OllamaClient,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        response_text = ""
+        for chunk in client.chat(
+            model=GPT_OSS_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+            options=GPT_OSS_OPTIONS,
+        ):
+            piece = chunk.get("message", {}).get("content") or chunk.get("response") or ""
+            if piece:
+                response_text += piece
+        return response_text
 
 
 def _strip_code_fences(value: str) -> str:
@@ -479,6 +573,68 @@ def _collect_parsed_texts(original_path: str, parsed_dir: str) -> List[str]:
     except OSError:
         results.sort()
     return results
+
+
+def _chunk_text(text: str, *, chunk_size: int, overlap: int) -> List[str]:
+    payload = text or ""
+    if not payload:
+        return []
+    if chunk_size <= 0:
+        return [payload]
+    effective_overlap = max(0, min(overlap, chunk_size // 2))
+    length = len(payload)
+    chunks: List[str] = []
+    start = 0
+    while start < length:
+        end = min(length, start + chunk_size)
+        chunks.append(payload[start:end])
+        if end >= length:
+            break
+        start = end - effective_overlap
+    return chunks
+
+
+def _parse_summary_response(response_text: str) -> str:
+    payload = _extract_json_text(response_text)
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return response_text.strip()
+
+    fragments: List[str] = []
+    if isinstance(data, dict):
+        summary = str(
+            data.get("summary")
+            or data.get("abstract")
+            or data.get("概述")
+            or data.get("内容")
+            or ""
+        ).strip()
+        if summary:
+            fragments.append(summary)
+        highlights = (
+            data.get("highlights")
+            or data.get("points")
+            or data.get("要点")
+            or data.get("摘要")
+        )
+        if isinstance(highlights, list):
+            for item in highlights:
+                snippet = str(item).strip()
+                if snippet:
+                    fragments.append(f"- {snippet}")
+        elif isinstance(highlights, str) and highlights.strip():
+            fragments.append(highlights.strip())
+    elif isinstance(data, list):
+        for item in data:
+            snippet = str(item).strip()
+            if snippet:
+                fragments.append(f"- {snippet}")
+    else:
+        return response_text.strip()
+
+    combined = "\n".join(fragments).strip()
+    return combined or response_text.strip()
 
 
 def parse_deliverable_stub(
