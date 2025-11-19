@@ -47,6 +47,73 @@ DELIVERABLE_PROFILE_ALIASES = {
     "更新CP": "控制计划",
 }
 
+PERSISTENCE_FILENAME = "file_elements_prefs.json"
+OVERVIEW_COLUMNS = ("要素", "严重度", "描述", "核查要点")
+
+
+def _compose_table_key(stage: str | None, deliverable: str | None) -> str | None:
+    if not stage or not deliverable:
+        return None
+    return f"{stage}||{deliverable}"
+
+
+def _load_user_preferences(path: str | None) -> Dict[str, object]:
+    defaults: Dict[str, object] = {
+        "selected_stage": None,
+        "deliverable_selection": {},
+        "table_overrides": {},
+    }
+    if not path or not os.path.isfile(path):
+        return dict(defaults)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return dict(defaults)
+    if not isinstance(loaded, dict):
+        return dict(defaults)
+    preferences = dict(defaults)
+    for key in ("selected_stage",):
+        if key in loaded:
+            preferences[key] = loaded.get(key)
+    deliverable_selection = loaded.get("deliverable_selection")
+    if isinstance(deliverable_selection, dict):
+        preferences["deliverable_selection"] = deliverable_selection
+    table_overrides = loaded.get("table_overrides")
+    if isinstance(table_overrides, dict):
+        preferences["table_overrides"] = table_overrides
+    return preferences
+
+
+def _save_user_preferences(path: str | None, data: Dict[str, object]) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+def _prepare_rows_for_storage(df: pd.DataFrame) -> List[Dict[str, str]]:
+    filled = df.fillna("") if not df.empty else df
+    records = filled.to_dict(orient="records") if not df.empty else []
+    sanitized: List[Dict[str, str]] = []
+    for row in records:
+        cleaned: Dict[str, str] = {}
+        for key, value in row.items():
+            cell = value
+            if cell is None or (isinstance(cell, float) and pd.isna(cell)):
+                cell = ""
+            elif hasattr(cell, "item"):
+                try:
+                    cell = cell.item()
+                except Exception:
+                    cell = str(cell)
+            if not isinstance(cell, str):
+                cell = str(cell)
+            cleaned[key] = cell
+        sanitized.append(cleaned)
+    return sanitized
+
 
 def _format_size(num_bytes: int) -> str:
     if num_bytes < 1024:
@@ -105,6 +172,29 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     paths_state_key = f"file_elements_source_paths_{session_id}"
     export_state_key = f"file_elements_export_path_{session_id}"
 
+    persistence_dir = (
+        session_dirs.get("generated_file_elements_check")
+        or session_dirs.get("generated")
+        or session_dirs.get("generated_files")
+    )
+    persistence_path = (
+        os.path.join(persistence_dir, PERSISTENCE_FILENAME) if persistence_dir else None
+    )
+    preferences = _load_user_preferences(persistence_path)
+    preferences_dirty = False
+    deliverable_preferences: Dict[str, Dict[str, str]] = preferences.setdefault(
+        "deliverable_selection", {}
+    )
+    table_overrides: Dict[str, List[Dict[str, str]]] = preferences.setdefault(
+        "table_overrides", {}
+    )
+
+    def flush_preferences() -> None:
+        nonlocal preferences_dirty
+        if preferences_dirty:
+            _save_user_preferences(persistence_path, preferences)
+            preferences_dirty = False
+
     stage_options = list(STAGE_ORDER or [])
     if not stage_options:
         stage_options = list(PHASE_TO_DELIVERABLES.keys())
@@ -118,17 +208,30 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     profile = None
     selected_deliverable_display = ""
     overview_metadata: Dict[str, object] | None = None
+    stage_state_key = f"file_elements_stage_{session_id}"
+    saved_stage = preferences.get("selected_stage")
+    default_stage = saved_stage if saved_stage in stage_options else stage_options[0]
+    if stage_state_key not in st.session_state:
+        st.session_state[stage_state_key] = default_stage
+    elif st.session_state[stage_state_key] not in stage_options:
+        st.session_state[stage_state_key] = default_stage
 
     with st.container():
         st.markdown("### 1. 阶段与交付物选择")
         col_stage, col_deliverable = st.columns(2)
         with col_stage:
+            stage_index = stage_options.index(st.session_state[stage_state_key])
             selected_stage = st.selectbox(
                 "选择APQP阶段",
                 stage_options,
-                key=f"file_elements_stage_{session_id}",
+                index=stage_index,
+                key=stage_state_key,
                 help="阶段列表来源于AIAG APQP流程，可根据项目推进选择。",
             )
+
+        if preferences.get("selected_stage") != selected_stage:
+            preferences["selected_stage"] = selected_stage
+            preferences_dirty = True
 
         stage_deliverables = PHASE_TO_DELIVERABLES.get(selected_stage, ())
         completeness_candidates = list(STAGE_REQUIREMENTS.get(selected_stage, ()))
@@ -166,21 +269,45 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 default_index = idx
                 break
 
+        stage_pref = deliverable_preferences.setdefault(selected_stage, {})
+        persisted_option = stage_pref.get("option")
+        default_option = (
+            persisted_option
+            if persisted_option in deliverable_options
+            else deliverable_options[
+                default_index if default_index < len(deliverable_options) else 0
+            ]
+        )
+        deliverable_state_key = f"file_elements_deliverable_{session_id}_{selected_stage}"
+        if deliverable_state_key not in st.session_state:
+            st.session_state[deliverable_state_key] = default_option
+        elif st.session_state[deliverable_state_key] not in deliverable_options:
+            st.session_state[deliverable_state_key] = default_option
         with col_deliverable:
             selected_option = st.selectbox(
                 "选择交付物",
                 deliverable_options,
-                index=default_index if deliverable_options else 0,
-                key=f"file_elements_deliverable_{session_id}",
+                index=deliverable_options.index(st.session_state[deliverable_state_key]),
+                key=deliverable_state_key,
                 help="交付物要求将用于生成要素清单与评估标准。",
             )
 
+        if stage_pref.get("option") != selected_option:
+            stage_pref["option"] = selected_option
+            preferences_dirty = True
+
+        custom_name = stage_pref.get("custom_name", "")
         if selected_option == CUSTOM_DELIVERABLE_OPTION:
+            custom_key = f"file_elements_custom_deliverable_{session_id}_{selected_stage}"
             custom_name = st.text_input(
                 "输入交付物名称",
-                key=f"file_elements_custom_deliverable_{session_id}",
+                value=custom_name,
+                key=custom_key,
                 placeholder="例如：客户特殊要求对照表",
             ).strip()
+            if stage_pref.get("custom_name", "") != custom_name:
+                stage_pref["custom_name"] = custom_name
+                preferences_dirty = True
             selected_deliverable_display = custom_name or "自定义交付物"
         else:
             selected_deliverable_display = selected_option
@@ -218,22 +345,54 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             requirement_rows = [
                 {
                     "要素": row.get("element", ""),
-                    "严重度": SEVERITY_LABELS.get(row.get("severity", "major"), row.get("severity", "major")),
+                    "严重度": SEVERITY_LABELS.get(
+                        row.get("severity", "major"), row.get("severity", "major")
+                    ),
                     "描述": row.get("description", ""),
                     "核查要点": row.get("guidance", ""),
                 }
                 for row in (overview_metadata or {}).get("requirements", [])
             ]
-        overview_df = pd.DataFrame(requirement_rows or [{}])
-        st.data_editor(
+        default_rows = (
+            _prepare_rows_for_storage(pd.DataFrame(requirement_rows)) if requirement_rows else []
+        )
+        table_key = _compose_table_key(selected_stage, selected_deliverable_display)
+        stored_rows = table_overrides.get(table_key) if table_key else None
+        if isinstance(stored_rows, list) and stored_rows:
+            overview_df = pd.DataFrame(stored_rows)
+        elif isinstance(stored_rows, list) and not stored_rows:
+            overview_df = pd.DataFrame(columns=OVERVIEW_COLUMNS)
+        elif requirement_rows:
+            overview_df = pd.DataFrame(requirement_rows)
+        else:
+            overview_df = pd.DataFrame([{column: "" for column in OVERVIEW_COLUMNS}])
+        editor_key = (
+            f"file_elements_overview_editor_{session_id}_{selected_stage}_{selected_deliverable_display}"
+        )
+        edited_df = st.data_editor(
             overview_df,
             use_container_width=True,
             num_rows="dynamic",
-            key=f"file_elements_overview_editor_{session_id}_{selected_deliverable_display}",
+            key=editor_key,
         )
+        edited_rows = _prepare_rows_for_storage(edited_df)
+        if table_key:
+            stored_rows_list = stored_rows if isinstance(stored_rows, list) else None
+            if stored_rows_list is None:
+                if edited_rows != default_rows:
+                    table_overrides[table_key] = edited_rows
+                    preferences_dirty = True
+            else:
+                if edited_rows == default_rows:
+                    if table_overrides.pop(table_key, None) is not None:
+                        preferences_dirty = True
+                elif edited_rows != stored_rows_list:
+                    table_overrides[table_key] = edited_rows
+                    preferences_dirty = True
         st.caption("严重度标签参考AIAG APQP要求，表格可直接编辑并可根据项目自定义补充。")
         if not profile:
             st.info("该交付物尚未配置AI自动评估，目前提供模板以便人工核对。")
+            flush_preferences()
             return
 
     with st.container():
@@ -475,6 +634,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         result = st.session_state.get(result_state_key)
         if not result:
             st.info("暂无评估结果，请先运行要素评估。")
+            flush_preferences()
             return
 
         severity_filter = st.session_state.get(severity_state_key, list(SEVERITY_ORDER))
@@ -561,3 +721,4 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             st.success("暂无需整改项目，所有要素均已满足。")
 
         st.caption("如需再次分析，请使用上方“重新评估”按钮；若需归档，可结合整改清单与JSON导出共享。")
+    flush_preferences()
