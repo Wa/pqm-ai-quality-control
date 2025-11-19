@@ -10,6 +10,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ollama import Client as OllamaClient
 
+from config import CONFIG
+
 from .config import (
     DeliverableProfile,
     ElementRequirement,
@@ -28,7 +30,7 @@ from util import resolve_ollama_host
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv"}
 EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
-GPT_OSS_MODEL = "gpt-oss:20b"
+GPT_OSS_MODEL = CONFIG["llm"]["ollama_model"]
 GPT_OSS_OPTIONS = {"num_ctx": 40001, "temperature": 0.3}
 LLM_SYSTEM_PROMPT = (
     "你是汽车行业APQP质量工程师，需要根据APQP阶段要素要求对交付物内容进行逐项评估。"
