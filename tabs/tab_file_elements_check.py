@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, List
@@ -25,6 +27,7 @@ from .file_elements import (
     DeliverableProfile,
     ElementRequirement,
     EvaluationOrchestrator,
+    EvaluationResult,
     PHASE_TO_DELIVERABLES,
     SEVERITY_LABELS,
     SEVERITY_ORDER,
@@ -521,11 +524,13 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
         orchestrator = EvaluationOrchestrator(active_profile) if active_profile else None
+        progress_placeholder = st.empty()
 
         def run_evaluation() -> None:
             if orchestrator is None or active_profile is None:
                 st.warning("请先完善要素清单后再运行评估。")
                 return
+            progress_bar = progress_placeholder.progress(0.0)
             current_files = _collect_files(source_dir)
             normalized_paths = _extract_paths(current_files)
             st.session_state[paths_state_key] = normalized_paths
@@ -535,7 +540,38 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 parsed_dir,
                 source_paths=normalized_paths,
             )
-            result = orchestrator.evaluate(text, source_file=source_file, warnings=warnings)
+            progress_value = 0.1
+            progress_bar.progress(progress_value)
+
+            result_holder: Dict[str, EvaluationResult] = {}
+            error_holder: Dict[str, BaseException] = {}
+
+            def _run_llm() -> None:
+                try:
+                    result_holder["result"] = orchestrator.evaluate(
+                        text,
+                        source_file=source_file,
+                        warnings=warnings,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    error_holder["error"] = exc
+
+            worker = threading.Thread(target=_run_llm, daemon=True)
+            worker.start()
+            while worker.is_alive():
+                delay = 2.0 if progress_value < 0.8 else 20.0
+                time.sleep(delay)
+                if not worker.is_alive():
+                    break
+                progress_value = min(progress_value + 0.01, 0.99)
+                progress_bar.progress(progress_value)
+            worker.join()
+            if "error" in error_holder:
+                progress_placeholder.empty()
+                st.error(f"评估失败：{error_holder['error']}")
+                return
+            result = result_holder.get("result")
+            progress_bar.progress(1.0)
             st.session_state[result_state_key] = result
             available_levels = [
                 level
