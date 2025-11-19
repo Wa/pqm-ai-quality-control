@@ -256,7 +256,8 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     loaded_path_key = f"file_elements_loaded_result_{session_id}"
 
     existing_files = _collect_files(source_dir)
-    st.session_state[paths_state_key] = _extract_paths(existing_files)
+    active_files = existing_files[:1]
+    st.session_state[paths_state_key] = _extract_paths(active_files)
 
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
@@ -343,7 +344,8 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 if saved:
                     st.success(f"已保存 {saved} 个文件至 {source_dir}")
                     existing_files = _collect_files(source_dir)
-                    st.session_state[paths_state_key] = _extract_paths(existing_files)
+                    active_files = existing_files[:1]
+                    st.session_state[paths_state_key] = _extract_paths(active_files)
         with col_stage:
             selected_stage = st.selectbox(
                 "选择APQP阶段",
@@ -549,16 +551,17 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     with st.container():
         st.markdown("### 3. 评估执行与结果")
 
-        if existing_files:
+        if active_files:
             file_info_rows = [
                 {
                     "文件名": item["name"],
                     "大小": _format_size(int(item["size"])) if isinstance(item["size"], int) else "-",
                     "上传时间": _format_time(float(item["modified"])),
                 }
-                for item in existing_files
+                for item in active_files
             ]
             st.table(pd.DataFrame(file_info_rows))
+            st.caption("系统默认使用最近上传的文件进行评估，如需评估其他文件请重新上传。")
         else:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
@@ -607,7 +610,11 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 st.info("已有后台任务在进行中，请稍候。")
                 return
             current_files = _collect_files(source_dir)
-            normalized_paths = _extract_paths(current_files)
+            processing_targets = current_files[:1]
+            if not processing_targets:
+                st.warning("未检测到可评估的文件，请先上传交付物。")
+                return
+            normalized_paths = _extract_paths(processing_targets)
             st.session_state[paths_state_key] = normalized_paths
             payload = {
                 "session_id": session_id,
@@ -640,7 +647,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 if message:
                     info_text += f"：{message}"
                 st.info(info_text)
-                st.progress(max(0.0, min(progress_value / 100.0, 1.0)))
+                capped_progress = max(0.0, min(progress_value, 100.0))
+                st.progress(capped_progress / 100.0)
+                st.caption(f"进度：{int(round(capped_progress))}%")
             elif status_value == "failed":
                 st.error(message or "后台评估失败，请稍后重试。")
             elif status_value == "succeeded":
