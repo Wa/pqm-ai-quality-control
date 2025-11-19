@@ -6,7 +6,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -46,6 +46,84 @@ PERSISTENCE_FILENAME = "file_elements_prefs.json"
 OVERVIEW_COLUMNS = ("要素", "严重度", "描述", "核查要点")
 LABEL_TO_SEVERITY = {label: level for level, label in SEVERITY_LABELS.items()}
 DEFAULT_SEVERITY = "major"
+JOB_POLL_INTERVAL_SECONDS = 5.0
+
+
+@st.fragment(run_every=JOB_POLL_INTERVAL_SECONDS)
+def _render_file_elements_job_fragment(
+    *,
+    backend_ready: bool,
+    backend_client: Optional[Any],
+    job_state_key: str,
+    job_status: Optional[Dict[str, object]],
+    job_error: Optional[str],
+    fragment_state_key: str,
+) -> None:
+    """Show job progress and poll backend without rerunning the full app."""
+
+    stored_job_id = st.session_state.get(job_state_key)
+    current_status = job_status
+    error_message = job_error
+    job_id = stored_job_id
+    if not job_id and isinstance(job_status, dict):
+        job_id = job_status.get("job_id")
+
+    if backend_ready and backend_client and job_id:
+        response = backend_client.get_file_elements_job(job_id)
+        if isinstance(response, dict) and response.get("job_id"):
+            current_status = response
+            error_message = None
+            st.session_state[job_state_key] = response["job_id"]
+        elif isinstance(response, dict) and response.get("detail") == "未找到任务":
+            current_status = None
+            error_message = str(response.get("detail") or "未找到任务")
+            st.session_state.pop(job_state_key, None)
+        elif isinstance(response, dict) and response.get("status") == "error":
+            error_message = str(response.get("message") or "后台任务查询失败")
+        elif isinstance(response, dict):
+            current_status = response
+    elif not backend_ready and not current_status and not error_message:
+        error_message = "后台服务未连接"
+
+    status_value = str(current_status.get("status")) if current_status else ""
+    job_running = status_value in {"queued", "running"}
+
+    if current_status:
+        stage_label = str(current_status.get("stage") or "后台任务")
+        message = str(current_status.get("message") or "")
+        progress_value = float(current_status.get("progress") or 0.0)
+        if job_running:
+            info_text = stage_label
+            if message:
+                info_text += f"：{message}"
+            st.info(info_text)
+            capped_progress = max(0.0, min(progress_value, 100.0))
+            st.progress(capped_progress / 100.0)
+            st.caption(f"进度：{int(round(capped_progress))}%")
+        elif status_value == "failed":
+            st.error(message or "后台评估失败，请稍后重试…")
+        elif status_value == "succeeded":
+            st.success(message or "后台评估已完成…")
+        elif message:
+            st.info(message)
+    elif error_message:
+        st.warning(error_message)
+
+    prev_running = bool(st.session_state.get(fragment_state_key))
+    st.session_state[fragment_state_key] = job_running
+
+    st.session_state[f"{fragment_state_key}_details"] = {
+        "job_id": job_id,
+        "status": current_status,
+        "error_message": error_message,
+        "job_running": job_running,
+        "polled_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+
+    if backend_ready and current_status and job_running:
+        st.caption("正在后台轮询任务进度…")
+    elif prev_running and not job_running:
+        st.rerun()
 
 
 def _compose_table_key(stage: str | None, deliverable: str | None) -> str | None:
@@ -254,6 +332,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     export_state_key = f"file_elements_export_path_{session_id}"
     job_state_key = f"file_elements_job_id_{session_id}"
     loaded_path_key = f"file_elements_loaded_result_{session_id}"
+    job_fragment_state_key = f"file_elements_job_fragment_state_{session_id}"
+    job_fragment_debug_key = f"{job_fragment_state_key}_details"
+    job_debug_state_key = f"file_elements_job_debug_{session_id}"
 
     existing_files = _collect_files(source_dir)
     active_files = existing_files[:1]
@@ -616,6 +697,13 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 return
             normalized_paths = _extract_paths(processing_targets)
             st.session_state[paths_state_key] = normalized_paths
+            debug_payload = {
+                "submitted_at": datetime.utcnow().isoformat(timespec="seconds"),
+                "profile_id": active_profile.id,
+                "profile_name": active_profile.name,
+                "source_paths": normalized_paths,
+            }
+            st.session_state[job_debug_state_key] = debug_payload
             payload = {
                 "session_id": session_id,
                 "profile": _profile_to_payload(active_profile),
@@ -623,12 +711,17 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             }
             response = backend_client.start_file_elements_job(payload)
             if isinstance(response, dict) and response.get("job_id"):
+                debug_payload["submit_response"] = dict(response)
                 st.session_state[job_state_key] = response["job_id"]
                 st.session_state.pop(loaded_path_key, None)
                 st.session_state.pop(export_state_key, None)
                 st.success("已提交后台评估任务，稍后将自动更新结果。")
                 st.rerun()
             else:
+                debug_payload["submit_response"] = {
+                    "error": True,
+                    "detail": response,
+                }
                 detail = ""
                 if isinstance(response, dict):
                     detail = str(response.get("detail") or response.get("message") or "")
@@ -638,24 +731,26 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
         status_value = str(job_status.get("status")) if job_status else ""
         job_running = status_value in {"queued", "running"}
-        if job_status:
-            stage_label = str(job_status.get("stage") or "后台任务")
-            message = str(job_status.get("message") or "")
-            progress_value = float(job_status.get("progress") or 0.0)
-            if status_value in {"queued", "running"}:
-                info_text = stage_label
-                if message:
-                    info_text += f"：{message}"
-                st.info(info_text)
-                capped_progress = max(0.0, min(progress_value, 100.0))
-                st.progress(capped_progress / 100.0)
-                st.caption(f"进度：{int(round(capped_progress))}%")
-            elif status_value == "failed":
-                st.error(message or "后台评估失败，请稍后重试。")
-            elif status_value == "succeeded":
-                st.success(message or "后台评估已完成。")
-        elif job_error:
-            st.warning(job_error)
+        _render_file_elements_job_fragment(
+            backend_ready=backend_ready,
+            backend_client=backend_client,
+            job_state_key=job_state_key,
+            job_status=job_status,
+            job_error=job_error,
+            fragment_state_key=job_fragment_state_key,
+        )
+
+        with st.expander("调试信息", expanded=False):
+            st.caption(
+                f"当前 Job ID：{st.session_state.get(job_state_key) or '无'}"
+            )
+            st.write("主线程最近一次查询状态：", job_status or "无")
+            fragment_snapshot = st.session_state.get(job_fragment_debug_key)
+            if fragment_snapshot:
+                st.write("后台轮询快照：", fragment_snapshot)
+            last_submit = st.session_state.get(job_debug_state_key)
+            if last_submit:
+                st.write("最近一次提交请求：", last_submit)
 
         col_run, col_rerun, col_export = st.columns([1, 1, 1])
         with col_run:
