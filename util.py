@@ -256,6 +256,9 @@ def ensure_session_dirs(base_dirs, session_id):
             parsed_root = os.path.join(file_elements_root, "parsed_files")
             os.makedirs(parsed_root, exist_ok=True)
             session_dirs["generated_file_elements_check_parsed"] = parsed_root
+            initial_results_root = os.path.join(file_elements_root, "initial_results")
+            os.makedirs(initial_results_root, exist_ok=True)
+            session_dirs["generated_file_elements_check_initial"] = initial_results_root
             final_results_root = os.path.join(file_elements_root, "final_results")
             os.makedirs(final_results_root, exist_ok=True)
             session_dirs["generated_file_elements_check_final"] = final_results_root

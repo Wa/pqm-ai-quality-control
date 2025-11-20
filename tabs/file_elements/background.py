@@ -74,10 +74,13 @@ def run_file_elements_job(
     generated_root = str(CONFIG["directories"]["generated_files"])
     source_dir = os.path.join(uploads_root, session_id, "elements")
     parsed_dir = os.path.join(generated_root, session_id, "file_elements_check", "parsed_files")
+    initial_results_dir = os.path.join(
+        generated_root, session_id, "file_elements_check", "initial_results"
+    )
     export_dir = os.path.join(generated_root, session_id, "file_elements_check")
     final_results_dir = os.path.join(generated_root, session_id, "file_elements_check", "final_results")
 
-    for path in (source_dir, parsed_dir, export_dir, final_results_dir):
+    for path in (source_dir, parsed_dir, initial_results_dir, export_dir, final_results_dir):
         os.makedirs(path, exist_ok=True)
 
     def _reset_uploads_directory() -> None:
@@ -135,7 +138,7 @@ def run_file_elements_job(
             }
         )
 
-        orchestrator = EvaluationOrchestrator(profile)
+        orchestrator = EvaluationOrchestrator(profile, initial_results_dir=initial_results_dir)
         result_holder: Dict[str, object] = {}
         error_holder: Dict[str, BaseException] = {}
 

@@ -335,6 +335,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     source_dir = session_dirs.get("elements", "")
     parsed_dir = session_dirs.get("generated_file_elements_check_parsed", "")
+    initial_results_dir = session_dirs.get("generated_file_elements_check_initial", "")
     export_dir = session_dirs.get("generated_file_elements_check", session_dirs.get("generated", ""))
     final_results_dir = session_dirs.get("generated_file_elements_check_final", "")
     if final_results_dir:
@@ -703,6 +704,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             if parsed_dir:
                 shutil.rmtree(parsed_dir, ignore_errors=True)
                 os.makedirs(parsed_dir, exist_ok=True)
+            if initial_results_dir:
+                shutil.rmtree(initial_results_dir, ignore_errors=True)
+                os.makedirs(initial_results_dir, exist_ok=True)
             current_files = _collect_files(source_dir)
             processing_targets = current_files[:1]
             if not processing_targets:
@@ -975,7 +979,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
         st.caption("如需再次分析，请使用上方“重新评估”按钮；评审结果将自动保存在结果目录中供下载。")
 
-    st.markdown("### 5. 评审結果下載")
+    st.markdown("### 5. 评审结果下载")
     if final_results_dir:
         col_clear, col_hint = st.columns([1, 3])
         with col_clear:
