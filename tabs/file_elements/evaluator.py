@@ -6,7 +6,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from io import BytesIO
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import pandas as pd
 
 from ollama import Client as OllamaClient
 
@@ -177,6 +180,49 @@ class EvaluationResult:
         with open(target_path, "w", encoding="utf-8") as handle:
             json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
         return target_path
+
+    def export_tabular(self, target_folder: str, base_filename: str | None = None) -> Dict[str, str]:
+        os.makedirs(target_folder, exist_ok=True)
+        sanitized_base = os.path.splitext(os.path.basename(base_filename or ""))[0]
+        if not sanitized_base:
+            sanitized_base = self.profile.id or "file_elements"
+        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d%H%M%S")
+        file_stub = f"{sanitized_base}要素检查结果_{timestamp}"
+
+        rows: List[Dict[str, object]] = []
+        for item in self.evaluations:
+            rows.append(
+                {
+                    "阶段": self.profile.stage,
+                    "交付物": self.profile.name,
+                    "文件名": self.source_file or sanitized_base,
+                    "生成时间": self.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "要素": item.requirement.name,
+                    "严重度": SEVERITY_LABELS.get(item.severity, item.severity),
+                    "状态": "已满足" if item.status == "pass" else "待补充",
+                    "当前判断": item.message,
+                    "整改指导": item.requirement.guidance,
+                    "要素描述": item.requirement.description,
+                    "检测关键字": item.keyword or "",
+                    "上下文摘录": item.snippet or "",
+                }
+            )
+
+        export_paths: Dict[str, str] = {}
+        df = pd.DataFrame(rows)
+        csv_path = os.path.join(target_folder, f"{file_stub}.csv")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        export_paths["csv"] = csv_path
+
+        excel_buffer = BytesIO()
+        df.to_excel(excel_buffer, index=False, sheet_name="要素检查结果")
+        excel_buffer.seek(0)
+        xlsx_path = os.path.join(target_folder, f"{file_stub}.xlsx")
+        with open(xlsx_path, "wb") as handle:
+            handle.write(excel_buffer.getvalue())
+        export_paths["xlsx"] = xlsx_path
+
+        return export_paths
 
     @classmethod
     def from_dict(cls, payload: Dict[str, object]) -> "EvaluationResult":
@@ -847,4 +893,5 @@ __all__ = [
     "auto_convert_sources",
     "parse_deliverable_stub",
     "save_result_payload",
+    "PREFERRED_EXPORT_NAME",
 ]

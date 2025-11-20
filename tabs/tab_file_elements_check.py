@@ -19,6 +19,7 @@ from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS
 from util import (
     ensure_session_dirs,
     get_directory_refresh_token,
+    get_file_list,
     handle_file_upload,
     list_directory_contents,
 )
@@ -307,6 +308,15 @@ def _extract_paths(entries: List[Dict[str, object]]) -> List[str]:
     return [item["path"] for item in entries if item.get("path")]
 
 
+def _select_latest_by_ext(entries: List[Dict[str, object]], extension: str) -> Optional[Dict[str, object]]:
+    ext = extension.lower()
+    for item in entries:
+        name = str(item.get("name") or "").lower()
+        if name.endswith(ext):
+            return item
+    return None
+
+
 def render_file_elements_check_tab(session_id: str | None) -> None:
     if session_id is None:
         st.warning("请先登录以使用此功能。")
@@ -326,12 +336,14 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     source_dir = session_dirs.get("elements", "")
     parsed_dir = session_dirs.get("generated_file_elements_check_parsed", "")
     export_dir = session_dirs.get("generated_file_elements_check", session_dirs.get("generated", ""))
+    final_results_dir = session_dirs.get("generated_file_elements_check_final", "")
+    if final_results_dir:
+        os.makedirs(final_results_dir, exist_ok=True)
 
     result_state_key = f"file_elements_result_{session_id}"
     severity_state_key = f"file_elements_severity_{session_id}"
     issue_state_key = f"file_elements_issue_{session_id}"
     paths_state_key = f"file_elements_source_paths_{session_id}"
-    export_state_key = f"file_elements_export_path_{session_id}"
     job_state_key = f"file_elements_job_id_{session_id}"
     loaded_path_key = f"file_elements_loaded_result_{session_id}"
     job_fragment_state_key = f"file_elements_job_fragment_state_{session_id}"
@@ -648,7 +660,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         else:
             st.info("暂无上传文件，请先上传交付物文本或对应解析结果。")
 
-        def _persist_result(result: EvaluationResult, export_path: Optional[str]) -> None:
+        def _persist_result(result: EvaluationResult) -> None:
             st.session_state[result_state_key] = result
             available_levels = [
                 level
@@ -657,10 +669,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             ]
             st.session_state[severity_state_key] = available_levels or list(SEVERITY_ORDER)
             st.session_state.pop(issue_state_key, None)
-            if export_path:
-                st.session_state[export_state_key] = export_path
-            else:
-                st.session_state.pop(export_state_key, None)
 
         def _refresh_result_from_job() -> None:
             if not job_status:
@@ -676,7 +684,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 return
             loaded = _load_result_from_file(first_path)
             if loaded:
-                _persist_result(loaded, first_path)
+                _persist_result(loaded)
                 st.session_state[loaded_path_key] = first_path
 
         _refresh_result_from_job()
@@ -719,7 +727,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 debug_payload["submit_response"] = dict(response)
                 st.session_state[job_state_key] = response["job_id"]
                 st.session_state.pop(loaded_path_key, None)
-                st.session_state.pop(export_state_key, None)
                 st.success("已提交后台评估任务，稍后将自动更新结果。")
                 st.rerun()
             else:
@@ -774,37 +781,38 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             ):
                 run_evaluation()
         with col_export:
-            result = st.session_state.get(result_state_key)
-            export_path = st.session_state.get(export_state_key)
-            if result and export_path and os.path.isfile(export_path):
-                with open(export_path, "r", encoding="utf-8") as handle:
-                    payload = handle.read()
-                st.download_button(
-                    "📥 导出JSON",
-                    payload.encode("utf-8"),
-                    file_name=os.path.basename(export_path),
-                    mime="application/json",
-                    key=f"file_elements_export_{session_id}",
-                    help="导出评估结果以便归档或共享。",
-                )
-            elif result:
-                export_content = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
-                st.download_button(
-                    "📥 导出JSON",
-                    export_content.encode("utf-8"),
-                    file_name=f"{result.profile.id}_file_elements.json",
-                    mime="application/json",
-                    key=f"file_elements_export_{session_id}",
-                    help="导出评估结果以便归档或共享。",
-                )
-            else:
-                st.download_button(
-                    "📥 导出JSON",
-                    data="",
-                    file_name=f"{(active_profile.id if active_profile else 'file_elements')}_file_elements.json",
-                    disabled=True,
-                    key=f"file_elements_export_{session_id}",
-                )
+            latest_exports = _collect_files(final_results_dir)
+            latest_csv = _select_latest_by_ext(latest_exports, ".csv")
+            latest_xlsx = _select_latest_by_ext(latest_exports, ".xlsx")
+
+            def _render_download(label: str, entry: Optional[Dict[str, object]], *, mime: str, key_suffix: str) -> None:
+                if entry and os.path.isfile(entry.get("path", "")):
+                    with open(str(entry["path"]), "rb") as handle:
+                        payload = handle.read()
+                    st.download_button(
+                        label,
+                        payload,
+                        file_name=str(entry.get("name") or "file_elements_result"),
+                        mime=mime,
+                        key=f"file_elements_{key_suffix}_{session_id}",
+                        help="下载最新的评审结果文件。",
+                    )
+                else:
+                    st.download_button(
+                        label,
+                        data=b"",
+                        file_name=f"file_elements_result.{key_suffix}",
+                        key=f"file_elements_{key_suffix}_{session_id}",
+                        disabled=True,
+                    )
+
+            _render_download("📥 导出CSV", latest_csv, mime="text/csv", key_suffix="csv")
+            _render_download(
+                "📥 导出Excel",
+                latest_xlsx,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key_suffix="xlsx",
+            )
 
         result = st.session_state.get(result_state_key)
         if result:
@@ -965,5 +973,61 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
         else:
             st.success("暂无需整改项目，所有要素均已满足。")
 
-        st.caption("如需再次分析，请使用上方“重新评估”按钮；若需归档，可结合整改清单与JSON导出共享。")
+        st.caption("如需再次分析，请使用上方“重新评估”按钮；评审结果将自动保存在结果目录中供下载。")
+
+    st.markdown("### 5. 评审結果下載")
+    if final_results_dir:
+        col_clear, col_hint = st.columns([1, 3])
+        with col_clear:
+            if st.button(
+                "🗑️ 清空结果文件夹",
+                key=f"file_elements_clear_final_{session_id}",
+                help="删除所有评审结果文件。",
+            ):
+                try:
+                    for entry in os.listdir(final_results_dir):
+                        path = os.path.join(final_results_dir, entry)
+                        if os.path.isfile(path):
+                            os.remove(path)
+                    st.success("已清空结果文件夹。")
+                    st.rerun()
+                except OSError as error:
+                    st.error(f"清理结果文件夹失败：{error}")
+        with col_hint:
+            st.caption("每次评估完成后会生成CSV与Excel文件，可在此处统一下载或清理。")
+
+        final_files = get_file_list(final_results_dir)
+        if final_files:
+            for entry in final_files:
+                cols = st.columns([2, 1, 1, 1])
+                cols[0].markdown(f"**{entry['name']}**")
+                cols[1].caption(_format_size(int(entry.get("size", 0))))
+                cols[2].caption(_format_time(float(entry.get("modified", 0.0))))
+                if os.path.isfile(entry["path"]):
+                    with open(entry["path"], "rb") as handle:
+                        payload = handle.read()
+                    cols[3].download_button(
+                        "下载",
+                        payload,
+                        file_name=entry["name"],
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            if entry["name"].lower().endswith(".xlsx")
+                            else "text/csv"
+                        ),
+                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
+                    )
+                else:
+                    cols[3].download_button(
+                        "下载",
+                        data=b"",
+                        file_name=entry["name"],
+                        disabled=True,
+                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
+                    )
+        else:
+            st.info("结果文件夹暂无文件，运行评估后将自动生成。")
+    else:
+        st.info("结果文件目录未初始化，请刷新后重试。")
+
     flush_preferences()

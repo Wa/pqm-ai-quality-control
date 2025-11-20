@@ -75,8 +75,9 @@ def run_file_elements_job(
     source_dir = os.path.join(uploads_root, session_id, "elements")
     parsed_dir = os.path.join(generated_root, session_id, "file_elements_check", "parsed_files")
     export_dir = os.path.join(generated_root, session_id, "file_elements_check")
+    final_results_dir = os.path.join(generated_root, session_id, "file_elements_check", "final_results")
 
-    for path in (source_dir, parsed_dir, export_dir):
+    for path in (source_dir, parsed_dir, export_dir, final_results_dir):
         os.makedirs(path, exist_ok=True)
 
     def _reset_uploads_directory() -> None:
@@ -195,13 +196,18 @@ def run_file_elements_job(
             return
 
         saved_path = save_result_payload(result, export_dir)
+        tabular_exports = result.export_tabular(final_results_dir, base_filename=source_file)
+        result_files: List[str] = []
+        if saved_path:
+            result_files.append(saved_path)
+        result_files.extend(path for path in tabular_exports.values() if path)
         publish(
             {
                 "status": "succeeded",
                 "stage": "completed",
                 "message": "评估完成，可下载结果。",
                 "progress": 100.0,
-                "result_files": [saved_path] if saved_path else [],
+                "result_files": result_files,
                 "metadata": {
                     "stage": profile.stage,
                     "deliverable": profile.name,
