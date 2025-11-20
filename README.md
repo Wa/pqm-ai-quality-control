@@ -15,7 +15,7 @@ A comprehensive AI-powered application for APQP (Advanced Product Quality Planni
 ```bash
 # Clone the repository
 git clone <your-repo-url>
-cd PQM_AI
+cd pqm-ai-quality-control
 
 # Create and activate conda environment
 conda create -n PQM_AI python=3.12 -y
@@ -48,33 +48,49 @@ streamlit run main.py --server.port 8888
 ## 🎯 Features
 
 ### Core Analysis Tabs
-1. **特殊特性符号检查** (Special Symbols Check)
-   - Workflow currently undergoing a major rebuild to align with the enterprise standard experience
-   - Placeholder interface keeps the tab visible while the new implementation is prepared
+1. **⚡ APQP交付物一键检查** (APQP Deliverables One-Click Check)
+   - Stage-based upload of APQP deliverables (立项, A样, B样, C样等)
+   - One-click parsing pipeline that converts PDFs/Office/Excel/text into normalized text using the backend
+   - Designed to power downstream completeness and consistency checks
 
-2. **设计制程检查** (Design Process Check)
-   - Parameter validation and process design analysis
-   - Independent session state management
-
-3. **文件齐套性检查** (File Completeness Check)
+2. **文件齐套性检查** (File Completeness Check)
    - APQP stage-based file completeness analysis
    - Multi-stage comparison (立项阶段, A样阶段, B样阶段, C样阶段)
-   - Smart empty stage handling
+   - Smart handling of empty or missing stages
 
-4. **文件要素检查** (File Elements Check)
-   - Integration with external APQP platforms
-   - Demo video and documentation access
+3. **特殊特性符号检查** (Special Symbols Check)
+   - Full special-symbol parsing and checking workflow (no longer a placeholder)
+   - Supports long-running background jobs with progress tracking and pause/stop controls
+   - Can run in regular or high-performance modes depending on deployment
 
-5. **历史问题规避** (Historical Issues Avoidance)
-   - Historical problem tracking and avoidance
-   - Excel-based data management
+4. **设计制程检查** (Design Process / Parameter Check)
+   - Parameter validation and process design analysis against reference documents
+   - Independent session state management per user
+
+5. **文件要素检查** (File Elements Check)
+   - Checks whether key document “elements” are present for each APQP stage/deliverable
+   - Integrates with external APQP platforms and internal standards
+
+6. **企业标准检查** (Enterprise Standard Check)
+   - Compares target documents against enterprise standards
+   - Streams detailed LLM prompts/responses and generates structured result files (CSV/XLSX)
+   - Includes a full “演示” workflow using pre-generated prompt/response chunks
+
+7. **历史问题规避** (Historical Issues Avoidance)
+   - Historical problem tracking and avoidance based on Excel knowledge base
+   - Helps engineers avoid repeating known issues during new projects
+
+8. **🤖 AI智能体** (AI Agent)
+   - LangGraph-based ReAct-style agent with tools for file operations, HTTP, web search, and text conversion
+   - Multi-step planning UI with explicit execution plan, streaming progress, and debug panel
+   - Per-user, per-conversation history with file uploads scoped to each conversation
 
 ### Advanced Features
 - **Multi-User Support:** Complete session isolation with tab-specific state management
-- **Dual LLM Backend:** Support for both Ollama (local) and OpenAI (cloud) models
-- **FastAPI Integration:** Efficient file operations with real-time updates
-- **Workflow Protection:** Prevents interruptions during analysis
-- **Demo Mode:** Pre-configured demonstration files for testing
+- **Backend Job Orchestration:** FastAPI manages long-running analysis jobs with progress, pause/resume, and log streaming
+- **Hybrid LLM Backend:** Supports local Ollama and cloud providers (OpenAI-compatible gateways, ModelScope, etc.) via `config.py`
+- **Workflow Protection:** Prevents interruptions during analysis and protects long-running jobs
+- **Demo Mode:** Pre-configured demonstration files and prompt/response traces for safe testing
 
 ## 🏗️ Architecture
 
@@ -107,53 +123,54 @@ session = {
 ## 📁 Project Structure
 
 ```
-PQM_AI/
-├── main.py                          # Streamlit main application
-├── backend.py                       # FastAPI backend server
-├── backend_client.py                # Backend communication client
-├── start_app.py                     # Automated startup script
-├── config.py                        # Centralized configuration
-├── util.py                          # Utility functions and session management
-├── tab_special_symbols_check.py     # Special symbols tab (placeholder during rebuild)
-├── tab_parameters_check.py          # Design process analysis
-├── tab_file_completeness_check.py   # File completeness analysis
-├── tab_file_elements_check.py       # File elements integration
-├── tab_history_issues_avoidance.py  # Historical issues tracking
-├── tab_settings.py                  # Application settings
-├── tab_help_documentation.py        # Help and documentation
-├── requirements.txt                 # Python dependencies
-├── demonstration/                   # Demo files (Git LFS tracked)
-├── uploads/                         # User uploads (per session/tab)
-├── generated_files/                 # Generated outputs
-└── media/                          # Media files (images, videos)
+pqm-ai-quality-control/
+├── main.py                       # Streamlit main application (tab container + login)
+├── backend.py                    # FastAPI backend (file ops + long-running jobs)
+├── backend_client.py             # Backend communication client used by tabs
+├── start_app.py                  # Automated startup script (starts backend + frontend)
+├── config.py                     # Centralized configuration (paths, LLM, Bisheng, services)
+├── util.py                       # Utility functions and session management helpers
+├── tabs/
+│   ├── tab_home.py               # 首页
+│   ├── tab_apqp_one_click_check.py
+│   ├── tab_file_completeness_check.py
+│   ├── tab_special_symbols_check.py
+│   ├── tab_parameters_check.py
+│   ├── tab_file_elements_check.py
+│   ├── tab_enterprise_standard_check.py
+│   ├── tab_history_issues_avoidance.py
+│   ├── tab_ai_agent.py           # AI智能体主界面
+│   ├── tab_settings.py
+│   ├── tab_help_documentation.py
+│   ├── tab_admin.py
+│   ├── ai_agent/                 # LangGraph agent + MCP tools implementation
+│   ├── enterprise_standard/      # Enterprise standard comparison workflow
+│   ├── file_completeness/        # APQP completeness logic
+│   ├── file_elements/            # File elements evaluation logic
+│   ├── history/                  # Historical issues workflows
+│   ├── parameters/               # Design parameter workflows
+│   ├── special_symbols/          # Special-symbol parsing & checking
+│   └── shared/                   # Shared text/file conversion & utilities
+├── demonstration/                # Demo files used by “演示” buttons
+├── uploads/                      # User uploads (per user/session)
+├── generated_files/              # Generated outputs, parsed text, reports
+├── user_sessions/                # Persisted per-user session metadata
+├── requirements.txt              # Python dependencies
+└── README.md
 ```
 
 ## ⚙️ Configuration
 
 ### Centralized Configuration (`config.py`)
-All settings are managed in `config.py` for easy maintenance:
+All core paths and service settings are managed in `config.py`:
 
-```python
-CONFIG = {
-    "directories": {
-        "uploads": PROJECT_ROOT / "uploads",
-        "generated_files": PROJECT_ROOT / "generated_files",
-        "media": PROJECT_ROOT / "media",
-        "demonstration": PROJECT_ROOT / "demonstration",
-    },
-    "llm": {
-        "ollama_host": "http://localhost:11434",
-        "ollama_model": "llama3.1",
-        "openai_base_url": "https://api.openai.com/v1",
-        "openai_api_key": "your-api-key",
-        "openai_model": "gpt-4"
-    }
-}
-```
+- **Directories** (`CONFIG["directories"]`): `uploads`, `generated_files`, `demonstration`, optional `media` assets.
+- **Files** (`CONFIG["files"]`): Paths to demo images/videos and reference Excel workbooks.
+- **LLM settings** (`CONFIG["llm"]`): Local Ollama hosts/models, OpenAI-compatible base URL/model, ModelScope API, etc.
+- **Bisheng** (`CONFIG["bisheng"]`): Internal workflow service used for some enterprise checks.
+- **Services** (`CONFIG["services"]`): External services such as Unstructured/MinerU-style document parsing.
 
-### Environment Variables
-- `OPENAI_API_KEY`: Your OpenAI API key
-- `OLLAMA_HOST`: Ollama server host (default: localhost:11434)
+Before deploying outside your internal environment, review and update `config.py` to point to your own endpoints and API keys, and move any secrets into environment variables or a secure config mechanism (do not commit real keys to a public repo).
 
 ## 🔧 Usage
 
@@ -249,12 +266,20 @@ pip install -r requirements.txt
 
 ## 📚 API Documentation
 
-### Backend Endpoints
+### Backend Endpoints (selected)
 - `GET /health` - Service health check
-- `POST /upload-file` - File upload
+- `POST /upload-file` - File upload for parameter/reference/graph files
 - `DELETE /delete-file` - File deletion
-- `GET /list-files` - File listing
-- `POST /clear-files` - Clear all files
+- `GET /list-files/{session_id}` - File listing per session
+- `POST /clear-files` - Clear all parameter/reference/graph files for a session
+- `POST /apqp-one-click/parse` - Parse APQP uploads into normalized text by stage
+- `POST /apqp-one-click/clear` - Clear APQP uploads/parsed outputs
+- `POST /enterprise-standard/jobs` - Start an enterprise-standard comparison job
+- `GET /enterprise-standard/jobs` / `GET /enterprise-standard/jobs/{job_id}` - Inspect enterprise jobs
+- `POST /special-symbols/jobs` - Start a special-symbols analysis job
+- `POST /file-completeness/jobs` / `POST /parameters/jobs` / `POST /history/jobs` / `POST /file-elements/jobs` - Start other analysis jobs
+
+All endpoints are fully documented in the built-in FastAPI docs at `http://localhost:8001/docs`.
 
 ### Frontend Integration
 ```python
