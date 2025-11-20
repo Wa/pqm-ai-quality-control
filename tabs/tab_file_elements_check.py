@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -322,7 +323,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     }
     session_dirs = ensure_session_dirs(base_dirs, session_id)
     source_dir = session_dirs.get("elements", "")
-    parsed_dir = session_dirs.get("generated_file_elements_check", "")
+    parsed_dir = session_dirs.get("generated_file_elements_check_parsed", "")
     export_dir = session_dirs.get("generated_file_elements_check", session_dirs.get("generated", ""))
 
     result_state_key = f"file_elements_result_{session_id}"
@@ -690,6 +691,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             if status_value in {"queued", "running"}:
                 st.info("已有后台任务在进行中，请稍候。")
                 return
+            if parsed_dir:
+                shutil.rmtree(parsed_dir, ignore_errors=True)
+                os.makedirs(parsed_dir, exist_ok=True)
             current_files = _collect_files(source_dir)
             processing_targets = current_files[:1]
             if not processing_targets:
