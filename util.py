@@ -251,7 +251,17 @@ def ensure_session_dirs(base_dirs, session_id):
             for name in subfolders:
                 os.makedirs(os.path.join(generated_root, name), exist_ok=True)
             session_dirs["generated_parameters_check"] = os.path.join(generated_root, "parameters_check")
-            session_dirs["generated_file_elements_check"] = os.path.join(generated_root, "file_elements_check")
+            file_elements_root = os.path.join(generated_root, "file_elements_check")
+            session_dirs["generated_file_elements_check"] = file_elements_root
+            parsed_root = os.path.join(file_elements_root, "parsed_files")
+            os.makedirs(parsed_root, exist_ok=True)
+            session_dirs["generated_file_elements_check_parsed"] = parsed_root
+            initial_results_root = os.path.join(file_elements_root, "initial_results")
+            os.makedirs(initial_results_root, exist_ok=True)
+            session_dirs["generated_file_elements_check_initial"] = initial_results_root
+            final_results_root = os.path.join(file_elements_root, "final_results")
+            os.makedirs(final_results_root, exist_ok=True)
+            session_dirs["generated_file_elements_check_final"] = final_results_root
             session_dirs["generated_file_completeness_check"] = os.path.join(generated_root, "file_completeness_check")
             session_dirs["generated_history_issues_avoidance"] = os.path.join(generated_root, "history_issues_avoidance")
             ai_root = os.path.join(generated_root, "ai_agent")

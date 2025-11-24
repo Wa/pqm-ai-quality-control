@@ -6,7 +6,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from io import BytesIO
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import pandas as pd
 
 from ollama import Client as OllamaClient
 
@@ -178,6 +181,49 @@ class EvaluationResult:
             json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
         return target_path
 
+    def export_tabular(self, target_folder: str, base_filename: str | None = None) -> Dict[str, str]:
+        os.makedirs(target_folder, exist_ok=True)
+        sanitized_base = os.path.splitext(os.path.basename(base_filename or ""))[0]
+        if not sanitized_base:
+            sanitized_base = self.profile.id or "file_elements"
+        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d%H%M%S")
+        file_stub = f"{sanitized_base}要素检查结果_{timestamp}"
+
+        rows: List[Dict[str, object]] = []
+        for item in self.evaluations:
+            rows.append(
+                {
+                    "阶段": self.profile.stage,
+                    "交付物": self.profile.name,
+                    "文件名": self.source_file or sanitized_base,
+                    "生成时间": self.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "要素": item.requirement.name,
+                    "严重度": SEVERITY_LABELS.get(item.severity, item.severity),
+                    "状态": "已满足" if item.status == "pass" else "待补充",
+                    "当前判断": item.message,
+                    "整改指导": item.requirement.guidance,
+                    "要素描述": item.requirement.description,
+                    "检测关键字": item.keyword or "",
+                    "上下文摘录": item.snippet or "",
+                }
+            )
+
+        export_paths: Dict[str, str] = {}
+        df = pd.DataFrame(rows)
+        csv_path = os.path.join(target_folder, f"{file_stub}.csv")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        export_paths["csv"] = csv_path
+
+        excel_buffer = BytesIO()
+        df.to_excel(excel_buffer, index=False, sheet_name="要素检查结果")
+        excel_buffer.seek(0)
+        xlsx_path = os.path.join(target_folder, f"{file_stub}.xlsx")
+        with open(xlsx_path, "wb") as handle:
+            handle.write(excel_buffer.getvalue())
+        export_paths["xlsx"] = xlsx_path
+
+        return export_paths
+
     @classmethod
     def from_dict(cls, payload: Dict[str, object]) -> "EvaluationResult":
         """Reconstruct an ``EvaluationResult`` from a serialized dictionary."""
@@ -258,8 +304,9 @@ class EvaluationResult:
 class EvaluationOrchestrator:
     """Encapsulate requirement evaluation for a given deliverable."""
 
-    def __init__(self, profile: DeliverableProfile):
+    def __init__(self, profile: DeliverableProfile, *, initial_results_dir: str | None = None):
         self.profile = profile
+        self.initial_results_dir = initial_results_dir
         self._ollama_client: Optional[OllamaClient] = None
         self._ollama_init_error: Optional[Exception] = None
 
@@ -308,7 +355,7 @@ class EvaluationOrchestrator:
                     "原文较长且摘要阶段失败，已直接使用原文参与评估。"
                 )
 
-        llm_items, llm_warnings = self._analyze_with_llm(effective_text)
+        llm_items, llm_warnings = self._analyze_with_llm(effective_text, source_file=source_file)
         base_warnings.extend(llm_warnings)
         evaluations = self._merge_llm_results(llm_items)
         return EvaluationResult(
@@ -362,7 +409,9 @@ class EvaluationOrchestrator:
             for req in self.profile.requirements
         ]
 
-    def _analyze_with_llm(self, document_text: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    def _analyze_with_llm(
+        self, document_text: str, *, source_file: str | None = None
+    ) -> Tuple[List[Dict[str, str]], List[str]]:
         warnings: List[str] = []
         client = self._get_ollama_client()
         if client is None:
@@ -396,6 +445,8 @@ class EvaluationOrchestrator:
             warnings.append(f"调用 gpt-oss 失败：{error}")
             return [], warnings
 
+        self._save_prompt_and_response(source_file, user_prompt, response_text)
+
         if not response_text.strip():
             warnings.append("gpt-oss 未返回内容，请稍后重试。")
             return [], warnings
@@ -404,6 +455,23 @@ class EvaluationOrchestrator:
         if not parsed_items:
             warnings.append("gpt-oss 返回内容无法解析为JSON，请检查交付物内容或稍后重试。")
         return parsed_items, warnings
+
+    def _save_prompt_and_response(
+        self, source_file: str | None, prompt: str, response: str
+    ) -> None:
+        if not self.initial_results_dir:
+            return
+        try:
+            os.makedirs(self.initial_results_dir, exist_ok=True)
+            base_name = os.path.basename(source_file or "document") or "document"
+            prompt_path = os.path.join(self.initial_results_dir, f"prompt_{base_name}.txt")
+            response_path = os.path.join(self.initial_results_dir, f"response_{base_name}.txt")
+            with open(prompt_path, "w", encoding="utf-8") as prompt_handle:
+                prompt_handle.write(prompt)
+            with open(response_path, "w", encoding="utf-8") as response_handle:
+                response_handle.write(response)
+        except Exception as error:  # pragma: no cover - best-effort logging
+            report_exception("保存评估提示/回复失败", error, level="warning")
 
     def _summarize_long_document(
         self, document_text: str
@@ -847,4 +915,5 @@ __all__ = [
     "auto_convert_sources",
     "parse_deliverable_stub",
     "save_result_payload",
+    "PREFERRED_EXPORT_NAME",
 ]
