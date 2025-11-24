@@ -61,6 +61,7 @@ def _render_file_elements_job_fragment(
     job_status: Optional[Dict[str, object]],
     job_error: Optional[str],
     fragment_state_key: str,
+    status_cache_key: str,
 ) -> None:
     """Show job progress and poll backend without rerunning the full app."""
 
@@ -89,6 +90,10 @@ def _render_file_elements_job_fragment(
         error_message = "后台服务未连接"
 
     status_value = str(current_status.get("status")) if current_status else ""
+    message_hint = str(current_status.get("message")) if current_status else ""
+    # Guard against inconsistent status/message combinations from the backend.
+    if status_value not in {"queued", "running", "failed", "succeeded"} and "完成" in message_hint:
+        status_value = "succeeded"
     job_running = status_value in {"queued", "running"}
 
     if current_status:
@@ -122,6 +127,8 @@ def _render_file_elements_job_fragment(
         "job_running": job_running,
         "polled_at": datetime.utcnow().isoformat(timespec="seconds"),
     }
+    if current_status:
+        st.session_state[status_cache_key] = current_status
 
     if backend_ready and current_status and job_running:
         st.caption("正在后台轮询任务进度…")
@@ -348,6 +355,7 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     job_state_key = f"file_elements_job_id_{session_id}"
     loaded_path_key = f"file_elements_loaded_result_{session_id}"
     job_fragment_state_key = f"file_elements_job_fragment_state_{session_id}"
+    job_fragment_status_key = f"{job_fragment_state_key}_status"
     job_fragment_debug_key = f"{job_fragment_state_key}_details"
     job_debug_state_key = f"file_elements_job_debug_{session_id}"
 
@@ -688,8 +696,6 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
                 _persist_result(loaded)
                 st.session_state[loaded_path_key] = first_path
 
-        _refresh_result_from_job()
-
         def run_evaluation() -> None:
             if active_profile is None:
                 st.warning("请先完善要素清单后再运行评估。")
@@ -754,7 +760,20 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
             job_status=job_status,
             job_error=job_error,
             fragment_state_key=job_fragment_state_key,
+            status_cache_key=job_fragment_status_key,
         )
+
+        live_status = st.session_state.get(job_fragment_status_key)
+        if isinstance(live_status, dict):
+            job_status = live_status
+        status_value = str(job_status.get("status")) if job_status else ""
+        job_running = status_value in {"queued", "running"}
+
+        if status_value in {"succeeded", "failed"} and source_dir:
+            shutil.rmtree(source_dir, ignore_errors=True)
+            os.makedirs(source_dir, exist_ok=True)
+
+        _refresh_result_from_job()
 
         with st.expander("调试信息", expanded=False):
             st.caption(
