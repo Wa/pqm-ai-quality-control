@@ -199,7 +199,14 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.caption(f"解析后的文本文件将保存至 `{apqp_parsed_root}`。")
 
         classification_state_key = f"apqp_classification_summary_{session_id}"
+        turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
         classify_log_container = st.container()
+        turbo_checkbox = st.checkbox(
+            "高性能模式",
+            key=turbo_state_key,
+            disabled=not backend_ready,
+            help="并行调用 ModelScope/云端模型加速分类，涉密文件请谨慎使用。",
+        )
         classify_button = st.button(
             "运行智能齐套性识别",
             key=f"apqp_classify_{session_id}",
@@ -211,6 +218,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法进行齐套性识别。")
                 else:
+                    selected_turbo = bool(st.session_state.get(turbo_state_key, turbo_checkbox))
+                    if selected_turbo:
+                        st.caption("高性能模式将并行提交至 ModelScope/云端通道，若不可用会自动回退到本地串行。")
                     with st.spinner("正在提交解析任务..."):
                         parse_job = backend_client.start_apqp_parse_job(session_id)
 
@@ -256,7 +266,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         if final_status and str(final_status.get("status")).lower() == "succeeded":
                             status_placeholder.success("解析完成，正在调用大模型分类...")
                             with st.spinner("正在调用大模型分类，请稍候……"):
-                                response = backend_client.classify_apqp_files(session_id)
+                                response = backend_client.classify_apqp_files(
+                                    session_id, turbo_mode=selected_turbo
+                                )
                             if isinstance(response, dict) and response.get("status") == "success":
                                 summary = response.get("summary") or {}
                                 st.session_state[classification_state_key] = summary

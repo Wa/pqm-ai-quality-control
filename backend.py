@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock, Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -16,7 +17,7 @@ import tempfile
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
+from ollama import Client as OllamaClient
 from pydantic import BaseModel, Field
 
 from config import CONFIG
@@ -40,6 +41,8 @@ from tabs.shared.file_conversion import (
     process_textlike_folder,
     process_word_ppt_folder,
 )
+from tabs.shared.modelscope_client import ModelScopeClient
+from util import resolve_ollama_host
 
 
 JOB_DEFINITIONS = {
@@ -155,6 +158,7 @@ class ApqpClassifyRequest(BaseModel):
     stages: Optional[List[str]] = None
     head_chars: int = 3200
     tail_chars: int = 2000
+    turbo_mode: bool = False
 
 
 class EnterpriseJobStatus(BaseModel):
@@ -844,16 +848,161 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
         return {}
 
 
-def _openai_client() -> OpenAI:
-    settings = CONFIG.get("llm", {})
-    api_key = settings.get("openai_api_key") or ""
-    base_url = settings.get("openai_base_url") or None
-    return OpenAI(api_key=api_key, base_url=base_url)
+@dataclass
+class _LLMProvider:
+    label: str
+    engine: str  # "ollama" or "modelscope"
+    model: str
+    client_factory: Callable[[], object]
+    max_retries: int = 1
+    supports_parallel: bool = True
+
+
+def _prepare_apqp_llm_providers(turbo_mode: bool) -> Tuple[List[_LLMProvider], List[_LLMProvider], List[str]]:
+    """Build provider lists for APQP classification.
+
+    Returns:
+        fast_providers: providers eligible for parallel/turbo usage (non-local).
+        serial_chain: ordered providers for serial fallback.
+        warnings: any initialization warnings.
+    """
+
+    warnings: List[str] = []
+    llm_settings = CONFIG.get("llm", {})
+
+    modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or llm_settings.get("modelscope_api_key")
+    modelscope_base = llm_settings.get("modelscope_base_url") or "https://api-inference.modelscope.cn/v1"
+    ms_models: List[Tuple[str, str]] = [
+        ("ModelScope DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.2-Exp"),
+        ("ModelScope DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),
+        ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
+    ]
+
+    def _mk_modelscope_provider(label: str, model_id: str) -> _LLMProvider:
+        return _LLMProvider(
+            label=label,
+            engine="modelscope",
+            model=model_id,
+            client_factory=lambda model=model_id: ModelScopeClient(
+                api_key=modelscope_api_key or "", model=model, base_url=modelscope_base, timeout=900.0
+            ),
+            max_retries=2,
+            supports_parallel=True,
+        )
+
+    fast_providers: List[_LLMProvider] = []
+    serial_chain: List[_LLMProvider] = []
+
+    local_model = llm_settings.get("ollama_model") or "gpt-oss:latest"
+    local_provider: Optional[_LLMProvider] = None
+    try:
+        host = resolve_ollama_host("ollama_9")
+        local_provider = _LLMProvider(
+            label="本地 gpt-oss",
+            engine="ollama",
+            model=local_model,
+            client_factory=lambda host=host: OllamaClient(host=host),
+            max_retries=1,
+            supports_parallel=False,
+        )
+    except Exception as error:
+        warnings.append(f"初始化本地 Ollama 失败：{error}")
+
+    cloud_host = llm_settings.get("ollama_cloud_host")
+    cloud_api_key = llm_settings.get("ollama_cloud_api_key")
+    cloud_provider: Optional[_LLMProvider] = None
+    if cloud_host and cloud_api_key:
+        try:
+            def _make_cloud() -> OllamaClient:
+                return OllamaClient(host=cloud_host, headers={"Authorization": f"Bearer {cloud_api_key}"})
+
+            cloud_provider = _LLMProvider(
+                label="云端 gpt-oss-20b",
+                engine="ollama",
+                model="gpt-oss:20b-cloud",
+                client_factory=_make_cloud,
+                max_retries=2,
+                supports_parallel=True,
+            )
+        except Exception as error:
+            warnings.append(f"初始化云端 Ollama 失败：{error}")
+
+    modelscope_providers: List[_LLMProvider] = []
+    if modelscope_api_key:
+        for label, model_id in ms_models:
+            try:
+                provider = _mk_modelscope_provider(label, model_id)
+                # Validate factory lazily by instantiating once
+                provider.client_factory()
+                modelscope_providers.append(provider)
+            except Exception as error:
+                warnings.append(f"{label} 初始化失败：{error}")
+    elif turbo_mode:
+        warnings.append("未配置 ModelScope API Key，无法使用 ModelScope 高性能通道")
+
+    if turbo_mode:
+        fast_providers.extend(modelscope_providers)
+        if cloud_provider:
+            fast_providers.append(cloud_provider)
+        serial_chain.extend(fast_providers)
+        if local_provider:
+            serial_chain.append(local_provider)
+    else:
+        if local_provider:
+            serial_chain.append(local_provider)
+        serial_chain.extend(modelscope_providers)
+
+    return fast_providers, serial_chain, warnings
+
+
+def _invoke_with_providers(providers: List[_LLMProvider], messages: List[Dict[str, str]]) -> Tuple[str, str, str]:
+    """Try providers in order; returns (raw_content, provider_label, model)."""
+
+    if not providers:
+        raise RuntimeError("无可用模型通道")
+
+    attempts: List[str] = []
+    for provider in providers:
+        tries = max(1, provider.max_retries)
+        for attempt in range(tries):
+            try:
+                client = provider.client_factory()
+                if provider.engine == "ollama":
+                    response = client.chat(
+                        model=provider.model,
+                        messages=messages,
+                        options={"num_ctx": 40001, "temperature": 0, "top_p": 0},
+                    )
+                    content = ""
+                    if isinstance(response, dict):
+                        content = (response.get("message") or {}).get("content") or ""
+                    if content:
+                        return content, provider.label, provider.model
+                    attempts.append(f"{provider.label} 响应为空")
+                elif provider.engine == "modelscope":
+                    response = provider.client_factory().chat(
+                        model=provider.model,
+                        messages=messages,
+                        options={"num_ctx": 40001},
+                    )
+                    content = ""
+                    if isinstance(response, dict):
+                        content = (response.get("message") or {}).get("content") or ""
+                    if content:
+                        return content, provider.label, provider.model
+                    attempts.append(f"{provider.label} 响应为空")
+                else:
+                    attempts.append(f"未知引擎 {provider.engine}")
+            except Exception as error:
+                attempts.append(f"{provider.label}# {attempt + 1} 失败: {error}")
+                time.sleep(1.0)
+
+    raise RuntimeError("；".join(attempts) or "无法完成请求")
 
 
 def _classify_document(
     *,
-    client: OpenAI,
+    invoker: Callable[[List[Dict[str, str]]], Tuple[str, str, str]],
     stage_name: str,
     file_path: str,
     candidates: List[Dict[str, str]],
@@ -913,17 +1062,14 @@ def _classify_document(
 """
 
     try:
-        response = client.chat.completions.create(
-            model=CONFIG.get("llm", {}).get("openai_model", "gpt-3.5-turbo"),
-            messages=[
-                {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=512,
-        )
-        raw_content = (response.choices[0].message.content or "") if response.choices else ""
+        messages = [
+            {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
+            {"role": "user", "content": prompt},
+        ]
+        raw_content, provider_label, model_name = invoker(messages)
         payload["raw_response"] = raw_content
+        payload["provider"] = provider_label
+        payload["model"] = model_name
         data = _extract_json_object(raw_content)
     except Exception as error:
         payload.update({"status": "error", "error": str(error)})
@@ -1234,13 +1380,22 @@ async def apqp_classify(request: ApqpClassifyRequest):
 
     layout = _apqp_stage_layout(request.session_id)
     stages = _normalize_apqp_stages(layout, request.stages)
-    summary: Dict[str, Any] = {"stage_order": stages, "stages": {}}
-    client = _openai_client()
+    summary: Dict[str, Any] = {"stage_order": stages, "stages": {}, "turbo_mode": bool(request.turbo_mode)}
+    fast_providers, serial_chain, provider_warnings = _prepare_apqp_llm_providers(bool(request.turbo_mode))
+    summary_warnings: List[str] = []
+    summary_warnings.extend(provider_warnings)
+
+    if not serial_chain and not fast_providers:
+        raise HTTPException(status_code=500, detail="未找到可用的模型通道，请检查模型配置或网络。")
 
     generated_root = Path(CONFIG["directories"]["generated_files"])
     summary_dir = generated_root / request.session_id / "APQP_one_click_check"
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_path = summary_dir / "classification_summary.json"
+
+    serial_invoker = lambda messages: _invoke_with_providers(serial_chain or fast_providers, messages)
+    fast_invoker = lambda messages: _invoke_with_providers(fast_providers, messages)
+    parallel_enabled = bool(request.turbo_mode and fast_providers)
 
     for stage_name in stages:
         info = layout[stage_name]
@@ -1255,17 +1410,65 @@ async def apqp_classify(request: ApqpClassifyRequest):
         }
 
         documents: List[Dict[str, Any]] = []
-        for file_path in txt_files:
-            result = _classify_document(
-                client=client,
+        pending_retry: List[Tuple[str, Dict[str, Any]]] = []
+
+        def _classify_path(path: str, *, use_fast: bool) -> Dict[str, Any]:
+            invoker = fast_invoker if use_fast else serial_invoker
+            return _classify_document(
+                invoker=invoker,
                 stage_name=stage_name,
-                file_path=file_path,
+                file_path=path,
                 candidates=candidates,
                 head_chars=max(0, int(request.head_chars)),
                 tail_chars=max(0, int(request.tail_chars)),
             )
+
+        if parallel_enabled and len(txt_files) > 1:
+            max_workers = min(4, len(txt_files))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(_classify_path, path, use_fast=True): path for path in txt_files}
+                for future in as_completed(future_map):
+                    path = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as error:
+                        result = {
+                            "status": "error",
+                            "error": str(error),
+                            "file_name": os.path.basename(path),
+                            "path": path,
+                        }
+                    if result.get("status") == "success":
+                        documents.append(result)
+                    else:
+                        pending_retry.append((path, result))
+        else:
+            for file_path in txt_files:
+                result = _classify_path(file_path, use_fast=False)
+                if result.get("status") == "success":
+                    documents.append(result)
+                else:
+                    pending_retry.append((file_path, result))
+
+        if pending_retry and serial_chain:
+            for path, first_result in pending_retry:
+                fallback_result = _classify_path(path, use_fast=False)
+                target_result = fallback_result
+                if fallback_result.get("status") != "success":
+                    if first_result.get("error"):
+                        fallback_result.setdefault("previous_errors", []).append(first_result.get("error"))
+                    merged_error = "; ".join(
+                        item
+                        for item in [first_result.get("error"), fallback_result.get("error")]
+                        if item
+                    )
+                    fallback_result["error"] = merged_error or fallback_result.get("error")
+                documents.append(target_result)
+
+        for result in documents:
             matched: List[str] = []
             suggested: List[str] = []
+            file_path = result.get("path", "")
             if result.get("status") == "success":
                 names = []
                 primary = result.get("primary_type") or ""
@@ -1287,7 +1490,6 @@ async def apqp_classify(request: ApqpClassifyRequest):
             result["matched_requirements"] = matched
             if suggested:
                 result["suggested_types"] = suggested
-            documents.append(result)
 
         present_count = sum(1 for item in requirement_state.values() if item.get("status") == "present")
         missing_count = len(requirement_state) - present_count
@@ -1296,6 +1498,7 @@ async def apqp_classify(request: ApqpClassifyRequest):
             "slug": info["slug"],
             "upload_dir": upload_dir,
             "parsed_dir": parsed_dir,
+            "llm_mode": "turbo" if request.turbo_mode else "standard",
             "requirements": [
                 {"name": name, **requirement_state[name]} for name in requirement_state
             ],
@@ -1318,6 +1521,9 @@ async def apqp_classify(request: ApqpClassifyRequest):
             else:
                 stage_summary["warning"] = extra
         summary["stages"][stage_name] = stage_summary
+
+    if summary_warnings:
+        summary["warnings"] = summary_warnings
 
     try:
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

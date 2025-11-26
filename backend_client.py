@@ -128,6 +128,7 @@ class BackendClient:
         stages: Optional[List[str]] = None,
         head_chars: int = 3200,
         tail_chars: int = 2000,
+        turbo_mode: bool = False,
     ) -> Dict:
         """Request backend to classify parsed APQP documents via LLM."""
 
@@ -136,6 +137,7 @@ class BackendClient:
                 "session_id": session_id,
                 "head_chars": head_chars,
                 "tail_chars": tail_chars,
+                "turbo_mode": turbo_mode,
             }
             if stages:
                 payload["stages"] = stages
