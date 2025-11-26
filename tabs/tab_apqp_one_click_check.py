@@ -238,7 +238,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             job_error = "后台服务未连接"
 
         status_str = str(job_status.get("status")) if job_status else ""
-        job_running = status_str in {"queued", "running"}
+        job_paused = status_str == "paused"
+        job_active = status_str in {"queued", "running", "paused"}
 
         classify_log_container = st.container()
         turbo_checkbox = st.checkbox(
@@ -247,14 +248,53 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             disabled=not backend_ready,
             help="并行调用 ModelScope/云端模型加速分类，涉密文件请谨慎使用。",
         )
-        classify_button = st.button(
-            "运行智能齐套性识别",
-            key=f"apqp_classify_{session_id}",
-            disabled=not backend_ready or job_running,
-            help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
-        )
-        if job_running:
+        action_cols = st.columns([1, 0.6, 0.6])
+        with action_cols[0]:
+            classify_button = st.button(
+                "运行智能齐套性识别",
+                key=f"apqp_classify_{session_id}",
+                disabled=not backend_ready or job_active,
+                help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
+            )
+        with action_cols[1]:
+            pause_disabled = (not backend_ready) or (not job_status) or job_paused
+            if st.button(
+                "暂停解析",
+                key=f"apqp_pause_{session_id}",
+                disabled=pause_disabled,
+                help="请求后台暂停当前解析任务。",
+            ):
+                if not backend_ready or backend_client is None or not job_status:
+                    st.error("后台服务不可用或暂无解析任务。")
+                else:
+                    resp = backend_client.pause_apqp_job(job_status.get("job_id"))
+                    if isinstance(resp, dict) and resp.get("job_id"):
+                        st.success("已请求暂停任务。")
+                        st.rerun()
+                    else:
+                        st.error(f"暂停失败：{resp}")
+        with action_cols[2]:
+            resume_disabled = (not backend_ready) or (not job_status) or (not job_paused)
+            if st.button(
+                "继续解析",
+                key=f"apqp_resume_{session_id}",
+                disabled=resume_disabled,
+                help="恢复已暂停的解析任务。",
+            ):
+                if not backend_ready or backend_client is None or not job_status:
+                    st.error("后台服务不可用或暂无解析任务。")
+                else:
+                    resp = backend_client.resume_apqp_job(job_status.get("job_id"))
+                    if isinstance(resp, dict) and resp.get("job_id"):
+                        st.success("已请求继续任务。")
+                        st.rerun()
+                    else:
+                        st.error(f"继续失败：{resp}")
+
+        if job_active and not job_paused:
             st.info("后台解析任务正在运行，稍后将自动更新进度。")
+        elif job_paused:
+            st.info("解析已暂停，可点击继续解析恢复。")
         if classify_button:
             with classify_log_container:
                 if not backend_ready or backend_client is None:
@@ -314,22 +354,29 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 elif status_str == "succeeded" and pending_info and pending_info.get("job_id") == job_status.get("job_id"):
                     already_classified = st.session_state.get(classified_job_key) == job_status.get("job_id")
                     if not already_classified:
-                        with st.spinner("解析完成，正在调用大模型分类..."):
-                            response = backend_client.classify_apqp_files(
-                                session_id, turbo_mode=bool(pending_info.get("turbo_mode"))
-                            )
-                        if isinstance(response, dict) and response.get("status") == "success":
-                            summary = response.get("summary") or {}
-                            st.session_state[classification_state_key] = summary
+                        attempt_summary: Optional[Dict[str, Any]] = None
+                        last_error: str = ""
+                        for idx in range(2):
+                            if idx > 0:
+                                st.warning("分类失败，正在自动重试…")
+                                time.sleep(1.0)
+                            with st.spinner("解析完成，正在调用大模型分类..."):
+                                response = backend_client.classify_apqp_files(
+                                    session_id, turbo_mode=bool(pending_info.get("turbo_mode"))
+                                )
+                            if isinstance(response, dict) and response.get("status") == "success":
+                                attempt_summary = response.get("summary") or {}
+                                break
+                            if isinstance(response, dict):
+                                last_error = str(response.get("detail") or response.get("message") or response)
+                            else:
+                                last_error = str(response)
+                        if attempt_summary is not None:
+                            st.session_state[classification_state_key] = attempt_summary
                             st.session_state[classified_job_key] = job_status.get("job_id")
                             st.success("分类完成，结果如下。")
                         else:
-                            detail = ""
-                            message = ""
-                            if isinstance(response, dict):
-                                detail = str(response.get("detail") or "")
-                                message = str(response.get("message") or "")
-                            st.error(f"分类失败：{detail or message or response}")
+                            st.error(f"分类失败：{last_error or '未知错误'}")
                         st.session_state.pop(pending_state_key, None)
                 elif status_str == "succeeded":
                     st.success("解析已完成，可重新运行分类或查看结果。")
@@ -343,7 +390,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.subheader("🤖 LLM 文件归类与齐套性判断")
             _render_classification_results(classification_summary)
 
-        if job_running:
+        if job_active:
             st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")
             time.sleep(3)
             st.rerun()

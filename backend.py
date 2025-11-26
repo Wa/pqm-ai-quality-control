@@ -681,11 +681,35 @@ def _parse_apqp_stages(
             }
         publish(payload)
 
-    for idx, stage_name in enumerate(stages):
-        if check_control:
-            status = check_control() or {}
+    def _wait_if_paused(stage_label: str, detail: str = "") -> None:
+        """Honor pause/stop control flags if provided."""
+
+        if not check_control:
+            return
+
+        while True:
+            try:
+                status = check_control() or {}
+            except Exception:
+                status = {}
             if status.get("stopped"):
                 raise RuntimeError("解析已被停止")
+            if status.get("paused"):
+                message = detail or f"{stage_label} 暂停中，等待恢复"
+                _emit(
+                    {
+                        "status": "paused",
+                        "stage": "paused",
+                        "message": message,
+                    },
+                    log_message=message,
+                )
+                time.sleep(1.0)
+                continue
+            break
+
+    for idx, stage_name in enumerate(stages):
+        _wait_if_paused(stage_name, f"{stage_name} 解析已暂停")
 
         info = layout[stage_name]
         upload_dir = info["upload_dir"]
@@ -725,6 +749,7 @@ def _parse_apqp_stages(
             stage_report["files_found"] = len(files_found)
 
             for name in files_found:
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以检查文件加密状态")
                 encrypted, _ = detect_esafenet_encryption(Path(upload_dir) / name)
                 if encrypted:
                     msg = f"《{name}》经亿赛通加密，无法读取，请上传解密版本"
@@ -752,6 +777,7 @@ def _parse_apqp_stages(
                 progress_increment = step_weight / max(substeps, 1)
                 subprogress = 0.0
 
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理PDF")
                 pdf_created = process_pdf_folder(
                     upload_dir,
                     parsed_dir,
@@ -772,6 +798,7 @@ def _parse_apqp_stages(
                     log_message=f"已处理PDF，共{len(pdf_created)}个",
                 )
 
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理Word/PPT")
                 office_created = process_word_ppt_folder(
                     upload_dir,
                     parsed_dir,
@@ -792,6 +819,7 @@ def _parse_apqp_stages(
                     log_message=f"已处理Word/PPT，共{len(office_created)}个",
                 )
 
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理Excel")
                 excel_created = process_excel_folder(
                     upload_dir,
                     parsed_dir,
@@ -812,6 +840,7 @@ def _parse_apqp_stages(
                     log_message=f"已处理Excel，共{len(excel_created)}个",
                 )
 
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理文本类文件")
                 text_created = process_textlike_folder(
                     upload_dir,
                     parsed_dir,
@@ -1834,6 +1863,50 @@ async def list_apqp_one_click_jobs(session_id: Optional[str] = None):
         ]
     records.sort(key=lambda status: status.created_at, reverse=True)
     return records
+
+
+@app.post("/apqp-one-click/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_apqp_one_click_job(job_id: str):
+    """Pause an APQP一键解析任务 if supported."""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持暂停")
+        try:
+            open(os.path.join(control_dir, "pause"), "a").close()
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"设置暂停失败: {error}")
+        record.status = "paused"
+        record.stage = "paused"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/apqp-one-click/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_apqp_one_click_job(job_id: str):
+    """Resume a paused APQP一键解析任务."""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持恢复")
+        try:
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"取消暂停失败: {error}")
+        record.status = "running"
+        record.stage = record.stage or "running"
+        record.updated_at = time.time()
+        return _record_to_status(record)
 
 
 @app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)
