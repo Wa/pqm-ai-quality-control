@@ -1624,6 +1624,22 @@ async def get_apqp_one_click_job(job_id: str):
         return _record_to_status(record)
 
 
+@app.get("/apqp-one-click/jobs", response_model=List[EnterpriseJobStatus])
+async def list_apqp_one_click_jobs(session_id: Optional[str] = None):
+    """List APQP one-click parsing jobs for a session (or all sessions)."""
+
+    _prune_jobs()
+    with jobs_lock:
+        records = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if record.job_type == "apqp_one_click_parse"
+            and (session_id is None or record.session_id == session_id)
+        ]
+    records.sort(key=lambda status: status.created_at, reverse=True)
+    return records
+
+
 @app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)
 async def start_enterprise_standard_job(request: EnterpriseJobRequest):
     record = _start_job("enterprise_standard", request.session_id)

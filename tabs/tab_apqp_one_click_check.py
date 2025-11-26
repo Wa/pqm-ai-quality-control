@@ -45,6 +45,32 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     return name[:available] + "..." + ext
 
 
+def _recover_apqp_job_status(backend_client, session_id: str, job_state_key: str):
+    job_status: Optional[Dict[str, Any]] = None
+    job_error: Optional[str] = None
+
+    stored_job_id = st.session_state.get(job_state_key)
+    if stored_job_id:
+        result = backend_client.get_apqp_job_status(stored_job_id)
+        if isinstance(result, dict) and result.get("job_id"):
+            job_status = result
+        elif isinstance(result, dict) and result.get("detail") == "未找到解析任务":
+            st.session_state.pop(job_state_key, None)
+        elif isinstance(result, dict) and result.get("status") == "error":
+            job_error = str(result.get("message") or "后台任务查询失败")
+
+    if job_status is None:
+        result = backend_client.list_apqp_jobs(session_id)
+        if isinstance(result, list) and result:
+            job_status = result[0]
+            if isinstance(job_status, dict) and job_status.get("job_id"):
+                st.session_state[job_state_key] = job_status.get("job_id")
+        elif isinstance(result, dict) and result.get("status") == "error":
+            job_error = str(result.get("message") or "后台任务列表查询失败")
+
+    return job_status, job_error
+
+
 def _fetch_stage_files(backend_client, session_id: str, stage_name: str) -> List[Dict[str, object]]:
     stage_slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
     response = backend_client.list_apqp_files(session_id, stage_slug)
@@ -200,6 +226,20 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
         classification_state_key = f"apqp_classification_summary_{session_id}"
         turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
+        job_state_key = f"apqp_one_click_job_id_{session_id}"
+        pending_state_key = f"apqp_one_click_pending_{session_id}"
+        classified_job_key = f"apqp_one_click_classified_job_{session_id}"
+
+        job_status: Optional[Dict[str, Any]] = None
+        job_error: Optional[str] = None
+        if backend_ready and backend_client is not None:
+            job_status, job_error = _recover_apqp_job_status(backend_client, session_id, job_state_key)
+        elif not backend_ready:
+            job_error = "后台服务未连接"
+
+        status_str = str(job_status.get("status")) if job_status else ""
+        job_running = status_str in {"queued", "running"}
+
         classify_log_container = st.container()
         turbo_checkbox = st.checkbox(
             "高性能模式",
@@ -210,9 +250,11 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         classify_button = st.button(
             "运行智能齐套性识别",
             key=f"apqp_classify_{session_id}",
-            disabled=not backend_ready,
+            disabled=not backend_ready or job_running,
             help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
         )
+        if job_running:
+            st.info("后台解析任务正在运行，稍后将自动更新进度。")
         if classify_button:
             with classify_log_container:
                 if not backend_ready or backend_client is None:
@@ -233,84 +275,78 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             message = str(parse_job.get("message") or "")
                         st.error(f"无法启动解析：{detail or message or parse_job}")
                     else:
-                        progress_bar = st.progress(parse_job.get("progress") or 0.0)
-                        status_placeholder = st.empty()
-                        logs_placeholder = st.empty()
-                        log_history: list[dict[str, object]] = []
-                        log_seen: set[tuple[object, object, object]] = set()
-                        final_status: Optional[Dict[str, Any]] = None
-                        start_time = time.time()
-                        while True:
-                            status = backend_client.get_apqp_job_status(job_id)
-                            if not isinstance(status, dict):
-                                st.error(f"无法查询解析进度：{status}")
-                                break
-                            progress = float(status.get("progress") or 0.0)
-                            progress_bar.progress(min(max(progress, 0.0), 1.0))
-                            message = status.get("message") or "正在解析上传文件..."
-                            stage_label = status.get("stage") or "运行中"
-                            status_placeholder.info(f"{stage_label} · {message}")
-                            logs = status.get("logs") or []
-                            if logs:
-                                for entry in logs:
-                                    key = (
-                                        entry.get("ts"),
-                                        entry.get("level"),
-                                        entry.get("message"),
-                                    )
-                                    if key not in log_seen:
-                                        log_seen.add(key)
-                                        log_history.append(entry)
-                                last_log = logs[-1]
-                                logs_placeholder.caption(
-                                    f"{last_log.get('ts', '')} [{last_log.get('level', '')}] {last_log.get('message', '')}"
-                                )
-                            state = (status.get("status") or "").lower()
-                            if state in {"succeeded", "failed"}:
-                                final_status = status
-                                break
-                            if time.time() - start_time > 900:
-                                st.warning("解析超时，请稍后重试。")
-                                break
-                            time.sleep(1.0)
+                        st.session_state[job_state_key] = job_id
+                        st.session_state[pending_state_key] = {
+                            "job_id": job_id,
+                            "turbo_mode": selected_turbo,
+                        }
+                        st.session_state.pop(classification_state_key, None)
+                        st.session_state.pop(classified_job_key, None)
+                        st.success("已提交后台解析任务，稍后将自动更新进度并分类。")
+                        st.rerun()
 
-                        if final_status and str(final_status.get("status")).lower() == "succeeded":
-                            status_placeholder.success("解析完成，正在调用大模型分类...")
-                            with st.spinner("正在调用大模型分类，请稍候……"):
-                                response = backend_client.classify_apqp_files(
-                                    session_id, turbo_mode=selected_turbo
-                                )
-                            if isinstance(response, dict) and response.get("status") == "success":
-                                summary = response.get("summary") or {}
-                                st.session_state[classification_state_key] = summary
-                                st.success("分类完成，结果如下。")
-                            else:
-                                detail = ""
-                                message = ""
-                                if isinstance(response, dict):
-                                    detail = str(response.get("detail") or "")
-                                    message = str(response.get("message") or "")
-                                st.error(f"分类失败：{detail or message or response}")
-                        elif final_status:
-                            err = final_status.get("error") or final_status.get("message") or "解析任务失败"
-                            st.error(err)
-
-                        if log_history:
-                            with st.expander("点击查看后台日志", expanded=False):
-                                for entry in log_history[-50:]:
-                                    if not isinstance(entry, dict):
-                                        st.write(entry)
-                                        continue
-                                    ts = entry.get("ts") or ""
-                                    level = entry.get("level") or "info"
-                                    message = entry.get("message") or ""
-                                    st.write(f"[{ts}] {level}: {message}")
+        pending_info = st.session_state.get(pending_state_key)
+        with classify_log_container:
+            if job_status:
+                progress_bar = st.progress(float(job_status.get("progress") or 0.0))
+                stage_label = job_status.get("stage") or "运行中"
+                message = job_status.get("message") or "正在解析上传文件..."
+                st.info(f"{stage_label} · {message}")
+                logs = job_status.get("logs") or []
+                if logs:
+                    last_log = logs[-1]
+                    st.caption(
+                        f"{last_log.get('ts', '')} [{last_log.get('level', '')}] {last_log.get('message', '')}"
+                    )
+                    with st.expander("点击查看后台日志", expanded=False):
+                        for entry in logs[-100:]:
+                            if not isinstance(entry, dict):
+                                st.write(entry)
+                                continue
+                            ts = entry.get("ts") or ""
+                            level = entry.get("level") or "info"
+                            log_msg = entry.get("message") or ""
+                            st.write(f"[{ts}] {level}: {log_msg}")
+                if status_str == "failed":
+                    err = job_status.get("error") or job_status.get("message") or "解析任务失败"
+                    st.error(err)
+                    st.session_state.pop(pending_state_key, None)
+                elif status_str == "succeeded" and pending_info and pending_info.get("job_id") == job_status.get("job_id"):
+                    already_classified = st.session_state.get(classified_job_key) == job_status.get("job_id")
+                    if not already_classified:
+                        with st.spinner("解析完成，正在调用大模型分类..."):
+                            response = backend_client.classify_apqp_files(
+                                session_id, turbo_mode=bool(pending_info.get("turbo_mode"))
+                            )
+                        if isinstance(response, dict) and response.get("status") == "success":
+                            summary = response.get("summary") or {}
+                            st.session_state[classification_state_key] = summary
+                            st.session_state[classified_job_key] = job_status.get("job_id")
+                            st.success("分类完成，结果如下。")
+                        else:
+                            detail = ""
+                            message = ""
+                            if isinstance(response, dict):
+                                detail = str(response.get("detail") or "")
+                                message = str(response.get("message") or "")
+                            st.error(f"分类失败：{detail or message or response}")
+                        st.session_state.pop(pending_state_key, None)
+                elif status_str == "succeeded":
+                    st.success("解析已完成，可重新运行分类或查看结果。")
+                st.divider()
+            elif job_error:
+                st.warning(job_error)
 
         classification_summary = st.session_state.get(classification_state_key)
         if classification_summary:
             st.divider()
             st.subheader("🤖 LLM 文件归类与齐套性判断")
             _render_classification_results(classification_summary)
+
+        if job_running:
+            st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")
+            time.sleep(3)
+            st.rerun()
 
     with col_info:
         st.subheader("📁 文件管理")

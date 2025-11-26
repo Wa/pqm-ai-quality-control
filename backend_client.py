@@ -122,6 +122,18 @@ class BackendClient:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def list_apqp_jobs(self, session_id: Optional[str] = None) -> Dict | List[Dict]:
+        """List APQP one-click parsing jobs for a session (or all sessions)."""
+
+        try:
+            params = {"session_id": session_id} if session_id else None
+            response = requests.get(
+                f"{self.base_url}/apqp-one-click/jobs", params=params, timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     def classify_apqp_files(
         self,
         session_id: str,
