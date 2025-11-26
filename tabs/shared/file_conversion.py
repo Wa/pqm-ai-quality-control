@@ -6,12 +6,84 @@ import os
 import shutil
 import tempfile
 import zipfile
-from typing import List
+from pathlib import Path
+from typing import List, Optional, Set, Tuple
 
 import requests
 
 from config import CONFIG
 from .text_processing import annotate_txt_file_inplace
+
+
+ZIP_EXTS = {".docx", ".pptx", ".xlsx"}
+OLE_EXTS = {".doc", ".ppt", ".xls"}
+PDF_EXTS = {".pdf"}
+TEXT_EXTS = {".txt"}
+
+EXPECTED_SIGNATURES = {
+    ".docx": b"PK\x03\x04",
+    ".pptx": b"PK\x03\x04",
+    ".xlsx": b"PK\x03\x04",
+    ".doc": b"\xD0\xCF\x11\xE0",
+    ".ppt": b"\xD0\xCF\x11\xE0",
+    ".xls": b"\xD0\xCF\x11\xE0",
+    ".pdf": b"%PDF",
+}
+
+
+def detect_esafenet_encryption(path: Path) -> Tuple[bool, str]:
+    """
+    Return (likely_encrypted, reason) for a single file.
+
+    Reason indicates which structural check failed; downstream callers can
+    decide how to label/report it.
+    """
+
+    ext = path.suffix.lower()
+    expected = EXPECTED_SIGNATURES.get(ext, b"")
+    header_size = max(4, len(expected))
+
+    try:
+        with path.open("rb") as fh:
+            signature = fh.read(header_size)
+    except OSError as exc:
+        return True, f"unreadable file: {exc}"
+
+    if expected and not signature.startswith(expected):
+        return True, f"missing expected header for {ext or 'unknown'}"
+
+    if ext in ZIP_EXTS:
+        try:
+            with zipfile.ZipFile(path) as zf:
+                if "[Content_Types].xml" not in zf.namelist():
+                    return True, "Office manifest missing"
+        except zipfile.BadZipFile:
+            return True, "corrupted Office ZIP container"
+
+    if ext in OLE_EXTS and not signature.startswith(b"\xD0\xCF\x11\xE0"):
+        return True, "missing OLE Compound header"
+
+    if ext in PDF_EXTS and not signature.startswith(b"%PDF"):
+        return True, "missing PDF header"
+
+    if ext in TEXT_EXTS:
+        try:
+            signature.decode("utf-8")
+        except UnicodeDecodeError:
+            return True, "text file contains binary bytes"
+
+    return False, "signature checks passed"
+
+
+def _esafenet_warning(name: str) -> str:
+    return f"《{name}》经亿赛通加密，无法读取，请上传解密版本"
+
+
+def _is_encrypted(path: str, progress_area, *, warn: bool = True) -> bool:
+    encrypted, _reason = detect_esafenet_encryption(Path(path))
+    if encrypted and warn:
+        progress_area.warning(_esafenet_warning(os.path.basename(path)))
+    return encrypted
 
 
 def list_pdfs(folder: str) -> List[str]:
@@ -69,7 +141,15 @@ def zip_to_txts(zip_bytes: bytes, target_txt_path: str) -> bool:
     return True
 
 
-def process_pdf_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
+def process_pdf_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    annotate_sources: bool = False,
+    *,
+    skip_files: Optional[Set[str]] = None,
+    warn_if_encrypted: bool = True,
+):
     """Process all PDFs in input_dir via MinerU and write .txts into output_dir."""
 
     pdf_paths = list_pdfs(input_dir)
@@ -78,6 +158,12 @@ def process_pdf_folder(input_dir: str, output_dir: str, progress_area, annotate_
     created: List[str] = []
     for pdf_path in pdf_paths:
         orig_name = os.path.basename(pdf_path)
+        if skip_files and orig_name in skip_files:
+            if warn_if_encrypted:
+                progress_area.warning(_esafenet_warning(orig_name))
+            continue
+        if warn_if_encrypted and _is_encrypted(pdf_path, progress_area):
+            continue
         out_txt = os.path.join(output_dir, f"{orig_name}.txt")
         try:
             if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
@@ -152,13 +238,27 @@ def unstructured_partition_to_txt(file_path: str, target_txt_path: str) -> bool:
     return True
 
 
-def process_word_ppt_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
+def process_word_ppt_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    annotate_sources: bool = False,
+    *,
+    skip_files: Optional[Set[str]] = None,
+    warn_if_encrypted: bool = True,
+):
     paths = list_word_ppt(input_dir)
     if not paths:
         return []
     created: List[str] = []
     for path in paths:
         orig_name = os.path.basename(path)
+        if skip_files and orig_name in skip_files:
+            if warn_if_encrypted:
+                progress_area.warning(_esafenet_warning(orig_name))
+            continue
+        if warn_if_encrypted and _is_encrypted(path, progress_area):
+            continue
         out_txt = os.path.join(output_dir, f"{orig_name}.txt")
         try:
             if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
@@ -193,7 +293,15 @@ def sanitize_sheet_name(name: str) -> str:
     return "_".join(name.strip().split())[:80] or "Sheet"
 
 
-def process_excel_folder(input_dir: str, output_dir: str, progress_area, annotate_sources: bool = False):
+def process_excel_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    annotate_sources: bool = False,
+    *,
+    skip_files: Optional[Set[str]] = None,
+    warn_if_encrypted: bool = True,
+):
     paths = list_excels(input_dir)
     if not paths:
         return []
@@ -205,6 +313,12 @@ def process_excel_folder(input_dir: str, output_dir: str, progress_area, annotat
         return []
     for excel_path in paths:
         orig_name = os.path.basename(excel_path)
+        if skip_files and orig_name in skip_files:
+            if warn_if_encrypted:
+                progress_area.warning(_esafenet_warning(orig_name))
+            continue
+        if warn_if_encrypted and _is_encrypted(excel_path, progress_area):
+            continue
         try:
             xls = pd.ExcelFile(excel_path)
             for sheet in xls.sheet_names:
@@ -224,7 +338,14 @@ def process_excel_folder(input_dir: str, output_dir: str, progress_area, annotat
     return created
 
 
-def process_textlike_folder(input_dir: str, output_dir: str, progress_area):
+def process_textlike_folder(
+    input_dir: str,
+    output_dir: str,
+    progress_area,
+    *,
+    skip_files: Optional[Set[str]] = None,
+    warn_if_encrypted: bool = True,
+):
     try:
         if not os.path.isdir(input_dir):
             return []
@@ -249,6 +370,12 @@ def process_textlike_folder(input_dir: str, output_dir: str, progress_area):
                 continue
             ext = os.path.splitext(name)[1].lower()
             if ext not in exts:
+                continue
+            if skip_files and name in skip_files:
+                if warn_if_encrypted:
+                    progress_area.warning(_esafenet_warning(name))
+                continue
+            if warn_if_encrypted and _is_encrypted(src_path, progress_area):
                 continue
             base = os.path.splitext(name)[0]
             dst = os.path.join(output_dir, f"{base}.txt")

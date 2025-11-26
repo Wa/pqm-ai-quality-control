@@ -11,7 +11,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock, Thread
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 import tempfile
 
@@ -36,6 +36,7 @@ from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
 from tabs.shared.file_conversion import (
     cleanup_orphan_txts,
+    detect_esafenet_encryption,
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
@@ -696,6 +697,7 @@ def _parse_apqp_stages(
             "text_created": 0,
             "total_created": 0,
         }
+        skip_files: Set[str] = set()
 
         step_weight = 1.0 / max(total_stages, 1)
         stage_base_progress = idx * step_weight
@@ -717,6 +719,24 @@ def _parse_apqp_stages(
             ]
             stage_report["files_found"] = len(files_found)
 
+            for name in files_found:
+                encrypted, _ = detect_esafenet_encryption(Path(upload_dir) / name)
+                if encrypted:
+                    msg = f"《{name}》经亿赛通加密，无法读取，请上传解密版本"
+                    logger.warning(msg)
+                    _emit(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "message": msg,
+                        },
+                        log_message=msg,
+                        level="warning",
+                    )
+                    skip_files.add(name)
+            if skip_files:
+                stage_report["encrypted_files"] = sorted(skip_files)
+
             removed_txts = cleanup_orphan_txts(upload_dir, parsed_dir, logger)
             if removed_txts:
                 logger.info(f"已清理无关文本 {removed_txts} 个")
@@ -728,7 +748,12 @@ def _parse_apqp_stages(
                 subprogress = 0.0
 
                 pdf_created = process_pdf_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
                 )
                 stage_report["pdf_created"] = len(pdf_created)
                 subprogress += progress_increment
@@ -743,7 +768,12 @@ def _parse_apqp_stages(
                 )
 
                 office_created = process_word_ppt_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
                 )
                 stage_report["word_ppt_created"] = len(office_created)
                 subprogress += progress_increment
@@ -758,7 +788,12 @@ def _parse_apqp_stages(
                 )
 
                 excel_created = process_excel_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
                 )
                 stage_report["excel_created"] = len(excel_created)
                 subprogress += progress_increment
@@ -772,7 +807,13 @@ def _parse_apqp_stages(
                     log_message=f"已处理Excel，共{len(excel_created)}个",
                 )
 
-                text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
+                text_created = process_textlike_folder(
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
+                )
                 stage_report["text_created"] = len(text_created)
                 subprogress += progress_increment
                 _emit(
