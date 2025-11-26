@@ -167,7 +167,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
     uploads_root = str(CONFIG["directories"]["uploads"])
     generated_root = str(CONFIG["directories"]["generated_files"])
     stage_slugs = {stage_name: STAGE_SLUG_MAP.get(stage_name, stage_name) for stage_name in STAGE_ORDER}
-    apqp_parsed_root = os.path.join(generated_root, session_id, "APQP_one_click_check")
+    apqp_parsed_root = os.path.join(generated_root, session_id, "APQP_one_click_check", "parsed_files")
 
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None

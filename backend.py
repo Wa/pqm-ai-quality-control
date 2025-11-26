@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import dataclass, field
 import json
 import multiprocessing
@@ -5,6 +6,7 @@ from multiprocessing import Process, Queue
 from queue import Full
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 import traceback
@@ -18,6 +20,7 @@ import tempfile
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from ollama import Client as OllamaClient
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from config import CONFIG
@@ -596,11 +599,13 @@ def _apqp_stage_layout(session_id: str) -> Dict[str, Dict[str, str]]:
 
     uploads_root = str(CONFIG["directories"]["uploads"])
     generated_root = str(CONFIG["directories"]["generated_files"])
+    parsed_root = os.path.join(generated_root, session_id, "APQP_one_click_check", "parsed_files")
+    os.makedirs(parsed_root, exist_ok=True)
     stage_layout: Dict[str, Dict[str, str]] = {}
     for stage_name in STAGE_ORDER:
         slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
         upload_dir = os.path.join(uploads_root, session_id, "APQP_one_click_check", slug)
-        parsed_dir = os.path.join(generated_root, session_id, "APQP_one_click_check", slug)
+        parsed_dir = os.path.join(parsed_root, slug)
         os.makedirs(upload_dir, exist_ok=True)
         os.makedirs(parsed_dir, exist_ok=True)
         stage_layout[stage_name] = {
@@ -882,6 +887,48 @@ def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int =
     return head or tail
 
 
+def _safe_stem_for_record(name: str) -> str:
+    """Return a filesystem-friendly stem for prompt/response recording."""
+
+    stem = Path(name).stem or "file"
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", stem)
+    cleaned = cleaned.strip("._-")
+    return cleaned or "file"
+
+
+def _detect_project_serial(layout: Dict[str, Dict[str, str]]) -> Tuple[str, List[str]]:
+    """Best-effort extraction of项目编号 from uploaded or parsed texts."""
+
+    pattern = re.compile(r"\b\d{3}-\d{3,}[A-Za-z]?\b")
+    counts: Counter[str] = Counter()
+    sources: Dict[str, Set[str]] = {}
+
+    def _record(serial: str, source: str) -> None:
+        counts[serial] += 1
+        sources.setdefault(serial, set()).add(source)
+
+    for stage_name, info in layout.items():
+        upload_dir = info.get("upload_dir") or ""
+        parsed_dir = info.get("parsed_dir") or ""
+        try:
+            for name in os.listdir(upload_dir):
+                for match in pattern.findall(name):
+                    _record(match, f"{stage_name} 上传文件名")
+        except FileNotFoundError:
+            pass
+
+        for txt_path in _collect_parsed_txt_files(parsed_dir):
+            preview = _load_text_preview(txt_path, head_chars=2000, tail_chars=0)
+            for match in pattern.findall(preview):
+                _record(match, f"{stage_name} 解析文本")
+
+    if not counts:
+        return "", []
+
+    serial, _ = counts.most_common(1)[0]
+    return serial, sorted(sources.get(serial, set()))
+
+
 def _apqp_candidate_definitions(stage_name: str) -> List[Dict[str, str]]:
     """Build canonical deliverable definitions for a stage."""
 
@@ -891,6 +938,41 @@ def _apqp_candidate_definitions(stage_name: str) -> List[Dict[str, str]]:
         description = CANONICAL_APQP_DESCRIPTORS.get(item) or descriptor_for(item)
         result.append({"name": item, "description": description})
     return result
+
+
+def _completeness_dataframe(summary: Dict[str, Any]) -> pd.DataFrame:
+    """Flatten summary into a dataframe for CSV/XLSX export."""
+
+    records: List[Dict[str, str]] = []
+    stage_order = summary.get("stage_order") or list((summary.get("stages") or {}).keys())
+    for stage_name in stage_order:
+        stage_data = (summary.get("stages") or {}).get(stage_name) or {}
+        requirements = stage_data.get("requirements") or []
+        stage_warning = stage_data.get("warning") or ""
+        for item in requirements:
+            status_text = "已覆盖" if item.get("status") == "present" else "缺失"
+            note_parts: List[str] = []
+            sources = item.get("sources") or []
+            if sources:
+                note_parts.append(f"来源：{', '.join(sources)}")
+            try:
+                conf_val = float(item.get("confidence", 0.0))
+                if conf_val > 0:
+                    note_parts.append(f"置信度 {conf_val:.2f}")
+            except (TypeError, ValueError):
+                pass
+            if stage_warning:
+                note_parts.append(stage_warning)
+            records.append(
+                {
+                    "阶段": stage_name,
+                    "交付物": item.get("name") or "",
+                    "状态": status_text,
+                    "备注": "；".join(note_parts),
+                }
+            )
+
+    return pd.DataFrame(records)
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -1070,6 +1152,8 @@ def _classify_document(
     candidates: List[Dict[str, str]],
     head_chars: int,
     tail_chars: int,
+    record_dir: Optional[Path] = None,
+    record_prefix: str = "",
 ) -> Dict[str, Any]:
     """Call LLM to classify a parsed document into canonical APQP types."""
 
@@ -1123,6 +1207,19 @@ def _classify_document(
 - 仅依据文本内容做判断，避免依赖文件名。
 """
 
+    safe_stem = _safe_stem_for_record(file_name)
+    prompt_path: Optional[Path] = None
+    response_path: Optional[Path] = None
+
+    if record_dir:
+        record_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = record_dir / f"prompt_{record_prefix}{safe_stem}.txt"
+        try:
+            prompt_path.write_text(prompt, encoding="utf-8")
+            payload["prompt_file"] = str(prompt_path)
+        except Exception:
+            prompt_path = None
+
     try:
         messages = [
             {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
@@ -1132,6 +1229,13 @@ def _classify_document(
         payload["raw_response"] = raw_content
         payload["provider"] = provider_label
         payload["model"] = model_name
+        if record_dir and raw_content:
+            response_path = record_dir / f"response_{record_prefix}{safe_stem}.txt"
+            try:
+                response_path.write_text(raw_content, encoding="utf-8")
+                payload["response_file"] = str(response_path)
+            except Exception:
+                response_path = None
         data = _extract_json_object(raw_content)
     except Exception as error:
         payload.update({"status": "error", "error": str(error)})
@@ -1451,9 +1555,22 @@ async def apqp_classify(request: ApqpClassifyRequest):
         raise HTTPException(status_code=500, detail="未找到可用的模型通道，请检查模型配置或网络。")
 
     generated_root = Path(CONFIG["directories"]["generated_files"])
-    summary_dir = generated_root / request.session_id / "APQP_one_click_check"
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = summary_dir / "classification_summary.json"
+    results_root = generated_root / request.session_id / "APQP_one_click_check"
+    final_results_dir = results_root / "final_results"
+    initial_results_dir = results_root / "initial_results_completeness"
+    final_results_dir.mkdir(parents=True, exist_ok=True)
+    initial_results_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = final_results_dir / "classification_summary.json"
+    summary["results_dir"] = str(final_results_dir)
+    summary["initial_results_dir"] = str(initial_results_dir)
+
+    project_serial, serial_sources = _detect_project_serial(layout)
+    if project_serial:
+        summary["project_serial"] = project_serial
+        if serial_sources:
+            summary["project_serial_sources"] = serial_sources
+    else:
+        summary_warnings.append("未能从上传或解析文件推断项目编号，将使用会话ID命名结果文件。")
 
     serial_invoker = lambda messages: _invoke_with_providers(serial_chain or fast_providers, messages)
     fast_invoker = lambda messages: _invoke_with_providers(fast_providers, messages)
@@ -1483,6 +1600,8 @@ async def apqp_classify(request: ApqpClassifyRequest):
                 candidates=candidates,
                 head_chars=max(0, int(request.head_chars)),
                 tail_chars=max(0, int(request.tail_chars)),
+                record_dir=initial_results_dir,
+                record_prefix=f"{info['slug']}_",
             )
 
         if parallel_enabled and len(txt_files) > 1:
@@ -1584,14 +1703,38 @@ async def apqp_classify(request: ApqpClassifyRequest):
                 stage_summary["warning"] = extra
         summary["stages"][stage_name] = stage_summary
 
-    if summary_warnings:
-        summary["warnings"] = summary_warnings
+    df = _completeness_dataframe(summary)
+    serial_label = project_serial or request.session_id
+    serial_label = serial_label.replace(os.sep, "_")
+    if os.altsep:
+        serial_label = serial_label.replace(os.altsep, "_")
+    export_basename = f"{serial_label}项目交付物齐套性检查结果"
+    csv_path = final_results_dir / f"{export_basename}.csv"
+    xlsx_path = final_results_dir / f"{export_basename}.xlsx"
 
     try:
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         summary["summary_file"] = str(summary_path)
-    except Exception:
+    except Exception as error:
         summary["summary_file"] = None
+        summary_warnings.append(f"保存分类结果JSON失败：{error}")
+
+    try:
+        if df.empty:
+            df = pd.DataFrame(columns=["阶段", "交付物", "状态", "备注"])
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        summary["csv_file"] = str(csv_path)
+    except Exception as error:
+        summary_warnings.append(f"导出CSV失败：{error}")
+
+    try:
+        df.to_excel(xlsx_path, index=False)
+        summary["xlsx_file"] = str(xlsx_path)
+    except Exception as error:
+        summary_warnings.append(f"导出XLSX失败：{error}")
+
+    if summary_warnings:
+        summary["warnings"] = summary_warnings
 
     return {"status": "success", "summary": summary}
 
@@ -1601,6 +1744,11 @@ async def apqp_clear(request: ApqpClearRequest):
     """Clear APQP uploads and/or parsed outputs for a session."""
 
     layout = _apqp_stage_layout(request.session_id)
+    results_root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check"
+    extra_dirs = {
+        "final_results": results_root / "final_results",
+        "initial_results_completeness": results_root / "initial_results_completeness",
+    }
     target = (request.target or "all").lower()
     if target not in {"uploads", "parsed", "all"}:
         raise HTTPException(status_code=400, detail="target 必须是 uploads、parsed 或 all")
@@ -1620,6 +1768,13 @@ async def apqp_clear(request: ApqpClearRequest):
             "uploads_deleted": uploads_deleted,
             "parsed_deleted": parsed_deleted,
         }
+
+    if target in {"parsed", "all"}:
+        for name, path in extra_dirs.items():
+            removed = _clear_directory_contents(str(path))
+            if removed:
+                total_deleted += removed
+            details[name] = {"deleted": removed}
 
     return {
         "status": "success",
