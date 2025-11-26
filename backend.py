@@ -10,11 +10,11 @@ import time
 import traceback
 from datetime import datetime
 from threading import Lock, Thread
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 import tempfile
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -65,6 +65,10 @@ JOB_DEFINITIONS = {
     "file_elements": {
         "runner": run_file_elements_job,
         "label": "文件要素检查",
+    },
+    "apqp_one_click_parse": {
+        "runner": None,  # Placeholder; assigned after function definition
+        "label": "APQP一键解析",
     },
 }
 
@@ -131,6 +135,11 @@ class FileElementsJobRequest(BaseModel):
 
 
 class ApqpParseRequest(BaseModel):
+    session_id: str
+    stages: Optional[List[str]] = None
+
+
+class ApqpParseJobRequest(BaseModel):
     session_id: str
     stages: Optional[List[str]] = None
 
@@ -634,6 +643,158 @@ def _collect_parsed_txt_files(folder: str) -> List[str]:
     return sorted(paths)
 
 
+def _parse_apqp_stages(
+    layout: Dict[str, Dict[str, str]],
+    stages: List[str],
+    publish: Optional[Callable[[Dict[str, Any]], None]] = None,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Parse uploaded APQP files into text, optionally emitting progress updates."""
+
+    summary: Dict[str, Any] = {
+        "stage_order": stages,
+        "stages": {},
+        "total_created": 0,
+    }
+    total_stages = max(len(stages), 1)
+
+    for idx, stage_name in enumerate(stages):
+        if check_control:
+            status = check_control() or {}
+            if status.get("stopped"):
+                raise RuntimeError("解析已被停止")
+
+        info = layout[stage_name]
+        upload_dir = info["upload_dir"]
+        parsed_dir = info["parsed_dir"]
+        logger = _ParseLogger()
+        stage_report: Dict[str, Any] = {
+            "slug": info["slug"],
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+            "files_found": 0,
+            "pdf_created": 0,
+            "word_ppt_created": 0,
+            "excel_created": 0,
+            "text_created": 0,
+            "total_created": 0,
+        }
+
+        step_weight = 1.0 / max(total_stages, 1)
+        stage_base_progress = idx * step_weight
+        if publish:
+            publish(
+                {
+                    "status": "running",
+                    "stage": stage_name,
+                    "progress": stage_base_progress,
+                    "message": f"开始解析 {stage_name}",
+                }
+            )
+
+        try:
+            files_found = [
+                name
+                for name in os.listdir(upload_dir)
+                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
+            ]
+            stage_report["files_found"] = len(files_found)
+            if not files_found:
+                logger.info("当前阶段没有上传文件，跳过解析。")
+            else:
+                substeps = 4
+                progress_increment = step_weight / max(substeps, 1)
+                subprogress = 0.0
+
+                pdf_created = process_pdf_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["pdf_created"] = len(pdf_created)
+                subprogress += progress_increment
+                if publish:
+                    publish(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base_progress + subprogress,
+                            "message": f"已处理PDF，共{len(pdf_created)}个",
+                        }
+                    )
+
+                office_created = process_word_ppt_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["word_ppt_created"] = len(office_created)
+                subprogress += progress_increment
+                if publish:
+                    publish(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base_progress + subprogress,
+                            "message": f"已处理Word/PPT，共{len(office_created)}个",
+                        }
+                    )
+
+                excel_created = process_excel_folder(
+                    upload_dir, parsed_dir, logger, annotate_sources=True
+                )
+                stage_report["excel_created"] = len(excel_created)
+                subprogress += progress_increment
+                if publish:
+                    publish(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base_progress + subprogress,
+                            "message": f"已处理Excel，共{len(excel_created)}个",
+                        }
+                    )
+
+                text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
+                stage_report["text_created"] = len(text_created)
+                subprogress += progress_increment
+                if publish:
+                    publish(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base_progress + subprogress,
+                            "message": f"已处理文本类文件，共{len(text_created)}个",
+                        }
+                    )
+
+                total_created = (
+                    len(pdf_created)
+                    + len(office_created)
+                    + len(excel_created)
+                    + len(text_created)
+                )
+                stage_report["total_created"] = total_created
+                summary["total_created"] += total_created
+        except Exception as error:
+            logger.error(f"解析阶段失败: {error}")
+            stage_report["error"] = str(error)
+
+        stage_report["messages"] = logger.messages
+        summary["stages"][stage_name] = stage_report
+
+        if publish:
+            publish(
+                {
+                    "status": "running",
+                    "stage": stage_name,
+                    "progress": min(1.0, stage_base_progress + step_weight),
+                    "message": f"完成 {stage_name} 解析",
+                }
+            )
+
+    if publish:
+        publish({"status": "succeeded", "stage": "completed", "progress": 1.0})
+
+    return summary
+
+
 def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
     """Return a head/tail preview from a text file to control token usage."""
 
@@ -920,6 +1081,73 @@ async def list_files(session_id: str, file_type: str = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"List files failed: {str(e)}")
 
+
+@app.post("/apqp-one-click/upload")
+async def apqp_upload_file(
+    session_id: str = Form(...),
+    stage: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload an APQP file to the specified stage directory."""
+
+    layout = _apqp_stage_layout(session_id)
+    stages = _normalize_apqp_stages(layout, [stage])
+    stage_name = stages[0]
+    target_dir = layout[stage_name]["upload_dir"]
+    os.makedirs(target_dir, exist_ok=True)
+    target_path = os.path.join(target_dir, file.filename)
+
+    try:
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"上传失败: {error}")
+
+    return {
+        "status": "success",
+        "stage": stage_name,
+        "path": target_path,
+        "name": file.filename,
+    }
+
+
+@app.get("/apqp-one-click/files/{session_id}")
+async def apqp_list_files(session_id: str, stage: Optional[str] = None):
+    """List APQP uploaded files (optionally filtered by stage)."""
+
+    layout = _apqp_stage_layout(session_id)
+    if stage:
+        stages = _normalize_apqp_stages(layout, [stage])
+    else:
+        stages = list(layout.keys())
+
+    result: Dict[str, List[Dict[str, object]]] = {}
+    for stage_name in stages:
+        info = layout[stage_name]
+        entries: List[Dict[str, object]] = []
+        try:
+            for name in os.listdir(info["upload_dir"]):
+                file_path = os.path.join(info["upload_dir"], name)
+                if os.path.isfile(file_path) and name != ".gitkeep":
+                    stat = os.stat(file_path)
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                            "path": file_path,
+                        }
+                    )
+        except Exception:
+            entries = []
+        result[stage_name] = sorted(entries, key=lambda item: item["name"].lower())
+
+    return {
+        "status": "success",
+        "stage_order": stages,
+        "files": result,
+    }
+
 @app.post("/clear-files")
 async def clear_files(request: ClearFilesRequest):
     """Clear all files for a session"""
@@ -950,76 +1178,49 @@ async def apqp_parse(request: ApqpParseRequest):
 
     layout = _apqp_stage_layout(request.session_id)
     stages = _normalize_apqp_stages(layout, request.stages)
-    summary: Dict[str, Any] = {
-        "stage_order": stages,
-        "stages": {},
-        "total_created": 0,
-    }
-
-    for stage_name in stages:
-        info = layout[stage_name]
-        upload_dir = info["upload_dir"]
-        parsed_dir = info["parsed_dir"]
-        logger = _ParseLogger()
-        stage_report: Dict[str, Any] = {
-            "slug": info["slug"],
-            "upload_dir": upload_dir,
-            "parsed_dir": parsed_dir,
-            "files_found": 0,
-            "pdf_created": 0,
-            "word_ppt_created": 0,
-            "excel_created": 0,
-            "text_created": 0,
-            "total_created": 0,
-        }
-
-        try:
-            files_found = [
-                name
-                for name in os.listdir(upload_dir)
-                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
-            ]
-            stage_report["files_found"] = len(files_found)
-            if not files_found:
-                logger.info("当前阶段没有上传文件，跳过解析。")
-            else:
-                pdf_created = process_pdf_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["pdf_created"] = len(pdf_created)
-
-                office_created = process_word_ppt_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["word_ppt_created"] = len(office_created)
-
-                excel_created = process_excel_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["excel_created"] = len(excel_created)
-
-                text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
-                stage_report["text_created"] = len(text_created)
-
-                total_created = (
-                    len(pdf_created)
-                    + len(office_created)
-                    + len(excel_created)
-                    + len(text_created)
-                )
-                stage_report["total_created"] = total_created
-                summary["total_created"] += total_created
-        except Exception as error:
-            logger.error(f"解析阶段失败: {error}")
-            stage_report["error"] = str(error)
-
-        stage_report["messages"] = logger.messages
-        summary["stages"][stage_name] = stage_report
+    summary = _parse_apqp_stages(layout, stages)
 
     return {
         "status": "success",
         "summary": summary,
     }
+
+
+def run_apqp_one_click_parse_job(
+    session_id: str,
+    publish: Callable[[Dict[str, Any]], None],
+    *,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+    stages: Optional[List[str]] = None,
+) -> None:
+    """Background runner for APQP一键解析任务。"""
+
+    layout = _apqp_stage_layout(session_id)
+    stage_list = _normalize_apqp_stages(layout, stages)
+
+    def _publish(update: Dict[str, Any]) -> None:
+        payload = dict(update or {})
+        payload.setdefault("message", "")
+        publish(payload)
+
+    _publish({"status": "running", "stage": "init", "message": "开始准备解析任务"})
+    try:
+        _parse_apqp_stages(layout, stage_list, publish=_publish, check_control=check_control)
+    except Exception as error:
+        _publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": str(error),
+                "message": f"解析失败: {error}",
+            }
+        )
+        raise
+
+
+# Bind runner after definition to avoid forward reference issues
+JOB_DEFINITIONS["apqp_one_click_parse"]["runner"] = run_apqp_one_click_parse_job
+
 
 
 @app.post("/apqp-one-click/classify")
@@ -1167,6 +1368,28 @@ async def file_exists(session_id: str, file_path: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Check file failed: {str(e)}")
+
+
+@app.post("/apqp-one-click/jobs", response_model=EnterpriseJobStatus)
+async def start_apqp_one_click_job(request: ApqpParseJobRequest):
+    """Start a background APQP parse job."""
+
+    record = _start_job(
+        "apqp_one_click_parse",
+        request.session_id,
+        runner_kwargs={"stages": request.stages},
+    )
+    return _record_to_status(record)
+
+
+@app.get("/apqp-one-click/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_apqp_one_click_job(job_id: str):
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        return _record_to_status(record)
 
 
 @app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)

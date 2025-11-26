@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -10,30 +11,12 @@ import streamlit as st
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
 from tabs.file_completeness import STAGE_ORDER, STAGE_REQUIREMENTS, STAGE_SLUG_MAP
-from util import (
-    ensure_session_dirs,
-    get_directory_refresh_token,
-    handle_file_upload,
-    list_directory_contents,
-)
 from tabs.shared.file_conversion import (
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
     process_word_ppt_folder,
 )
-
-
-def _list_files(folder: str) -> List[Dict[str, object]]:
-    if not folder:
-        return []
-    token = get_directory_refresh_token(folder)
-    entries = [dict(entry) for entry in list_directory_contents(folder, token)]
-    for entry in entries:
-        entry.setdefault("path", os.path.join(folder, entry["name"]))
-        entry["size"] = int(entry.get("size", 0))
-        entry["modified"] = float(entry.get("modified", 0.0))
-    return sorted(entries, key=lambda item: (item["name"].lower(), item["modified"]))
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -60,6 +43,26 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     if available <= 0:
         return filename[: max_length - 3] + "..."
     return name[:available] + "..." + ext
+
+
+def _fetch_stage_files(backend_client, session_id: str, stage_name: str) -> List[Dict[str, object]]:
+    stage_slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
+    response = backend_client.list_apqp_files(session_id, stage_slug)
+    if not isinstance(response, dict) or response.get("status") != "success":
+        return []
+    files_by_stage = response.get("files") or {}
+    entries = files_by_stage.get(stage_name) or []
+    normalized: List[Dict[str, object]] = []
+    for entry in entries:
+        normalized.append(
+            {
+                "name": entry.get("name"),
+                "size": int(entry.get("size", 0)),
+                "modified": float(entry.get("modified", 0.0)),
+                "path": entry.get("path") or "",
+            }
+        )
+    return sorted(normalized, key=lambda item: (item["name"] or "").lower())
 
 
 def _render_classification_results(summary: Dict[str, Any]) -> None:
@@ -136,21 +139,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         return
 
     uploads_root = str(CONFIG["directories"]["uploads"])
-    base_dirs: Dict[str, str] = {
-        "generated": str(CONFIG["directories"]["generated_files"]),
-    }
-    for stage_name in STAGE_ORDER:
-        slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
-        base_dirs[slug] = os.path.join(uploads_root, "{session_id}", "APQP_one_click_check", slug)
-    session_dirs = ensure_session_dirs(base_dirs, session_id)
-    stage_dirs = {
-        stage_name: session_dirs.get(STAGE_SLUG_MAP.get(stage_name, stage_name), "")
-        for stage_name in STAGE_ORDER
-    }
-    generated_root = session_dirs.get("generated") or session_dirs.get("generated_files") or ""
-    apqp_parsed_root = os.path.join(generated_root, "APQP_one_click_check") if generated_root else ""
-    if apqp_parsed_root:
-        os.makedirs(apqp_parsed_root, exist_ok=True)
+    generated_root = str(CONFIG["directories"]["generated_files"])
+    stage_slugs = {stage_name: STAGE_SLUG_MAP.get(stage_name, stage_name) for stage_name in STAGE_ORDER}
+    apqp_parsed_root = os.path.join(generated_root, session_id, "APQP_one_click_check")
 
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
@@ -169,7 +160,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         upload_columns = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"apqp_one_click_uploader_{stage_name}_{session_id}"
-            target_dir = stage_dirs.get(stage_name)
             column = upload_columns[index % len(upload_columns)]
             with column:
                 uploaded_files = st.file_uploader(
@@ -178,11 +168,24 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     key=uploader_key,
                 )
                 if uploaded_files:
-                    if target_dir:
-                        handle_file_upload(uploaded_files, target_dir)
-                        st.rerun()
+                    if not backend_ready or backend_client is None:
+                        st.error("后台服务不可用，无法上传文件。")
                     else:
-                        st.error("未找到对应的上传目录，请稍后重试。")
+                        success = 0
+                        for file in uploaded_files:
+                            resp = backend_client.upload_apqp_file(
+                                session_id, stage_slugs.get(stage_name, stage_name), file
+                            )
+                            if isinstance(resp, dict) and resp.get("status") == "success":
+                                success += 1
+                            else:
+                                detail = ""
+                                if isinstance(resp, dict):
+                                    detail = str(resp.get("detail") or resp.get("message") or "")
+                                st.warning(f"上传 {file.name} 失败：{detail or resp}")
+                        if success:
+                            st.success(f"已上传 {success} 个文件到 {stage_name}")
+                            st.rerun()
 
                 requirements = STAGE_REQUIREMENTS.get(stage_name, ())
                 with st.expander(f"{stage_name}应交付物清单", expanded=False):
@@ -194,76 +197,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         st.info("提示：上传的文件会保存到您的专属目录，后续会自动解析并进行齐套性识别。")
         if apqp_parsed_root:
             st.caption(f"解析后的文本文件将保存至 `{apqp_parsed_root}`。")
-
-        parse_log_container = st.container()
-        parse_button = st.button(
-            "解析所有阶段文件",
-            key=f"apqp_parse_all_{session_id}",
-            disabled=not backend_ready,
-        )
-        if parse_button:
-            with parse_log_container:
-                if not backend_ready or backend_client is None:
-                    st.error("后台服务不可用，无法解析文件。")
-                else:
-                    with st.spinner("正在解析上传的文件，请稍候……"):
-                        response = backend_client.parse_apqp_files(session_id)
-                    if isinstance(response, dict) and response.get("status") == "success":
-                        summary = response.get("summary") or {}
-                        stage_order = summary.get("stage_order") or list(STAGE_ORDER)
-                        stage_results = summary.get("stages") or {}
-                        total_created = int(summary.get("total_created") or 0)
-                        if apqp_parsed_root:
-                            st.info(f"解析输出根目录：`{apqp_parsed_root}`")
-                        if total_created:
-                            st.success(f"解析完成，本次共生成 {total_created} 个文本文件。")
-                        else:
-                            st.info("解析完成，本次未生成新的文本文件。")
-                        for stage_name in stage_order:
-                            stage_data = stage_results.get(stage_name)
-                            if not stage_data:
-                                continue
-                            with st.expander(f"{stage_name} · 解析日志", expanded=False):
-                                upload_dir = stage_data.get("upload_dir") or ""
-                                parsed_dir = stage_data.get("parsed_dir") or ""
-                                st.write(f"- 上传目录：`{upload_dir}`")
-                                st.write(f"- 解析目标目录：`{parsed_dir}`")
-                                pdf_count = int(stage_data.get("pdf_created") or 0)
-                                office_count = int(stage_data.get("word_ppt_created") or 0)
-                                excel_count = int(stage_data.get("excel_created") or 0)
-                                text_count = int(stage_data.get("text_created") or 0)
-                                total_count = int(stage_data.get("total_created") or 0)
-                                files_found = int(stage_data.get("files_found") or 0)
-                                st.caption(
-                                    "解析统计："
-                                    f"PDF {pdf_count} · Word/PPT {office_count} · "
-                                    f"Excel {excel_count} · 文本 {text_count} · 总计 {total_count}"
-                                )
-                                if files_found == 0:
-                                    st.info("当前阶段没有上传文件，跳过解析。")
-                                messages = stage_data.get("messages") or []
-                                for message in messages:
-                                    level = str((message or {}).get("level") or "info").lower()
-                                    text = str((message or {}).get("text") or "").strip()
-                                    if not text:
-                                        continue
-                                    if level == "warning":
-                                        st.warning(text)
-                                    elif level == "error":
-                                        st.error(text)
-                                    elif level == "success":
-                                        st.success(text)
-                                    else:
-                                        st.info(text)
-                                if stage_data.get("error"):
-                                    st.error(f"阶段解析失败：{stage_data['error']}")
-                    else:
-                        detail = ""
-                        message = ""
-                        if isinstance(response, dict):
-                            detail = str(response.get("detail") or "")
-                            message = str(response.get("message") or "")
-                        st.error(f"解析失败：{detail or message or response}")
 
         classification_state_key = f"apqp_classification_summary_{session_id}"
         classify_log_container = st.container()
@@ -278,19 +211,66 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 if not backend_ready or backend_client is None:
                     st.error("后台服务不可用，无法进行齐套性识别。")
                 else:
-                    with st.spinner("正在调用大模型分类，请稍候……"):
-                        response = backend_client.classify_apqp_files(session_id)
-                    if isinstance(response, dict) and response.get("status") == "success":
-                        summary = response.get("summary") or {}
-                        st.session_state[classification_state_key] = summary
-                        st.success("分类完成，结果如下。")
-                    else:
+                    with st.spinner("正在提交解析任务..."):
+                        parse_job = backend_client.start_apqp_parse_job(session_id)
+
+                    job_id = parse_job.get("job_id") if isinstance(parse_job, dict) else None
+                    if not job_id:
                         detail = ""
                         message = ""
-                        if isinstance(response, dict):
-                            detail = str(response.get("detail") or "")
-                            message = str(response.get("message") or "")
-                        st.error(f"分类失败：{detail or message or response}")
+                        if isinstance(parse_job, dict):
+                            detail = str(parse_job.get("detail") or "")
+                            message = str(parse_job.get("message") or "")
+                        st.error(f"无法启动解析：{detail or message or parse_job}")
+                    else:
+                        progress_bar = st.progress(parse_job.get("progress") or 0.0)
+                        status_placeholder = st.empty()
+                        logs_placeholder = st.empty()
+                        final_status: Optional[Dict[str, Any]] = None
+                        start_time = time.time()
+                        while True:
+                            status = backend_client.get_apqp_job_status(job_id)
+                            if not isinstance(status, dict):
+                                st.error(f"无法查询解析进度：{status}")
+                                break
+                            progress = float(status.get("progress") or 0.0)
+                            progress_bar.progress(min(max(progress, 0.0), 1.0))
+                            message = status.get("message") or "正在解析上传文件..."
+                            stage_label = status.get("stage") or "运行中"
+                            status_placeholder.info(f"{stage_label} · {message}")
+                            logs = status.get("logs") or []
+                            if logs:
+                                last_log = logs[-1]
+                                logs_placeholder.caption(
+                                    f"{last_log.get('ts', '')} [{last_log.get('level', '')}] {last_log.get('message', '')}"
+                                )
+                            state = (status.get("status") or "").lower()
+                            if state in {"succeeded", "failed"}:
+                                final_status = status
+                                break
+                            if time.time() - start_time > 900:
+                                st.warning("解析超时，请稍后重试。")
+                                break
+                            time.sleep(1.0)
+
+                        if final_status and str(final_status.get("status")).lower() == "succeeded":
+                            status_placeholder.success("解析完成，正在调用大模型分类...")
+                            with st.spinner("正在调用大模型分类，请稍候……"):
+                                response = backend_client.classify_apqp_files(session_id)
+                            if isinstance(response, dict) and response.get("status") == "success":
+                                summary = response.get("summary") or {}
+                                st.session_state[classification_state_key] = summary
+                                st.success("分类完成，结果如下。")
+                            else:
+                                detail = ""
+                                message = ""
+                                if isinstance(response, dict):
+                                    detail = str(response.get("detail") or "")
+                                    message = str(response.get("message") or "")
+                                st.error(f"分类失败：{detail or message or response}")
+                        elif final_status:
+                            err = final_status.get("error") or final_status.get("message") or "解析任务失败"
+                            st.error(err)
 
         classification_summary = st.session_state.get(classification_state_key)
         if classification_summary:
@@ -325,8 +305,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         stage_tabs = st.tabs(list(STAGE_ORDER))
         for idx, stage_name in enumerate(STAGE_ORDER):
             with stage_tabs[idx]:
-                folder = stage_dirs.get(stage_name, "")
-                files = _list_files(folder)
+                files = _fetch_stage_files(backend_client, session_id, stage_name) if backend_client else []
                 if not files:
                     st.write("（未上传）")
                     continue

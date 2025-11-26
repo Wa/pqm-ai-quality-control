@@ -44,6 +44,27 @@ class BackendClient:
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def upload_apqp_file(self, session_id: str, stage: str, file_obj) -> Dict:
+        """Upload an APQP file to backend"""
+
+        try:
+            files = {"file": (file_obj.name, file_obj, getattr(file_obj, "type", None) or "application/octet-stream")}
+            data = {"session_id": session_id, "stage": stage}
+            response = requests.post(f"{self.base_url}/apqp-one-click/upload", files=files, data=data, timeout=60)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_apqp_files(self, session_id: str, stage: Optional[str] = None) -> Dict:
+        """List APQP files for a session/stage."""
+
+        try:
+            params = {"stage": stage} if stage else None
+            response = requests.get(f"{self.base_url}/apqp-one-click/files/{session_id}", params=params, timeout=10)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
     
     def list_files(self, session_id: str, file_type: Optional[str] = None) -> Dict:
         """List files via the backend"""
@@ -74,6 +95,29 @@ class BackendClient:
                 json=payload,
                 timeout=600,
             )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def start_apqp_parse_job(self, session_id: str, stages: Optional[List[str]] = None) -> Dict:
+        """Start background APQP parsing job."""
+
+        try:
+            payload: Dict[str, Any] = {"session_id": session_id}
+            if stages:
+                payload["stages"] = stages
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/jobs", json=payload, timeout=30
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_apqp_job_status(self, job_id: str) -> Dict:
+        """Fetch status for APQP parsing job."""
+
+        try:
+            response = requests.get(f"{self.base_url}/apqp-one-click/jobs/{job_id}", timeout=10)
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
