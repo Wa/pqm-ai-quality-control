@@ -236,6 +236,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         progress_bar = st.progress(parse_job.get("progress") or 0.0)
                         status_placeholder = st.empty()
                         logs_placeholder = st.empty()
+                        log_history: list[dict[str, object]] = []
+                        log_seen: set[tuple[object, object, object]] = set()
                         final_status: Optional[Dict[str, Any]] = None
                         start_time = time.time()
                         while True:
@@ -250,6 +252,15 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             status_placeholder.info(f"{stage_label} · {message}")
                             logs = status.get("logs") or []
                             if logs:
+                                for entry in logs:
+                                    key = (
+                                        entry.get("ts"),
+                                        entry.get("level"),
+                                        entry.get("message"),
+                                    )
+                                    if key not in log_seen:
+                                        log_seen.add(key)
+                                        log_history.append(entry)
                                 last_log = logs[-1]
                                 logs_placeholder.caption(
                                     f"{last_log.get('ts', '')} [{last_log.get('level', '')}] {last_log.get('message', '')}"
@@ -283,6 +294,17 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         elif final_status:
                             err = final_status.get("error") or final_status.get("message") or "解析任务失败"
                             st.error(err)
+
+                        if log_history:
+                            with st.expander("点击查看后台日志", expanded=False):
+                                for entry in log_history[-50:]:
+                                    if not isinstance(entry, dict):
+                                        st.write(entry)
+                                        continue
+                                    ts = entry.get("ts") or ""
+                                    level = entry.get("level") or "info"
+                                    message = entry.get("message") or ""
+                                    st.write(f"[{ts}] {level}: {message}")
 
         classification_summary = st.session_state.get(classification_state_key)
         if classification_summary:
