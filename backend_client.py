@@ -77,6 +77,32 @@ class BackendClient:
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def classify_apqp_files(
+        self,
+        session_id: str,
+        stages: Optional[List[str]] = None,
+        head_chars: int = 3200,
+        tail_chars: int = 2000,
+    ) -> Dict:
+        """Request backend to classify parsed APQP documents via LLM."""
+
+        try:
+            payload: Dict[str, Any] = {
+                "session_id": session_id,
+                "head_chars": head_chars,
+                "tail_chars": tail_chars,
+            }
+            if stages:
+                payload["stages"] = stages
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/classify",
+                json=payload,
+                timeout=900,
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
     
     def clear_apqp_files(self, session_id: str, target: str = "all") -> Dict:
         """Clear APQP uploads and/or parsed outputs via the backend."""

@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
+import json
 import multiprocessing
 from multiprocessing import Process, Queue
 from queue import Full
 import os
+from pathlib import Path
 import shutil
 import time
 import traceback
@@ -14,6 +16,7 @@ import tempfile
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from config import CONFIG
@@ -22,6 +25,9 @@ from tabs.file_completeness import (
     run_file_completeness_job,
     STAGE_ORDER,
     STAGE_SLUG_MAP,
+    STAGE_REQUIREMENTS,
+    CANONICAL_APQP_DESCRIPTORS,
+    descriptor_for,
 )
 from tabs.file_elements.background import run_file_elements_job
 from tabs.parameters.background import run_parameters_job
@@ -132,6 +138,13 @@ class ApqpParseRequest(BaseModel):
 class ApqpClearRequest(BaseModel):
     session_id: str
     target: Optional[str] = "all"
+
+
+class ApqpClassifyRequest(BaseModel):
+    session_id: str
+    stages: Optional[List[str]] = None
+    head_chars: int = 3200
+    tail_chars: int = 2000
 
 
 class EnterpriseJobStatus(BaseModel):
@@ -608,6 +621,172 @@ def _normalize_apqp_stages(
     return result
 
 
+def _collect_parsed_txt_files(folder: str) -> List[str]:
+    """Return sorted .txt files from a parsed folder."""
+
+    if not folder or not os.path.isdir(folder):
+        return []
+    paths = [
+        os.path.join(folder, name)
+        for name in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, name)) and name.lower().endswith(".txt")
+    ]
+    return sorted(paths)
+
+
+def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
+    """Return a head/tail preview from a text file to control token usage."""
+
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    if head_chars <= 0 and tail_chars <= 0:
+        return text
+    head = text[: max(head_chars, 0)]
+    tail = text[-max(tail_chars, 0) :] if tail_chars > 0 else ""
+    if tail and head:
+        return f"【开头】\n{head}\n\n【结尾】\n{tail}"
+    return head or tail
+
+
+def _apqp_candidate_definitions(stage_name: str) -> List[Dict[str, str]]:
+    """Build canonical deliverable definitions for a stage."""
+
+    requirements = STAGE_REQUIREMENTS.get(stage_name) or tuple()
+    result: List[Dict[str, str]] = []
+    for item in requirements:
+        description = CANONICAL_APQP_DESCRIPTORS.get(item) or descriptor_for(item)
+        result.append({"name": item, "description": description})
+    return result
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    """Best-effort JSON decoding that tolerates fenced blocks."""
+
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return {}
+
+
+def _openai_client() -> OpenAI:
+    settings = CONFIG.get("llm", {})
+    api_key = settings.get("openai_api_key") or ""
+    base_url = settings.get("openai_base_url") or None
+    return OpenAI(api_key=api_key, base_url=base_url)
+
+
+def _classify_document(
+    *,
+    client: OpenAI,
+    stage_name: str,
+    file_path: str,
+    candidates: List[Dict[str, str]],
+    head_chars: int,
+    tail_chars: int,
+) -> Dict[str, Any]:
+    """Call LLM to classify a parsed document into canonical APQP types."""
+
+    preview = _load_text_preview(file_path, head_chars=head_chars, tail_chars=tail_chars)
+    file_name = os.path.basename(file_path)
+    payload = {
+        "file_name": file_name,
+        "path": file_path,
+        "preview_length": len(preview),
+        "primary_type": None,
+        "additional_types": [],
+        "confidence": 0.0,
+        "rationale": "",
+        "raw_response": None,
+        "status": "pending",
+    }
+
+    if not preview.strip():
+        payload.update(
+            {
+                "status": "error",
+                "error": "文本为空或无法读取",
+            }
+        )
+        return payload
+
+    candidates_text = "\n".join(
+        f"{idx+1}. {item['name']}：{item['description']}" for idx, item in enumerate(candidates)
+    )
+    prompt = f"""
+你是一名 APQP 交付物分类助手，请基于文档内容判断文件最符合的交付物类型。
+阶段：{stage_name}
+候选交付物列表（仅可从中选择或回答 none）：
+{candidates_text}
+
+请阅读以下文件内容片段（已截取开头和结尾，以避免过长）：
+{preview}
+
+输出严格的 JSON（不含多余文字），字段要求：
+{{
+  "primary_type": "<从候选列表选择的名称，若无法匹配请填 none>",
+  "additional_types": ["<可选的额外交付物名称，用于表示1个文件覆盖多个交付物，可为空列表>"],
+  "confidence": <0到1之间的小数，表示匹配置信度>,
+  "rationale": "简要中文理由，说明为何匹配或为何选择 none"
+}}
+
+规则：
+- primary_type 必须是候选列表中的名称或 "none"，不得编造。
+- 如果文件同时覆盖多个交付物，可在 additional_types 中列出额外交付物名称（必须来自候选列表且不重复）。
+- 若文本与候选内容明显无关或信息太少，请输出 primary_type="none"，并给出低置信度原因。
+- 仅依据文本内容做判断，避免依赖文件名。
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=CONFIG.get("llm", {}).get("openai_model", "gpt-3.5-turbo"),
+            messages=[
+                {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=512,
+        )
+        raw_content = (response.choices[0].message.content or "") if response.choices else ""
+        payload["raw_response"] = raw_content
+        data = _extract_json_object(raw_content)
+    except Exception as error:
+        payload.update({"status": "error", "error": str(error)})
+        return payload
+
+    primary_type = str(data.get("primary_type") or "").strip()
+    additional = data.get("additional_types") or []
+    if isinstance(additional, str):
+        additional = [additional]
+    additional_types = [str(item).strip() for item in additional if str(item).strip()]
+    rationale = str(data.get("rationale") or "").strip()
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(confidence, 1.0))
+
+    payload.update(
+        {
+            "primary_type": primary_type if primary_type else None,
+            "additional_types": additional_types,
+            "confidence": confidence,
+            "rationale": rationale,
+            "status": "success",
+        }
+    )
+    return payload
+
+
 def _clear_directory_contents(path: str) -> int:
     """Remove all files/directories inside `path`, returning number of items removed."""
 
@@ -841,6 +1020,106 @@ async def apqp_parse(request: ApqpParseRequest):
         "status": "success",
         "summary": summary,
     }
+
+
+@app.post("/apqp-one-click/classify")
+async def apqp_classify(request: ApqpClassifyRequest):
+    """Classify parsed APQP documents via LLM to assess completeness."""
+
+    layout = _apqp_stage_layout(request.session_id)
+    stages = _normalize_apqp_stages(layout, request.stages)
+    summary: Dict[str, Any] = {"stage_order": stages, "stages": {}}
+    client = _openai_client()
+
+    generated_root = Path(CONFIG["directories"]["generated_files"])
+    summary_dir = generated_root / request.session_id / "APQP_one_click_check"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = summary_dir / "classification_summary.json"
+
+    for stage_name in stages:
+        info = layout[stage_name]
+        parsed_dir = info["parsed_dir"]
+        upload_dir = info["upload_dir"]
+        candidates = _apqp_candidate_definitions(stage_name)
+        txt_files = _collect_parsed_txt_files(parsed_dir)
+
+        requirement_state: Dict[str, Dict[str, Any]] = {
+            name: {"status": "missing", "sources": [], "confidence": 0.0}
+            for name in (STAGE_REQUIREMENTS.get(stage_name) or tuple())
+        }
+
+        documents: List[Dict[str, Any]] = []
+        for file_path in txt_files:
+            result = _classify_document(
+                client=client,
+                stage_name=stage_name,
+                file_path=file_path,
+                candidates=candidates,
+                head_chars=max(0, int(request.head_chars)),
+                tail_chars=max(0, int(request.tail_chars)),
+            )
+            matched: List[str] = []
+            suggested: List[str] = []
+            if result.get("status") == "success":
+                names = []
+                primary = result.get("primary_type") or ""
+                if primary and primary.lower() != "none":
+                    names.append(primary)
+                for extra in result.get("additional_types") or []:
+                    if extra not in names:
+                        names.append(extra)
+                for name in names:
+                    if name in requirement_state:
+                        matched.append(name)
+                    else:
+                        suggested.append(name)
+                for req in matched:
+                    state = requirement_state[req]
+                    state["status"] = "present"
+                    state["confidence"] = max(state.get("confidence", 0.0), result.get("confidence") or 0.0)
+                    state.setdefault("sources", []).append(result.get("file_name") or os.path.basename(file_path))
+            result["matched_requirements"] = matched
+            if suggested:
+                result["suggested_types"] = suggested
+            documents.append(result)
+
+        present_count = sum(1 for item in requirement_state.values() if item.get("status") == "present")
+        missing_count = len(requirement_state) - present_count
+
+        stage_summary = {
+            "slug": info["slug"],
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+            "requirements": [
+                {"name": name, **requirement_state[name]} for name in requirement_state
+            ],
+            "documents": documents,
+            "stats": {
+                "total_requirements": len(requirement_state),
+                "present": present_count,
+                "missing": max(missing_count, 0),
+                "files_classified": len(documents),
+                "parsed_files_found": len(txt_files),
+            },
+        }
+
+        if not txt_files:
+            stage_summary["warning"] = "未找到解析后的文本文件，请先执行解析。"
+        if not candidates:
+            extra = "当前阶段未配置应交付物列表。"
+            if stage_summary.get("warning"):
+                stage_summary["warning"] = f"{stage_summary['warning']} {extra}"
+            else:
+                stage_summary["warning"] = extra
+        summary["stages"][stage_name] = stage_summary
+
+    try:
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary_file"] = str(summary_path)
+    except Exception:
+        summary["summary_file"] = None
+
+    return {"status": "success", "summary": summary}
 
 
 @app.post("/apqp-one-click/clear")

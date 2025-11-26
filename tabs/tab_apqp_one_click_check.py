@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-import shutil
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -61,6 +60,74 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     if available <= 0:
         return filename[: max_length - 3] + "..."
     return name[:available] + "..." + ext
+
+
+def _render_classification_results(summary: Dict[str, Any]) -> None:
+    """Render APQP classification summary in the UI."""
+
+    stage_order = summary.get("stage_order") or []
+    stages = summary.get("stages") or {}
+    if not stage_order:
+        st.info("暂无分类结果。")
+        return
+
+    stage_tabs = st.tabs(stage_order)
+    for idx, stage_name in enumerate(stage_order):
+        stage_data = stages.get(stage_name) or {}
+        with stage_tabs[idx]:
+            stats = stage_data.get("stats") or {}
+            reqs = stage_data.get("requirements") or []
+            docs = stage_data.get("documents") or []
+
+            cols = st.columns(4)
+            cols[0].metric("应交付物", stats.get("total_requirements", 0))
+            cols[1].metric("已覆盖", stats.get("present", 0))
+            cols[2].metric("缺失", stats.get("missing", 0))
+            cols[3].metric("已分类文件", stats.get("files_classified", 0))
+
+            if stage_data.get("warning"):
+                st.warning(stage_data.get("warning"))
+
+            present = [item for item in reqs if item.get("status") == "present"]
+            missing = [item for item in reqs if item.get("status") != "present"]
+
+            st.markdown("### 交付物覆盖情况")
+            if present:
+                st.success(
+                    "\n".join(
+                        f"✅ {item['name']}（来源: {', '.join(item.get('sources') or ['LLM判定'])}; 置信度: {item.get('confidence', 0):.2f})"
+                        for item in present
+                    )
+                )
+            if missing:
+                st.error("\n".join(f"⚠️ {item['name']} (未匹配)" for item in missing))
+            if not present and not missing:
+                st.write("暂无覆盖数据。")
+
+            st.markdown("### 文件分类详情")
+            if not docs:
+                st.write("暂无文件分类结果。")
+            for doc in docs:
+                title = doc.get("file_name") or os.path.basename(doc.get("path", ""))
+                status = doc.get("status") or ""
+                suffix = "" if status == "success" else "（失败）"
+                with st.expander(f"📄 {title}{suffix}", expanded=False):
+                    if status != "success":
+                        st.error(doc.get("error") or "分类失败")
+                        continue
+                    primary = doc.get("primary_type")
+                    additional = doc.get("additional_types") or []
+                    matched = doc.get("matched_requirements") or []
+                    suggested = doc.get("suggested_types") or []
+                    st.write(f"**主匹配:** {primary or 'none'}  ·  置信度 {doc.get('confidence', 0):.2f}")
+                    if additional:
+                        st.write(f"**额外匹配:** {', '.join(additional)}")
+                    if matched:
+                        st.caption(f"命中的应交付物：{', '.join(matched)}")
+                    if suggested:
+                        st.caption(f"未在清单中的候选：{', '.join(suggested)}")
+                    st.write(f"**理由:** {doc.get('rationale') or '无'}")
+                    st.caption(f"预览字符数：{doc.get('preview_length', 0)}")
 
 
 def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
@@ -197,6 +264,39 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             detail = str(response.get("detail") or "")
                             message = str(response.get("message") or "")
                         st.error(f"解析失败：{detail or message or response}")
+
+        classification_state_key = f"apqp_classification_summary_{session_id}"
+        classify_log_container = st.container()
+        classify_button = st.button(
+            "运行智能齐套性识别",
+            key=f"apqp_classify_{session_id}",
+            disabled=not backend_ready,
+            help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
+        )
+        if classify_button:
+            with classify_log_container:
+                if not backend_ready or backend_client is None:
+                    st.error("后台服务不可用，无法进行齐套性识别。")
+                else:
+                    with st.spinner("正在调用大模型分类，请稍候……"):
+                        response = backend_client.classify_apqp_files(session_id)
+                    if isinstance(response, dict) and response.get("status") == "success":
+                        summary = response.get("summary") or {}
+                        st.session_state[classification_state_key] = summary
+                        st.success("分类完成，结果如下。")
+                    else:
+                        detail = ""
+                        message = ""
+                        if isinstance(response, dict):
+                            detail = str(response.get("detail") or "")
+                            message = str(response.get("message") or "")
+                        st.error(f"分类失败：{detail or message or response}")
+
+        classification_summary = st.session_state.get(classification_state_key)
+        if classification_summary:
+            st.divider()
+            st.subheader("🤖 LLM 文件归类与齐套性判断")
+            _render_classification_results(classification_summary)
 
     with col_info:
         st.subheader("📁 文件管理")
