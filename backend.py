@@ -34,6 +34,7 @@ from tabs.parameters.background import run_parameters_job
 from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
 from tabs.shared.file_conversion import (
+    cleanup_orphan_txts,
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
@@ -699,6 +700,10 @@ def _parse_apqp_stages(
                 if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
             ]
             stage_report["files_found"] = len(files_found)
+
+            removed_txts = cleanup_orphan_txts(upload_dir, parsed_dir, logger)
+            if removed_txts:
+                logger.info(f"已清理无关文本 {removed_txts} 个")
             if not files_found:
                 logger.info("当前阶段没有上传文件，跳过解析。")
             else:
