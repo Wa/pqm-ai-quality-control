@@ -663,6 +663,18 @@ def _parse_apqp_stages(
     }
     total_stages = max(len(stages), 1)
 
+    def _emit(update: Dict[str, Any], *, log_message: Optional[str] = None, level: str = "info") -> None:
+        if not publish:
+            return
+        payload = dict(update or {})
+        if log_message:
+            payload["log"] = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": level,
+                "message": log_message,
+            }
+        publish(payload)
+
     for idx, stage_name in enumerate(stages):
         if check_control:
             status = check_control() or {}
@@ -687,15 +699,15 @@ def _parse_apqp_stages(
 
         step_weight = 1.0 / max(total_stages, 1)
         stage_base_progress = idx * step_weight
-        if publish:
-            publish(
-                {
-                    "status": "running",
-                    "stage": stage_name,
-                    "progress": stage_base_progress,
-                    "message": f"开始解析 {stage_name}",
-                }
-            )
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base_progress,
+                "message": f"开始解析 {stage_name}",
+            },
+            log_message=f"开始解析 {stage_name}",
+        )
 
         try:
             files_found = [
@@ -720,58 +732,58 @@ def _parse_apqp_stages(
                 )
                 stage_report["pdf_created"] = len(pdf_created)
                 subprogress += progress_increment
-                if publish:
-                    publish(
-                        {
-                            "status": "running",
-                            "stage": stage_name,
-                            "progress": stage_base_progress + subprogress,
-                            "message": f"已处理PDF，共{len(pdf_created)}个",
-                        }
-                    )
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理PDF，共{len(pdf_created)}个",
+                    },
+                    log_message=f"已处理PDF，共{len(pdf_created)}个",
+                )
 
                 office_created = process_word_ppt_folder(
                     upload_dir, parsed_dir, logger, annotate_sources=True
                 )
                 stage_report["word_ppt_created"] = len(office_created)
                 subprogress += progress_increment
-                if publish:
-                    publish(
-                        {
-                            "status": "running",
-                            "stage": stage_name,
-                            "progress": stage_base_progress + subprogress,
-                            "message": f"已处理Word/PPT，共{len(office_created)}个",
-                        }
-                    )
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理Word/PPT，共{len(office_created)}个",
+                    },
+                    log_message=f"已处理Word/PPT，共{len(office_created)}个",
+                )
 
                 excel_created = process_excel_folder(
                     upload_dir, parsed_dir, logger, annotate_sources=True
                 )
                 stage_report["excel_created"] = len(excel_created)
                 subprogress += progress_increment
-                if publish:
-                    publish(
-                        {
-                            "status": "running",
-                            "stage": stage_name,
-                            "progress": stage_base_progress + subprogress,
-                            "message": f"已处理Excel，共{len(excel_created)}个",
-                        }
-                    )
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理Excel，共{len(excel_created)}个",
+                    },
+                    log_message=f"已处理Excel，共{len(excel_created)}个",
+                )
 
                 text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
                 stage_report["text_created"] = len(text_created)
                 subprogress += progress_increment
-                if publish:
-                    publish(
-                        {
-                            "status": "running",
-                            "stage": stage_name,
-                            "progress": stage_base_progress + subprogress,
-                            "message": f"已处理文本类文件，共{len(text_created)}个",
-                        }
-                    )
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理文本类文件，共{len(text_created)}个",
+                    },
+                    log_message=f"已处理文本类文件，共{len(text_created)}个",
+                )
 
                 total_created = (
                     len(pdf_created)
@@ -785,21 +797,30 @@ def _parse_apqp_stages(
             logger.error(f"解析阶段失败: {error}")
             stage_report["error"] = str(error)
 
-        stage_report["messages"] = logger.messages
-        summary["stages"][stage_name] = stage_report
-
-        if publish:
-            publish(
+            _emit(
                 {
                     "status": "running",
                     "stage": stage_name,
-                    "progress": min(1.0, stage_base_progress + step_weight),
-                    "message": f"完成 {stage_name} 解析",
-                }
+                    "message": f"解析阶段失败: {error}",
+                },
+                log_message=f"解析阶段失败: {error}",
+                level="error",
             )
 
-    if publish:
-        publish({"status": "succeeded", "stage": "completed", "progress": 1.0})
+        stage_report["messages"] = logger.messages
+        summary["stages"][stage_name] = stage_report
+
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": min(1.0, stage_base_progress + step_weight),
+                "message": f"完成 {stage_name} 解析",
+            },
+            log_message=f"完成 {stage_name} 解析",
+        )
+
+    _emit({"status": "succeeded", "stage": "completed", "progress": 1.0}, log_message="解析任务完成")
 
     return summary
 
