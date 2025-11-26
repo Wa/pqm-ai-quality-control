@@ -78,6 +78,10 @@ JOB_DEFINITIONS = {
         "runner": None,  # Placeholder; assigned after function definition
         "label": "APQP一键解析",
     },
+    "apqp_one_click_classify": {
+        "runner": None,  # Placeholder; assigned after function definition
+        "label": "APQP一键分类",
+    },
 }
 
 
@@ -163,6 +167,7 @@ class ApqpClassifyRequest(BaseModel):
     head_chars: int = 3200
     tail_chars: int = 2000
     turbo_mode: bool = False
+    control_job_id: Optional[str] = None
 
 
 class EnterpriseJobStatus(BaseModel):
@@ -652,6 +657,23 @@ def _collect_parsed_txt_files(folder: str) -> List[str]:
         if os.path.isfile(os.path.join(folder, name)) and name.lower().endswith(".txt")
     ]
     return sorted(paths)
+
+
+def _resolve_control_dir(job_id: Optional[str], *, expected_type: Optional[str] = None, session_id: Optional[str] = None) -> str:
+    """Lookup control directory for a given job id if still cached in memory."""
+
+    if not job_id:
+        return ""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            return ""
+        if expected_type and record.job_type != expected_type:
+            return ""
+        if session_id and record.session_id != session_id:
+            return ""
+        return str(record.metadata.get("control_dir") or "")
 
 
 def _parse_apqp_stages(
@@ -1183,8 +1205,23 @@ def _classify_document(
     tail_chars: int,
     record_dir: Optional[Path] = None,
     record_prefix: str = "",
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
 ) -> Dict[str, Any]:
     """Call LLM to classify a parsed document into canonical APQP types."""
+
+    def _wait_if_paused(detail: str = "") -> None:
+        if not check_control:
+            return
+        while True:
+            status = check_control() or {}
+            if status.get("stopped"):
+                raise RuntimeError("分类已被停止")
+            if status.get("paused"):
+                time.sleep(1.0)
+                continue
+            break
+
+    _wait_if_paused(f"准备分类 {file_path}")
 
     preview = _load_text_preview(file_path, head_chars=head_chars, tail_chars=tail_chars)
     file_name = os.path.basename(file_path)
@@ -1254,6 +1291,7 @@ def _classify_document(
             {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
             {"role": "user", "content": prompt},
         ]
+        _wait_if_paused(f"等待恢复后分类 {file_name}")
         raw_content, provider_label, model_name = invoker(messages)
         payload["raw_response"] = raw_content
         payload["provider"] = provider_label
@@ -1568,10 +1606,53 @@ def run_apqp_one_click_parse_job(
 JOB_DEFINITIONS["apqp_one_click_parse"]["runner"] = run_apqp_one_click_parse_job
 
 
+def run_apqp_one_click_classify_job(
+    session_id: str,
+    publish: Callable[[Dict[str, Any]], None],
+    *,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+    stages: Optional[List[str]] = None,
+    head_chars: int = 3200,
+    tail_chars: int = 2000,
+    turbo_mode: bool = False,
+    control_job_id: Optional[str] = None,
+) -> None:
+    """Background runner for APQP一键分类任务。"""
 
-@app.post("/apqp-one-click/classify")
-async def apqp_classify(request: ApqpClassifyRequest):
-    """Classify parsed APQP documents via LLM to assess completeness."""
+    request = ApqpClassifyRequest(
+        session_id=session_id,
+        stages=stages,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+        turbo_mode=turbo_mode,
+        control_job_id=control_job_id,
+    )
+    publish({"status": "running", "stage": "init", "message": "开始准备分类任务"})
+    try:
+        _run_apqp_classification(request, publish=publish, check_control=check_control)
+    except Exception as error:
+        publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": str(error),
+                "message": f"分类失败: {error}",
+            }
+        )
+        raise
+
+
+JOB_DEFINITIONS["apqp_one_click_classify"]["runner"] = run_apqp_one_click_classify_job
+
+
+
+def _run_apqp_classification(
+    request: ApqpClassifyRequest,
+    *,
+    publish: Optional[Callable[[Dict[str, Any]], None]] = None,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Shared classification logic supporting sync and background runs."""
 
     layout = _apqp_stage_layout(request.session_id)
     stages = _normalize_apqp_stages(layout, request.stages)
@@ -1579,6 +1660,48 @@ async def apqp_classify(request: ApqpClassifyRequest):
     fast_providers, serial_chain, provider_warnings = _prepare_apqp_llm_providers(bool(request.turbo_mode))
     summary_warnings: List[str] = []
     summary_warnings.extend(provider_warnings)
+
+    control_dir = _resolve_control_dir(
+        request.control_job_id,
+        expected_type="apqp_one_click_parse",
+        session_id=request.session_id,
+    )
+
+    def _check_control_flags() -> Dict[str, bool]:
+        if check_control:
+            try:
+                return check_control() or {}
+            except Exception:
+                return {"paused": False, "stopped": False}
+        if not control_dir:
+            return {"paused": False, "stopped": False}
+        try:
+            paused = os.path.isfile(os.path.join(control_dir, "pause"))
+            stopped = os.path.isfile(os.path.join(control_dir, "stop"))
+            return {"paused": paused, "stopped": stopped}
+        except Exception:
+            return {"paused": False, "stopped": False}
+
+    def _emit(update: Dict[str, Any], *, log_message: Optional[str] = None) -> None:
+        if not publish:
+            return
+        payload = dict(update or {})
+        if log_message:
+            payload["log"] = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": "info",
+                "message": log_message,
+            }
+        publish(payload)
+
+    def _wait_if_paused(detail: str = "") -> None:
+        status = _check_control_flags()
+        while status.get("paused"):
+            _emit({"status": "paused", "stage": "paused", "message": detail or "分类已暂停"}, log_message=detail)
+            time.sleep(1.0)
+            status = _check_control_flags()
+        if status.get("stopped"):
+            raise RuntimeError("分类已被停止")
 
     if not serial_chain and not fast_providers:
         raise HTTPException(status_code=500, detail="未找到可用的模型通道，请检查模型配置或网络。")
@@ -1605,12 +1728,26 @@ async def apqp_classify(request: ApqpClassifyRequest):
     fast_invoker = lambda messages: _invoke_with_providers(fast_providers, messages)
     parallel_enabled = bool(request.turbo_mode and fast_providers)
 
-    for stage_name in stages:
+    total_stages = max(len(stages), 1)
+    for idx, stage_name in enumerate(stages):
+        _wait_if_paused(f"{stage_name} 分类已暂停")
         info = layout[stage_name]
         parsed_dir = info["parsed_dir"]
         upload_dir = info["upload_dir"]
         candidates = _apqp_candidate_definitions(stage_name)
         txt_files = _collect_parsed_txt_files(parsed_dir)
+
+        step_weight = 1.0 / total_stages
+        stage_base = idx * step_weight
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base,
+                "message": f"开始分类 {stage_name}",
+            },
+            log_message=f"开始分类 {stage_name}",
+        )
 
         requirement_state: Dict[str, Dict[str, Any]] = {
             name: {"status": "missing", "sources": [], "confidence": 0.0}
@@ -1621,6 +1758,7 @@ async def apqp_classify(request: ApqpClassifyRequest):
         pending_retry: List[Tuple[str, Dict[str, Any]]] = []
 
         def _classify_path(path: str, *, use_fast: bool) -> Dict[str, Any]:
+            _wait_if_paused(f"{stage_name} 分类暂停中")
             invoker = fast_invoker if use_fast else serial_invoker
             return _classify_document(
                 invoker=invoker,
@@ -1631,6 +1769,7 @@ async def apqp_classify(request: ApqpClassifyRequest):
                 tail_chars=max(0, int(request.tail_chars)),
                 record_dir=initial_results_dir,
                 record_prefix=f"{info['slug']}_",
+                check_control=_check_control_flags,
             )
 
         if parallel_enabled and len(txt_files) > 1:
@@ -1652,16 +1791,35 @@ async def apqp_classify(request: ApqpClassifyRequest):
                         documents.append(result)
                     else:
                         pending_retry.append((path, result))
+                    _emit(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base
+                            + step_weight * (len(documents) + len(pending_retry)) / max(len(txt_files), 1),
+                            "message": f"正在分类 {os.path.basename(path)}",
+                        },
+                    )
         else:
-            for file_path in txt_files:
+            for processed, file_path in enumerate(txt_files):
                 result = _classify_path(file_path, use_fast=False)
                 if result.get("status") == "success":
                     documents.append(result)
                 else:
                     pending_retry.append((file_path, result))
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base
+                        + step_weight * (processed + 1) / max(len(txt_files), 1),
+                        "message": f"已处理 {processed + 1}/{len(txt_files)} 个文件",
+                    },
+                )
 
         if pending_retry and serial_chain:
             for path, first_result in pending_retry:
+                _wait_if_paused(f"{stage_name} 重试暂停中")
                 fallback_result = _classify_path(path, use_fast=False)
                 target_result = fallback_result
                 if fallback_result.get("status") != "success":
@@ -1731,6 +1889,15 @@ async def apqp_classify(request: ApqpClassifyRequest):
             else:
                 stage_summary["warning"] = extra
         summary["stages"][stage_name] = stage_summary
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base + step_weight,
+                "message": f"{stage_name} 分类完成",
+            },
+            log_message=f"{stage_name} 分类完成",
+        )
 
     df = _completeness_dataframe(summary)
     serial_label = project_serial or request.session_id
@@ -1765,7 +1932,25 @@ async def apqp_classify(request: ApqpClassifyRequest):
     if summary_warnings:
         summary["warnings"] = summary_warnings
 
+    _emit(
+        {
+            "status": "succeeded",
+            "stage": "completed",
+            "progress": 1.0,
+            "message": "分类完成",
+            "result_files": [str(p) for p in [summary_path, csv_path, xlsx_path] if p],
+            "checkpoint": {"summary": summary},
+        }
+    )
+
     return {"status": "success", "summary": summary}
+
+
+@app.post("/apqp-one-click/classify")
+async def apqp_classify(request: ApqpClassifyRequest):
+    """Classify parsed APQP documents via LLM to assess completeness."""
+
+    return _run_apqp_classification(request)
 
 
 @app.post("/apqp-one-click/clear")
@@ -1863,6 +2048,47 @@ async def list_apqp_one_click_jobs(session_id: Optional[str] = None):
         ]
     records.sort(key=lambda status: status.created_at, reverse=True)
     return records
+
+
+@app.post("/apqp-one-click/classify/jobs", response_model=EnterpriseJobStatus)
+async def start_apqp_classify_job(request: ApqpClassifyRequest) -> EnterpriseJobStatus:
+    record = _start_job(
+        "apqp_one_click_classify",
+        request.session_id,
+        runner_kwargs={
+            "stages": request.stages,
+            "head_chars": request.head_chars,
+            "tail_chars": request.tail_chars,
+            "turbo_mode": request.turbo_mode,
+            "control_job_id": request.control_job_id,
+        },
+    )
+    return _record_to_status(record)
+
+
+@app.get("/apqp-one-click/classify/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_apqp_classify_job(job_id: str):
+    return _get_job_status(job_id, expected_type="apqp_one_click_classify")
+
+
+@app.get("/apqp-one-click/classify/jobs", response_model=List[EnterpriseJobStatus])
+async def list_apqp_classify_jobs(session_id: Optional[str] = None):
+    return _list_jobs("apqp_one_click_classify", session_id)
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="pause", job_type="apqp_one_click_classify")
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="resume", job_type="apqp_one_click_classify")
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+async def stop_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="stop", job_type="apqp_one_click_classify")
 
 
 @app.post("/apqp-one-click/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)

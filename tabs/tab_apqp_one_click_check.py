@@ -45,22 +45,26 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     return name[:available] + "..." + ext
 
 
-def _recover_apqp_job_status(backend_client, session_id: str, job_state_key: str):
+def _recover_apqp_job_status(backend_client, session_id: str, job_state_key: str, job_type: str):
     job_status: Optional[Dict[str, Any]] = None
     job_error: Optional[str] = None
 
     stored_job_id = st.session_state.get(job_state_key)
+    fetch_status = backend_client.get_apqp_job_status if job_type == "parse" else backend_client.get_apqp_classify_job
+    list_jobs = backend_client.list_apqp_jobs if job_type == "parse" else backend_client.list_apqp_classify_jobs
+    not_found_detail = "未找到解析任务" if job_type == "parse" else "未找到任务"
+
     if stored_job_id:
-        result = backend_client.get_apqp_job_status(stored_job_id)
+        result = fetch_status(stored_job_id)
         if isinstance(result, dict) and result.get("job_id"):
             job_status = result
-        elif isinstance(result, dict) and result.get("detail") == "未找到解析任务":
+        elif isinstance(result, dict) and result.get("detail") == not_found_detail:
             st.session_state.pop(job_state_key, None)
         elif isinstance(result, dict) and result.get("status") == "error":
             job_error = str(result.get("message") or "后台任务查询失败")
 
     if job_status is None:
-        result = backend_client.list_apqp_jobs(session_id)
+        result = list_jobs(session_id)
         if isinstance(result, list) and result:
             job_status = result[0]
             if isinstance(job_status, dict) and job_status.get("job_id"):
@@ -226,18 +230,27 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
         classification_state_key = f"apqp_classification_summary_{session_id}"
         turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
-        job_state_key = f"apqp_one_click_job_id_{session_id}"
+        parse_job_state_key = f"apqp_one_click_job_id_{session_id}"
+        classify_job_state_key = f"apqp_one_click_classify_job_id_{session_id}"
         pending_state_key = f"apqp_one_click_pending_{session_id}"
         classified_job_key = f"apqp_one_click_classified_job_{session_id}"
 
-        job_status: Optional[Dict[str, Any]] = None
-        job_error: Optional[str] = None
+        parse_status: Optional[Dict[str, Any]] = None
+        classify_status: Optional[Dict[str, Any]] = None
+        parse_error: Optional[str] = None
+        classify_error: Optional[str] = None
         if backend_ready and backend_client is not None:
-            job_status, job_error = _recover_apqp_job_status(backend_client, session_id, job_state_key)
+            parse_status, parse_error = _recover_apqp_job_status(
+                backend_client, session_id, parse_job_state_key, "parse"
+            )
+            classify_status, classify_error = _recover_apqp_job_status(
+                backend_client, session_id, classify_job_state_key, "classify"
+            )
         elif not backend_ready:
-            job_error = "后台服务未连接"
+            parse_error = classify_error = "后台服务未连接"
 
-        status_str = str(job_status.get("status")) if job_status else ""
+        active_status = classify_status if (classify_status and classify_status.get("status") in {"queued", "running", "paused"}) else parse_status
+        status_str = str(active_status.get("status")) if active_status else ""
         job_paused = status_str == "paused"
         job_active = status_str in {"queued", "running", "paused"}
 
@@ -256,35 +269,43 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 disabled=not backend_ready or job_active,
                 help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
             )
+        active_job_id = active_status.get("job_id") if active_status else None
+        active_job_type = "classify" if active_status is classify_status else ("parse" if active_status is parse_status else None)
         with action_cols[1]:
-            pause_disabled = (not backend_ready) or (not job_status) or job_paused
+            pause_disabled = (not backend_ready) or (not active_status) or job_paused
             if st.button(
                 "暂停解析",
                 key=f"apqp_pause_{session_id}",
                 disabled=pause_disabled,
-                help="请求后台暂停当前解析任务。",
+                help="请求后台暂停当前解析/分类任务。",
             ):
-                if not backend_ready or backend_client is None or not job_status:
-                    st.error("后台服务不可用或暂无解析任务。")
+                if not backend_ready or backend_client is None or not active_status or not active_job_id:
+                    st.error("后台服务不可用或暂无运行中的任务。")
                 else:
-                    resp = backend_client.pause_apqp_job(job_status.get("job_id"))
+                    if active_job_type == "classify":
+                        resp = backend_client.pause_apqp_classify_job(active_job_id)
+                    else:
+                        resp = backend_client.pause_apqp_job(active_job_id)
                     if isinstance(resp, dict) and resp.get("job_id"):
                         st.success("已请求暂停任务。")
                         st.rerun()
                     else:
                         st.error(f"暂停失败：{resp}")
         with action_cols[2]:
-            resume_disabled = (not backend_ready) or (not job_status) or (not job_paused)
+            resume_disabled = (not backend_ready) or (not active_status) or (not job_paused)
             if st.button(
                 "继续解析",
                 key=f"apqp_resume_{session_id}",
                 disabled=resume_disabled,
-                help="恢复已暂停的解析任务。",
+                help="恢复已暂停的解析/分类任务。",
             ):
-                if not backend_ready or backend_client is None or not job_status:
+                if not backend_ready or backend_client is None or not active_status or not active_job_id:
                     st.error("后台服务不可用或暂无解析任务。")
                 else:
-                    resp = backend_client.resume_apqp_job(job_status.get("job_id"))
+                    if active_job_type == "classify":
+                        resp = backend_client.resume_apqp_classify_job(active_job_id)
+                    else:
+                        resp = backend_client.resume_apqp_job(active_job_id)
                     if isinstance(resp, dict) and resp.get("job_id"):
                         st.success("已请求继续任务。")
                         st.rerun()
@@ -315,24 +336,27 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             message = str(parse_job.get("message") or "")
                         st.error(f"无法启动解析：{detail or message or parse_job}")
                     else:
-                        st.session_state[job_state_key] = job_id
+                        st.session_state[parse_job_state_key] = job_id
                         st.session_state[pending_state_key] = {
                             "job_id": job_id,
                             "turbo_mode": selected_turbo,
                         }
                         st.session_state.pop(classification_state_key, None)
                         st.session_state.pop(classified_job_key, None)
+                        st.session_state[parse_job_state_key] = job_id
                         st.success("已提交后台解析任务，稍后将自动更新进度并分类。")
                         st.rerun()
 
         pending_info = st.session_state.get(pending_state_key)
         with classify_log_container:
-            if job_status:
-                progress_bar = st.progress(float(job_status.get("progress") or 0.0))
-                stage_label = job_status.get("stage") or "运行中"
-                message = job_status.get("message") or "正在解析上传文件..."
+            display_status = active_status or classify_status or parse_status
+            if display_status:
+                current_status = str(display_status.get("status"))
+                progress_bar = st.progress(float(display_status.get("progress") or 0.0))
+                stage_label = display_status.get("stage") or "运行中"
+                message = display_status.get("message") or "正在处理..."
                 st.info(f"{stage_label} · {message}")
-                logs = job_status.get("logs") or []
+                logs = display_status.get("logs") or []
                 if logs:
                     last_log = logs[-1]
                     st.caption(
@@ -347,42 +371,56 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             level = entry.get("level") or "info"
                             log_msg = entry.get("message") or ""
                             st.write(f"[{ts}] {level}: {log_msg}")
-                if status_str == "failed":
-                    err = job_status.get("error") or job_status.get("message") or "解析任务失败"
+                if current_status == "failed":
+                    err = display_status.get("error") or display_status.get("message") or "任务失败"
                     st.error(err)
                     st.session_state.pop(pending_state_key, None)
-                elif status_str == "succeeded" and pending_info and pending_info.get("job_id") == job_status.get("job_id"):
-                    already_classified = st.session_state.get(classified_job_key) == job_status.get("job_id")
-                    if not already_classified:
-                        attempt_summary: Optional[Dict[str, Any]] = None
-                        last_error: str = ""
-                        for idx in range(2):
-                            if idx > 0:
-                                st.warning("分类失败，正在自动重试…")
-                                time.sleep(1.0)
-                            with st.spinner("解析完成，正在调用大模型分类..."):
-                                response = backend_client.classify_apqp_files(
-                                    session_id, turbo_mode=bool(pending_info.get("turbo_mode"))
-                                )
-                            if isinstance(response, dict) and response.get("status") == "success":
-                                attempt_summary = response.get("summary") or {}
-                                break
-                            if isinstance(response, dict):
-                                last_error = str(response.get("detail") or response.get("message") or response)
-                            else:
-                                last_error = str(response)
-                        if attempt_summary is not None:
-                            st.session_state[classification_state_key] = attempt_summary
-                            st.session_state[classified_job_key] = job_status.get("job_id")
+                elif current_status == "succeeded":
+                    if (
+                        classify_status
+                        and classify_status.get("status") == "succeeded"
+                        and st.session_state.get(classified_job_key) != classify_status.get("job_id")
+                    ):
+                        checkpoint = (classify_status.get("metadata") or {}).get("checkpoint") or {}
+                        summary = checkpoint.get("summary") if isinstance(checkpoint, dict) else None
+                        if summary:
+                            st.session_state[classification_state_key] = summary
+                            st.session_state[classified_job_key] = classify_status.get("job_id")
                             st.success("分类完成，结果如下。")
                         else:
-                            st.error(f"分类失败：{last_error or '未知错误'}")
+                            st.success("分类完成，可在结果文件夹查看详情。")
                         st.session_state.pop(pending_state_key, None)
-                elif status_str == "succeeded":
-                    st.success("解析已完成，可重新运行分类或查看结果。")
+                    elif (
+                        parse_status
+                        and display_status.get("job_id") == parse_status.get("job_id")
+                        and pending_info
+                        and pending_info.get("job_id") == parse_status.get("job_id")
+                        and not st.session_state.get(classify_job_state_key)
+                    ):
+                        with st.spinner("解析完成，正在创建分类任务…"):
+                            classify_resp = backend_client.start_apqp_classify_job(
+                                session_id,
+                                turbo_mode=bool(pending_info.get("turbo_mode")),
+                                control_job_id=parse_status.get("job_id"),
+                            )
+                        if isinstance(classify_resp, dict) and classify_resp.get("job_id"):
+                            st.session_state[classify_job_state_key] = classify_resp.get("job_id")
+                            st.info("已启动分类任务，稍后将更新进度…")
+                            st.rerun()
+                        else:
+                            detail = ""
+                            if isinstance(classify_resp, dict):
+                                detail = str(classify_resp.get("detail") or classify_resp.get("message") or "")
+                            st.error(f"无法启动分类：{detail or classify_resp}")
+                        st.session_state.pop(pending_state_key, None)
+                    else:
+                        st.success("任务已完成。")
                 st.divider()
-            elif job_error:
-                st.warning(job_error)
+            else:
+                if parse_error:
+                    st.warning(parse_error)
+                if classify_error:
+                    st.warning(classify_error)
 
         classification_summary = st.session_state.get(classification_state_key)
         if classification_summary:
