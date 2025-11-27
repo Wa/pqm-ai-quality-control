@@ -1121,6 +1121,11 @@ def _prepare_apqp_llm_providers(turbo_mode: bool) -> Tuple[List[_LLMProvider], L
         ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
     ]
 
+    turbo_only_models: List[Tuple[str, str]] = [
+        ("ModelScope GLM-4.6", "ZhipuAI/GLM-4.6"),
+        ("ModelScope Qwen3-32B", "Qwen/Qwen3-32B"),
+    ]
+
     def _mk_modelscope_provider(label: str, model_id: str) -> _LLMProvider:
         return _LLMProvider(
             label=label,
@@ -1172,7 +1177,11 @@ def _prepare_apqp_llm_providers(turbo_mode: bool) -> Tuple[List[_LLMProvider], L
 
     modelscope_providers: List[_LLMProvider] = []
     if modelscope_api_key:
-        for label, model_id in ms_models:
+        ms_candidates = list(ms_models)
+        if turbo_mode:
+            ms_candidates.extend(turbo_only_models)
+
+        for label, model_id in ms_candidates:
             try:
                 provider = _mk_modelscope_provider(label, model_id)
                 # Validate factory lazily by instantiating once
