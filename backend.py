@@ -1207,6 +1207,49 @@ def _prepare_apqp_llm_providers(turbo_mode: bool) -> Tuple[List[_LLMProvider], L
     return fast_providers, serial_chain, warnings
 
 
+def _extract_chat_content(response: Any) -> str:
+    """Return message content from Ollama/ModelScope responses.
+
+    Supports both dict-based responses and object responses (e.g., Pydantic
+    models) that expose ``message.content`` or ``model_dump``/``dict``.
+    """
+
+    if response is None:
+        return ""
+
+    # Object with ``message`` attribute (preferred for Ollama client)
+    message = getattr(response, "message", None)
+    if message is not None:
+        content = getattr(message, "content", None)
+        if content:
+            return content
+        if isinstance(message, dict):
+            content = message.get("content")
+            if content:
+                return str(content)
+
+    # Dict-like fallbacks
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(response, dict):
+        data = response
+    else:
+        if hasattr(response, "model_dump"):
+            try:
+                data = response.model_dump()
+            except Exception:
+                data = None
+        if data is None and hasattr(response, "dict"):
+            try:
+                data = response.dict()
+            except Exception:
+                data = None
+
+    if data is not None:
+        return str((data.get("message") or {}).get("content") or "")
+
+    return ""
+
+
 def _invoke_with_providers(providers: List[_LLMProvider], messages: List[Dict[str, str]]) -> Tuple[str, str, str]:
     """Try providers in order; returns (raw_content, provider_label, model)."""
 
@@ -1225,9 +1268,7 @@ def _invoke_with_providers(providers: List[_LLMProvider], messages: List[Dict[st
                         messages=messages,
                         options={"num_ctx": 40001, "temperature": 0, "top_p": 0},
                     )
-                    content = ""
-                    if isinstance(response, dict):
-                        content = (response.get("message") or {}).get("content") or ""
+                    content = _extract_chat_content(response)
                     if content:
                         return content, provider.label, provider.model
                     attempts.append(f"{provider.label} 响应为空")
@@ -1237,9 +1278,7 @@ def _invoke_with_providers(providers: List[_LLMProvider], messages: List[Dict[st
                         messages=messages,
                         options={"num_ctx": 40001},
                     )
-                    content = ""
-                    if isinstance(response, dict):
-                        content = (response.get("message") or {}).get("content") or ""
+                    content = _extract_chat_content(response)
                     if content:
                         return content, provider.label, provider.model
                     attempts.append(f"{provider.label} 响应为空")
