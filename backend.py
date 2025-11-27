@@ -659,6 +659,55 @@ def _collect_parsed_txt_files(folder: str) -> List[str]:
     return sorted(paths)
 
 
+def _source_label_from_parsed_file(file_path: str, upload_dir: str) -> str:
+    """Return a user-facing source label for a parsed txt, preferring upload names."""
+
+    base_name = os.path.basename(file_path)
+    stem = base_name[:-4] if base_name.lower().endswith(".txt") else base_name
+
+    def _first_marker() -> str:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+                for _ in range(50):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    match = re.search(r"【来源文件:\s*(.+?)】", line)
+                    if match:
+                        return match.group(1).strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _match_upload(target: str) -> str:
+        try:
+            for name in os.listdir(upload_dir or "."):
+                if not os.path.isfile(os.path.join(upload_dir, name)):
+                    continue
+                if name.lower() == target.lower():
+                    return name
+        except Exception:
+            return target
+        return target
+
+    marker = _first_marker()
+    annotated_file = marker
+    annotated_sheet = ""
+    if marker and "/" in marker:
+        parts = marker.split("/", 1)
+        annotated_file = parts[0].strip()
+        annotated_sheet = parts[1].strip()
+
+    if "_SHEET_" in stem:
+        prefix, sheet_token = stem.split("_SHEET_", 1)
+        upload_name = _match_upload(annotated_file or prefix)
+        sheet_label = annotated_sheet or sheet_token
+        return f"{upload_name}(工作表：{sheet_label})"
+
+    upload_name = _match_upload(annotated_file or stem)
+    return upload_name
+
+
 def _resolve_control_dir(job_id: Optional[str], *, expected_type: Optional[str] = None, session_id: Optional[str] = None) -> str:
     """Lookup control directory for a given job id if still cached in memory."""
 
@@ -1754,6 +1803,16 @@ def _run_apqp_classification(
             for name in (STAGE_REQUIREMENTS.get(stage_name) or tuple())
         }
 
+        upload_files: List[str] = []
+        try:
+            upload_files = [
+                name
+                for name in os.listdir(upload_dir)
+                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
+            ]
+        except Exception:
+            upload_files = []
+
         documents: List[Dict[str, Any]] = []
         pending_retry: List[Tuple[str, Dict[str, Any]]] = []
 
@@ -1838,6 +1897,7 @@ def _run_apqp_classification(
             suggested: List[str] = []
             file_path = result.get("path", "")
             if result.get("status") == "success":
+                result["source_label"] = _source_label_from_parsed_file(result.get("path", ""), upload_dir)
                 names = []
                 primary = result.get("primary_type") or ""
                 if primary and primary.lower() != "none":
@@ -1854,10 +1914,16 @@ def _run_apqp_classification(
                     state = requirement_state[req]
                     state["status"] = "present"
                     state["confidence"] = max(state.get("confidence", 0.0), result.get("confidence") or 0.0)
-                    state.setdefault("sources", []).append(result.get("file_name") or os.path.basename(file_path))
+                    source_label = result.get("source_label") or result.get("file_name") or os.path.basename(file_path)
+                    state.setdefault("sources", []).append(source_label)
             result["matched_requirements"] = matched
             if suggested:
                 result["suggested_types"] = suggested
+
+        for state in requirement_state.values():
+            sources = state.get("sources") or []
+            if sources:
+                state["sources"] = sorted(dict.fromkeys(sources))
 
         present_count = sum(1 for item in requirement_state.values() if item.get("status") == "present")
         missing_count = len(requirement_state) - present_count
@@ -1881,7 +1947,10 @@ def _run_apqp_classification(
         }
 
         if not txt_files:
-            stage_summary["warning"] = "未找到解析后的文本文件，请先执行解析。"
+            if upload_files:
+                stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
+            else:
+                stage_summary["warning"] = "未检测到上传文件，本阶段交付物均标记为缺失。"
         if not candidates:
             extra = "当前阶段未配置应交付物列表。"
             if stage_summary.get("warning"):

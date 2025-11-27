@@ -141,7 +141,7 @@ def _render_classification_results(summary: Dict[str, Any]) -> None:
             if not docs:
                 st.write("暂无文件分类结果。")
             for doc in docs:
-                title = doc.get("file_name") or os.path.basename(doc.get("path", ""))
+                title = doc.get("source_label") or doc.get("file_name") or os.path.basename(doc.get("path", ""))
                 status = doc.get("status") or ""
                 suffix = "" if status == "success" else "（失败）"
                 with st.expander(f"📄 {title}{suffix}", expanded=False):
