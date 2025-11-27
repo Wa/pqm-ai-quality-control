@@ -1051,24 +1051,23 @@ def _completeness_dataframe(summary: Dict[str, Any]) -> pd.DataFrame:
         stage_warning = stage_data.get("warning") or ""
         for item in requirements:
             status_text = "已覆盖" if item.get("status") == "present" else "缺失"
-            note_parts: List[str] = []
             sources = item.get("sources") or []
-            if sources:
-                note_parts.append(f"来源：{', '.join(sources)}")
+            sources_text = "\n".join(sources)
+            confidence_text = ""
             try:
                 conf_val = float(item.get("confidence", 0.0))
                 if conf_val > 0:
-                    note_parts.append(f"置信度 {conf_val:.2f}")
+                    confidence_text = f"{conf_val:.2f}"
             except (TypeError, ValueError):
                 pass
-            if stage_warning:
-                note_parts.append(stage_warning)
             records.append(
                 {
                     "阶段": stage_name,
                     "交付物": item.get("name") or "",
                     "状态": status_text,
-                    "备注": "；".join(note_parts),
+                    "来源": sources_text,
+                    "置信度": confidence_text,
+                    "备注": stage_warning,
                 }
             )
 
@@ -1946,11 +1945,8 @@ def _run_apqp_classification(
             },
         }
 
-        if not txt_files:
-            if upload_files:
-                stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
-            else:
-                stage_summary["warning"] = "未检测到上传文件，本阶段交付物均标记为缺失。"
+        if not txt_files and upload_files:
+            stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
         if not candidates:
             extra = "当前阶段未配置应交付物列表。"
             if stage_summary.get("warning"):
@@ -1986,7 +1982,7 @@ def _run_apqp_classification(
 
     try:
         if df.empty:
-            df = pd.DataFrame(columns=["阶段", "交付物", "状态", "备注"])
+            df = pd.DataFrame(columns=["阶段", "交付物", "状态", "来源", "置信度", "备注"])
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
         summary["csv_file"] = str(csv_path)
     except Exception as error:
