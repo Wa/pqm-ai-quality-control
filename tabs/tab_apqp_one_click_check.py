@@ -378,7 +378,13 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             display_status = active_status or classify_status or parse_status
             if display_status:
                 current_status = str(display_status.get("status"))
-                progress_bar = st.progress(float(display_status.get("progress") or 0.0))
+                progress_val = float(display_status.get("progress") or 0.0)
+                progress_pct = int(progress_val * 100)
+                bar_col, pct_col = st.columns([9, 1])
+                with bar_col:
+                    st.progress(progress_val)
+                with pct_col:
+                    st.markdown(f"**{progress_pct}%**")
                 stage_label = display_status.get("stage") or "运行中"
                 message = display_status.get("message") or "正在处理..."
                 st.info(f"{stage_label} · {message}")
