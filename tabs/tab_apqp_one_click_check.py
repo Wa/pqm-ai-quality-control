@@ -544,13 +544,11 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 st.write("（暂无分析结果）")
             else:
                 for info in result_files:
-                    cols = st.columns([5, 2, 3, 2])
+                    cols = st.columns([6, 2])
                     cols[0].write(f"📑 {info['name']}")
-                    cols[1].write(_format_file_size(int(info["size"])))
-                    cols[2].write(_format_timestamp(float(info["modified"])))
                     data = _load_file_bytes(info.get("path") or "")
                     disabled = data is None or not backend_ready
-                    cols[3].download_button(
+                    cols[1].download_button(
                         "⬇️ 下载",
                         data=data or b"",
                         file_name=info.get("name") or "result",
