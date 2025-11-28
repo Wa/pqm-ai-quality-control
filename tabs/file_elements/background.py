@@ -58,6 +58,7 @@ def run_file_elements_job(
     profile_payload: Dict[str, object],
     source_paths: Optional[Sequence[str]] = None,
     turbo_mode: bool = False,
+    initial_results_dir: Optional[str] = None,
     check_control: Optional[Callable[[], Dict[str, bool]]] = None,
 ) -> None:
     """Execute the文件要素检查 workflow inside the backend worker."""
@@ -75,7 +76,7 @@ def run_file_elements_job(
     generated_root = str(CONFIG["directories"]["generated_files"])
     source_dir = os.path.join(uploads_root, session_id, "elements")
     parsed_dir = os.path.join(generated_root, session_id, "file_elements_check", "parsed_files")
-    initial_results_dir = os.path.join(
+    initial_results_dir = initial_results_dir or os.path.join(
         generated_root, session_id, "file_elements_check", "initial_results"
     )
     export_dir = os.path.join(generated_root, session_id, "file_elements_check")

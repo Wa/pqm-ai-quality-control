@@ -627,6 +627,10 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.subheader("🧩 交付物要素自动评估")
 
             elements_turbo = bool(classification_summary.get("turbo_mode"))
+            elements_initial_results_dir = os.path.join(
+                generated_root, session_id, "APQP_one_click_check", "initial_results_element"
+            )
+            os.makedirs(elements_initial_results_dir, exist_ok=True)
             stage_options = classification_summary.get("stage_order") or list(STAGE_ORDER)
             if not stage_options:
                 stage_options = list(PHASE_TO_DELIVERABLES.keys())
@@ -720,6 +724,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             "profile": _profile_to_payload(profile),
                             "source_paths": source_paths,
                             "turbo_mode": elements_turbo,
+                            "initial_results_dir": elements_initial_results_dir,
                         }
                         response = backend_client.start_file_elements_job(payload)
                         if isinstance(response, dict) and response.get("job_id"):
