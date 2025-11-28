@@ -113,6 +113,14 @@ def _fetch_result_files(backend_client, session_id: str) -> List[Dict[str, objec
     return sorted(normalized, key=lambda item: item["modified"], reverse=True)
 
 
+def _load_file_bytes(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except Exception:
+        return None
+
+
 def _render_classification_results(summary: Dict[str, Any]) -> None:
     """Render APQP classification summary in the UI."""
 
@@ -475,6 +483,26 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         detail = str(response.get("detail") or "")
                         message = str(response.get("message") or "")
                     st.error(f"删除失败：{detail or message or response}")
+        if st.button(
+            "🗑️ 删除全部分析结果",
+            key=f"apqp_clear_results_{session_id}",
+            disabled=not backend_ready,
+        ):
+            if not backend_ready or backend_client is None:
+                st.error("后台服务不可用，无法删除分析结果。")
+            else:
+                response = backend_client.clear_apqp_results(session_id)
+                if isinstance(response, dict) and response.get("status") == "success":
+                    deleted = int(response.get("deleted") or 0)
+                    st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
+                    st.rerun()
+                else:
+                    detail = ""
+                    message = ""
+                    if isinstance(response, dict):
+                        detail = str(response.get("detail") or "")
+                        message = str(response.get("message") or "")
+                    st.error(f"删除失败：{detail or message or response}")
         tab_labels = list(STAGE_ORDER) + ["分析结果"]
         stage_tabs = st.tabs(tab_labels)
         for idx, stage_name in enumerate(STAGE_ORDER):
@@ -512,35 +540,22 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
         with stage_tabs[-1]:
             result_files = _fetch_result_files(backend_client, session_id) if backend_client else []
-            if st.button(
-                "🗑️ 删除全部分析结果",
-                key=f"apqp_clear_results_{session_id}",
-                disabled=not backend_ready,
-            ):
-                if not backend_ready or backend_client is None:
-                    st.error("后台服务不可用，无法删除分析结果。")
-                else:
-                    response = backend_client.clear_apqp_results(session_id)
-                    if isinstance(response, dict) and response.get("status") == "success":
-                        deleted = int(response.get("deleted") or 0)
-                        st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
-                        st.rerun()
-                    else:
-                        detail = ""
-                        message = ""
-                        if isinstance(response, dict):
-                            detail = str(response.get("detail") or "")
-                            message = str(response.get("message") or "")
-                        st.error(f"删除失败：{detail or message or response}")
-
             if not result_files:
                 st.write("（暂无分析结果）")
             else:
                 for info in result_files:
-                    display_name = _truncate_filename(info["name"])
-                    with st.expander(f"📑 {display_name}", expanded=False):
-                        st.write(f"**文件名:** {info['name']}")
-                        st.write(f"**大小:** {_format_file_size(int(info['size']))}")
-                        st.write(f"**修改时间:** {_format_timestamp(float(info['modified']))}")
-                        st.caption(info.get("path") or "")
+                    cols = st.columns([5, 2, 3, 2])
+                    cols[0].write(f"📑 {info['name']}")
+                    cols[1].write(_format_file_size(int(info["size"])))
+                    cols[2].write(_format_timestamp(float(info["modified"])))
+                    data = _load_file_bytes(info.get("path") or "")
+                    disabled = data is None or not backend_ready
+                    cols[3].download_button(
+                        "⬇️ 下载",
+                        data=data or b"",
+                        file_name=info.get("name") or "result",
+                        mime="application/octet-stream",
+                        disabled=disabled,
+                        key=f"apqp_result_download_{info.get('name')}_{session_id}",
+                    )
 
