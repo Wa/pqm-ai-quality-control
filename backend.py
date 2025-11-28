@@ -146,6 +146,7 @@ class FileElementsJobRequest(BaseModel):
     source_paths: Optional[List[str]] = None
     turbo_mode: bool = False
     initial_results_dir: Optional[str] = None
+    result_root_dir: Optional[str] = None
 
 
 class ApqpParseRequest(BaseModel):
@@ -2526,6 +2527,7 @@ async def start_file_elements_job(request: FileElementsJobRequest):
             "source_paths": request.source_paths or [],
             "turbo_mode": bool(request.turbo_mode),
             "initial_results_dir": request.initial_results_dir,
+            "result_root_dir": request.result_root_dir,
         },
     )
     return _record_to_status(record)

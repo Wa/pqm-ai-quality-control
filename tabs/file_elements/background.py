@@ -59,6 +59,7 @@ def run_file_elements_job(
     source_paths: Optional[Sequence[str]] = None,
     turbo_mode: bool = False,
     initial_results_dir: Optional[str] = None,
+    result_root_dir: Optional[str] = None,
     check_control: Optional[Callable[[], Dict[str, bool]]] = None,
 ) -> None:
     """Execute the文件要素检查 workflow inside the backend worker."""
@@ -79,8 +80,9 @@ def run_file_elements_job(
     initial_results_dir = initial_results_dir or os.path.join(
         generated_root, session_id, "file_elements_check", "initial_results"
     )
-    export_dir = os.path.join(generated_root, session_id, "file_elements_check")
-    final_results_dir = os.path.join(generated_root, session_id, "file_elements_check", "final_results")
+    base_results_root = result_root_dir or os.path.join(generated_root, session_id, "file_elements_check")
+    export_dir = base_results_root
+    final_results_dir = os.path.join(base_results_root, "final_results")
 
     for path in (source_dir, parsed_dir, initial_results_dir, export_dir, final_results_dir):
         os.makedirs(path, exist_ok=True)
