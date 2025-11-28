@@ -144,6 +144,7 @@ class FileElementsJobRequest(BaseModel):
     session_id: str
     profile: FileElementsProfilePayload
     source_paths: Optional[List[str]] = None
+    turbo_mode: bool = False
 
 
 class ApqpParseRequest(BaseModel):
@@ -2513,6 +2514,7 @@ async def start_file_elements_job(request: FileElementsJobRequest):
     metadata = {
         "stage": request.profile.stage or "",
         "deliverable": request.profile.name,
+        "turbo_mode": bool(request.turbo_mode),
     }
     record = _start_job(
         "file_elements",
@@ -2521,6 +2523,7 @@ async def start_file_elements_job(request: FileElementsJobRequest):
         runner_kwargs={
             "profile_payload": profile_payload,
             "source_paths": request.source_paths or [],
+            "turbo_mode": bool(request.turbo_mode),
         },
     )
     return _record_to_status(record)

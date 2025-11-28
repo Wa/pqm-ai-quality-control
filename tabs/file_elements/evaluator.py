@@ -22,6 +22,7 @@ from .config import (
     SEVERITY_ORDER,
 )
 from ..shared.common import report_exception
+from ..shared.modelscope_client import ModelScopeClient
 from ..shared.file_conversion import (
     process_excel_folder,
     process_pdf_folder,
@@ -35,6 +36,15 @@ EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm"}
 PREFERRED_EXPORT_NAME = "file_elements_evaluation.json"
 GPT_OSS_MODEL = CONFIG["llm"]["ollama_model"]
 GPT_OSS_OPTIONS = {"num_ctx": 40001, "temperature": 0.3}
+MODELSCOPE_MODELS = (
+    ("ModelScope DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.2-Exp"),
+    ("ModelScope DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),
+    ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
+)
+MODELSCOPE_TURBO_ONLY_MODELS = (
+    ("ModelScope GLM-4.6", "ZhipuAI/GLM-4.6"),
+    ("ModelScope Qwen3-32B", "Qwen/Qwen3-32B"),
+)
 LONG_TEXT_THRESHOLD = 20_000
 SUMMARY_CHUNK_SIZE = 8_000
 SUMMARY_CHUNK_OVERLAP = 500
@@ -304,11 +314,19 @@ class EvaluationResult:
 class EvaluationOrchestrator:
     """Encapsulate requirement evaluation for a given deliverable."""
 
-    def __init__(self, profile: DeliverableProfile, *, initial_results_dir: str | None = None):
+    def __init__(
+        self,
+        profile: DeliverableProfile,
+        *,
+        initial_results_dir: str | None = None,
+        turbo_mode: bool = False,
+    ):
         self.profile = profile
         self.initial_results_dir = initial_results_dir
+        self.turbo_mode = turbo_mode
         self._ollama_client: Optional[OllamaClient] = None
         self._ollama_init_error: Optional[Exception] = None
+        self._llm_warnings: List[str] = []
 
     def evaluate(
         self,
@@ -413,12 +431,10 @@ class EvaluationOrchestrator:
         self, document_text: str, *, source_file: str | None = None
     ) -> Tuple[List[Dict[str, str]], List[str]]:
         warnings: List[str] = []
-        client = self._get_ollama_client()
-        if client is None:
-            message = "未能连接本地 gpt-oss，请联系系统管理员。"
-            if self._ollama_init_error:
-                message += f" ({self._ollama_init_error})"
-            warnings.append(message)
+        candidates, init_warnings = self._prepare_llm_clients()
+        warnings.extend(init_warnings)
+        if not candidates:
+            warnings.append("未能初始化可用的大模型通道，请检查配置。")
             return [], warnings
 
         requirements_payload = self._build_requirements_payload()
@@ -434,26 +450,42 @@ class EvaluationOrchestrator:
             "示例输出：{\"items\": [{\"name\": \"要素\", \"status\": \"pass\", \"message\": \"说明\", \"evidence\": \"引用\"}]}"
         )
 
-        try:
-            response_text = self._chat_completion(
-                client,
-                system_prompt=LLM_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-            )
-        except Exception as error:  # pragma: no cover - network/runtime failures
-            report_exception("调用 gpt-oss 失败", error, level="warning")
-            warnings.append(f"调用 gpt-oss 失败：{error}")
+        response_text = ""
+        last_error: Optional[Exception] = None
+        for engine, label, client, model_name in candidates:
+            try:
+                response_text = self._chat_completion(
+                    engine,
+                    client,
+                    model_name,
+                    system_prompt=LLM_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                )
+                if response_text.strip():
+                    break
+            except Exception as error:  # pragma: no cover - runtime failures
+                last_error = error
+                report_exception(f"调用 {label} 失败", error, level="warning")
+                warnings.append(f"调用 {label} 失败：{error}")
+                response_text = ""
+                continue
+
+        if not response_text.strip():
+            if last_error:
+                warnings.append(f"全部模型调用失败：{last_error}")
+            else:
+                warnings.append("大模型未返回内容，请稍后重试。")
             return [], warnings
 
         self._save_prompt_and_response(source_file, user_prompt, response_text)
 
         if not response_text.strip():
-            warnings.append("gpt-oss 未返回内容，请稍后重试。")
+            warnings.append("大模型未返回内容，请稍后重试。")
             return [], warnings
 
         parsed_items = _parse_llm_items(response_text)
         if not parsed_items:
-            warnings.append("gpt-oss 返回内容无法解析为JSON，请检查交付物内容或稍后重试。")
+            warnings.append("模型返回内容无法解析为JSON，请检查交付物内容或稍后重试。")
         return parsed_items, warnings
 
     def _save_prompt_and_response(
@@ -477,12 +509,10 @@ class EvaluationOrchestrator:
         self, document_text: str
     ) -> Tuple[str, List[str], int]:
         warnings: List[str] = []
-        client = self._get_ollama_client()
-        if client is None:
-            message = "未能连接本地 gpt-oss，请联系系统管理员（摘要阶段）。"
-            if self._ollama_init_error:
-                message += f" ({self._ollama_init_error})"
-            warnings.append(message)
+        candidates, init_warnings = self._prepare_llm_clients()
+        warnings.extend(init_warnings)
+        if not candidates:
+            warnings.append("未能初始化可用的大模型通道，请检查配置。")
             return "", warnings, 0
 
         chunks = _chunk_text(
@@ -510,15 +540,29 @@ class EvaluationOrchestrator:
                 "只需返回概述和要点，勿添加其它文本。"
             )
 
-            try:
-                response_text = self._chat_completion(
-                    client,
-                    system_prompt=LLM_SUMMARY_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                )
-            except Exception as error:  # pragma: no cover - network/runtime failures
-                report_exception("调用 gpt-oss 摘要失败", error, level="warning")
-                warnings.append(f"第{index}段摘要调用失败：{error}")
+            response_text = ""
+            last_error: Optional[Exception] = None
+            for engine, label, client, model_name in candidates:
+                try:
+                    response_text = self._chat_completion(
+                        engine,
+                        client,
+                        model_name,
+                        system_prompt=LLM_SUMMARY_SYSTEM_PROMPT,
+                        user_prompt=user_prompt,
+                    )
+                    if response_text.strip():
+                        break
+                except Exception as error:  # pragma: no cover - network/runtime failures
+                    last_error = error
+                    report_exception(f"调用 {label} 摘要失败", error, level="warning")
+                    warnings.append(f"第{index}段摘要调用失败：{error}")
+                    response_text = ""
+                    continue
+
+            if not response_text.strip():
+                if last_error:
+                    warnings.append(f"第{index}段摘要未获取有效回复：{last_error}")
                 continue
 
             summary_text = _parse_summary_response(response_text)
@@ -531,6 +575,56 @@ class EvaluationOrchestrator:
         if not combined:
             warnings.append("长文摘要阶段未获得有效内容，将直接使用原文评估。")
         return combined, warnings, total
+
+    def _prepare_llm_clients(self) -> Tuple[List[Tuple[str, str, object, str]], List[str]]:
+        warnings: List[str] = []
+        candidates: List[Tuple[str, str, object, str]] = []
+        llm_settings = CONFIG.get("llm", {})
+
+        modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or llm_settings.get("modelscope_api_key")
+        modelscope_base = llm_settings.get("modelscope_base_url") or "https://api-inference.modelscope.cn/v1"
+        cloud_host = llm_settings.get("ollama_cloud_host")
+        cloud_api_key = llm_settings.get("ollama_cloud_api_key")
+
+        def _append_modelscope(label: str, model_id: str) -> None:
+            try:
+                client = ModelScopeClient(
+                    api_key=modelscope_api_key or "",
+                    model=model_id,
+                    base_url=modelscope_base,
+                    timeout=900.0,
+                )
+                candidates.append(("modelscope", label, client, model_id))
+            except Exception as error:  # pragma: no cover - network/runtime failures
+                warnings.append(f"{label} 初始化失败：{error}")
+
+        if self.turbo_mode:
+            if modelscope_api_key:
+                for label, model_id in list(MODELSCOPE_MODELS) + list(MODELSCOPE_TURBO_ONLY_MODELS):
+                    _append_modelscope(label, model_id)
+            else:
+                warnings.append("未配置 ModelScope API Key，无法使用ModelScope通道。")
+
+            if cloud_host and cloud_api_key:
+                try:
+                    cloud_client = OllamaClient(
+                        host=cloud_host, headers={"Authorization": f"Bearer {cloud_api_key}"}
+                    )
+                    candidates.append(("ollama", "云端 gpt-oss-20b", cloud_client, "gpt-oss:20b-cloud"))
+                except Exception as error:  # pragma: no cover
+                    warnings.append(f"初始化云端 Ollama 失败：{error}")
+
+            local_client = self._get_ollama_client()
+            if local_client is not None:
+                candidates.append(("ollama", "本地 gpt-oss", local_client, GPT_OSS_MODEL))
+        else:
+            local_client = self._get_ollama_client()
+            if local_client is not None:
+                candidates.append(("ollama", "本地 gpt-oss", local_client, GPT_OSS_MODEL))
+            if modelscope_api_key:
+                for label, model_id in MODELSCOPE_MODELS:
+                    _append_modelscope(label, model_id)
+        return candidates, warnings
 
     def _get_ollama_client(self) -> Optional[OllamaClient]:
         if self._ollama_client is not None:
@@ -548,14 +642,31 @@ class EvaluationOrchestrator:
 
     def _chat_completion(
         self,
-        client: OllamaClient,
+        engine: str,
+        client: object,
+        model: str,
         *,
         system_prompt: str,
         user_prompt: str,
     ) -> str:
+        if engine == "modelscope":
+            response = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                stream=False,
+                options=GPT_OSS_OPTIONS,
+            )
+            message = response.get("message") if isinstance(response, dict) else None
+            if isinstance(message, dict):
+                return str(message.get("content") or "")
+            return ""
+
         response_text = ""
         for chunk in client.chat(
-            model=GPT_OSS_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -563,9 +674,11 @@ class EvaluationOrchestrator:
             stream=True,
             options=GPT_OSS_OPTIONS,
         ):
-            piece = chunk.get("message", {}).get("content") or chunk.get("response") or ""
+            piece = chunk.get("message", {}).get("content") if isinstance(chunk, dict) else None
+            if not piece and isinstance(chunk, dict):
+                piece = chunk.get("response") or ""
             if piece:
-                response_text += piece
+                response_text += str(piece)
         return response_text
 
 

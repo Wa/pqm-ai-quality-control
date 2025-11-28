@@ -418,9 +418,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         elements_debug_cache_key = f"{elements_fragment_state_key}_details"
         elements_result_state_key = f"apqp_one_click_elements_result_{session_id}"
         elements_loaded_path_key = f"apqp_one_click_elements_loaded_{session_id}"
-        elements_stage_state_key = f"apqp_one_click_elements_stage_{session_id}"
         elements_source_state_key = f"apqp_one_click_elements_sources_{session_id}"
         elements_result_cache_key = f"apqp_one_click_elements_result_cache_{session_id}"
+        elements_autorun_key = f"apqp_one_click_elements_autorun_{session_id}"
         pending_state_key = f"apqp_one_click_pending_{session_id}"
         classified_job_key = f"apqp_one_click_classified_job_{session_id}"
 
@@ -453,7 +453,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         action_cols = st.columns([1, 0.6, 0.6])
         with action_cols[0]:
             classify_button = st.button(
-                "运行智能齐套性识别",
+                "运行",
                 key=f"apqp_classify_{session_id}",
                 disabled=not backend_ready or job_active,
                 help="调用大模型基于内容进行归类，支持1对多、多对一匹配。",
@@ -626,226 +626,211 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.divider()
             st.subheader("🧩 交付物要素自动评估")
 
+            elements_turbo = bool(classification_summary.get("turbo_mode"))
             stage_options = classification_summary.get("stage_order") or list(STAGE_ORDER)
             if not stage_options:
                 stage_options = list(PHASE_TO_DELIVERABLES.keys())
+
             if stage_options:
-                if elements_stage_state_key not in st.session_state:
-                    st.session_state[elements_stage_state_key] = stage_options[0]
-                elif st.session_state[elements_stage_state_key] not in stage_options:
-                    st.session_state[elements_stage_state_key] = stage_options[0]
-
-                selected_stage = st.selectbox(
-                    "选择阶段以启动要素评估",
-                    options=stage_options,
-                    key=elements_stage_state_key,
-                )
-                stage_summary = (classification_summary.get("stages") or {}).get(selected_stage, {})
-                profile, profile_label = _resolve_stage_profile(selected_stage)
-                if profile:
-                    st.caption(
-                        f"将使用交付物【{profile_label or profile.name}】的要素清单进行评估。"
-                    )
-                else:
-                    st.warning("当前阶段未配置要素模板，无法启动评估。")
-
-                source_paths = _gather_stage_sources(stage_summary)
-                if elements_parsed_dir and elements_parsed_dir not in source_paths:
-                    os.makedirs(elements_parsed_dir, exist_ok=True)
-                st.session_state[elements_source_state_key] = source_paths
-
-                elements_job_status: Optional[Dict[str, Any]] = None
-                elements_job_error: Optional[str] = None
-                if backend_ready and backend_client is not None:
-                    stored_elements_job = st.session_state.get(elements_job_state_key)
-                    if stored_elements_job:
-                        resp = backend_client.get_file_elements_job(stored_elements_job)
-                        if isinstance(resp, dict) and resp.get("job_id"):
-                            elements_job_status = resp
-                        elif isinstance(resp, dict) and resp.get("detail") == "未找到任务":
-                            st.session_state.pop(elements_job_state_key, None)
-                        elif isinstance(resp, dict) and resp.get("status") == "error":
-                            elements_job_error = str(resp.get("message") or "后台任务查询失败")
-
-                    if elements_job_status is None:
-                        resp = backend_client.list_file_elements_jobs(session_id)
-                        if isinstance(resp, list) and resp:
-                            for status in resp:
-                                if not isinstance(status, dict):
-                                    continue
-                                metadata = status.get("metadata") or {}
-                                if str(metadata.get("stage")) == str(profile.stage if profile else selected_stage):
-                                    elements_job_status = status
-                                    break
-                            if elements_job_status is None:
-                                elements_job_status = resp[0]
-                            if isinstance(elements_job_status, dict) and elements_job_status.get("job_id"):
-                                st.session_state[elements_job_state_key] = elements_job_status.get("job_id")
-                        elif isinstance(resp, dict) and resp.get("status") == "error":
-                            elements_job_error = str(resp.get("message") or "后台任务列表查询失败")
-                elif not backend_ready:
-                    elements_job_error = "后台服务未连接"
-
-                status_value = str(elements_job_status.get("status")) if elements_job_status else ""
-                job_running = status_value in {"queued", "running"}
-
-                _render_file_elements_job_fragment(
-                    backend_ready=backend_ready,
-                    backend_client=backend_client,
-                    job_state_key=elements_job_state_key,
-                    job_status=elements_job_status,
-                    job_error=elements_job_error,
-                    fragment_state_key=elements_fragment_state_key,
-                    status_cache_key=elements_status_cache_key,
-                )
-
-                live_status = st.session_state.get(elements_status_cache_key)
-                if isinstance(live_status, dict):
-                    elements_job_status = live_status
-                status_value = str(elements_job_status.get("status")) if elements_job_status else ""
-                job_running = status_value in {"queued", "running"}
-
+                st.caption("分类完成后会按阶段自动启动要素评估，无需额外点击。")
+                auto_run_tokens = st.session_state.setdefault(elements_autorun_key, {})
+                source_map = st.session_state.setdefault(elements_source_state_key, {})
                 result_cache: Dict[str, EvaluationResult] = st.session_state.setdefault(
                     elements_result_cache_key, {}
                 )
-                table_key = _compose_table_key(
-                    selected_stage, profile_label or (profile.name if profile else None)
+                trigger_token = str(
+                    classification_summary.get("timestamp_label")
+                    or (classify_status or {}).get("job_id")
+                    or (parse_status or {}).get("job_id")
+                    or ""
                 )
 
-                def _load_latest_result() -> Optional[EvaluationResult]:
-                    result_files = elements_job_status.get("result_files") if elements_job_status else None
-                    if not result_files:
-                        return None
-                    latest_path = str(result_files[0])
-                    if not latest_path:
-                        return None
-                    loaded_path = st.session_state.get(elements_loaded_path_key)
-                    if loaded_path == latest_path and st.session_state.get(elements_result_state_key):
-                        return st.session_state.get(elements_result_state_key)
-                    loaded = _load_result_from_file(latest_path)
-                    if loaded:
-                        st.session_state[elements_loaded_path_key] = latest_path
-                        st.session_state[elements_result_state_key] = loaded
-                        if table_key:
-                            result_cache[table_key] = loaded
-                    return loaded
+                for stage_name in stage_options:
+                    stage_slug = stage_slugs.get(stage_name, stage_name)
+                    stage_summary = (classification_summary.get("stages") or {}).get(stage_name, {})
+                    profile, profile_label = _resolve_stage_profile(stage_name)
 
-                def _run_elements_job() -> None:
-                    if not profile:
-                        st.warning("请先确认要素模板后再运行评估。")
-                        return
-                    if not backend_ready or backend_client is None:
-                        st.error("后台服务不可用，无法提交要素评估任务。")
-                        return
-                    if not source_paths:
-                        st.warning("未找到可用的源文件，请先完成解析或上传。")
-                        return
-                    current_status = str(elements_job_status.get("status")) if elements_job_status else ""
-                    if current_status in {"queued", "running"}:
-                        st.info("已有要素评估任务在执行，请稍候。")
-                        return
-
-                    payload = {
-                        "session_id": session_id,
-                        "profile": _profile_to_payload(profile),
-                        "source_paths": source_paths,
-                    }
-                    response = backend_client.start_file_elements_job(payload)
-                    if isinstance(response, dict) and response.get("job_id"):
-                        st.session_state[elements_job_state_key] = response["job_id"]
-                        st.session_state.pop(elements_loaded_path_key, None)
-                        st.session_state.pop(elements_result_state_key, None)
-                        st.success("已提交要素评估任务，稍后将自动更新结果。")
-                        st.rerun()
-                    else:
-                        detail = ""
-                        if isinstance(response, dict):
-                            detail = str(response.get("detail") or response.get("message") or "")
-                        st.error(f"提交任务失败：{detail or response}")
-
-                col_run, col_retry, col_hint = st.columns([1, 1, 2])
-                with col_run:
-                    if st.button(
-                        "🚀 启动要素评估",
-                        key=f"apqp_elements_run_{session_id}",
-                        disabled=(not profile) or job_running,
-                    ):
-                        _run_elements_job()
-                with col_retry:
-                    if st.button(
-                        "🔄 重新评估",
-                        key=f"apqp_elements_rerun_{session_id}",
-                        disabled=(not profile) or job_running,
-                    ):
-                        _run_elements_job()
-                with col_hint:
-                    st.caption(
-                        "将依据分类阶段的解析文本自动进行要素核查，生成CSV/XLSX结果。"
-                    )
-
-                if elements_job_status and status_value in {"succeeded", "failed"}:
-                    st.session_state.pop(elements_job_state_key, None)
-                    st.session_state.pop(elements_source_state_key, None)
-                    if elements_source_dir:
-                        shutil.rmtree(elements_source_dir, ignore_errors=True)
-                        os.makedirs(elements_source_dir, exist_ok=True)
-
-                if elements_job_error:
-                    st.warning(elements_job_error)
-
-                active_result: Optional[EvaluationResult] = None
-                if table_key:
-                    active_result = result_cache.get(table_key)
-                if not active_result:
-                    active_result = st.session_state.get(elements_result_state_key)
-                if status_value == "succeeded":
-                    loaded = _load_latest_result()
-                    if loaded:
-                        active_result = loaded
-
-                if active_result:
-                    _render_elements_overview(active_result)
-
-                    download_targets = (elements_job_status or {}).get("result_files") or []
-                    csv_target = next(
-                        (path for path in download_targets if str(path).lower().endswith(".csv")),
-                        None,
-                    )
-                    xlsx_target = next(
-                        (path for path in download_targets if str(path).lower().endswith(".xlsx")),
-                        None,
-                    )
-
-                    def _download(label: str, path: Optional[str], key_suffix: str, mime: str) -> None:
-                        if path and os.path.isfile(path):
-                            st.download_button(
-                                label,
-                                data=_load_file_bytes(path) or b"",
-                                file_name=os.path.basename(path),
-                                mime=mime,
-                                key=f"apqp_elements_{key_suffix}_{session_id}",
-                            )
-                        else:
-                            st.download_button(
-                                label,
-                                data=b"",
-                                file_name=f"file_elements_result.{key_suffix}",
-                                key=f"apqp_elements_{key_suffix}_{session_id}",
-                                disabled=True,
-                            )
-
-                    col_csv, col_xlsx = st.columns(2)
-                    with col_csv:
-                        _download("📥 导出CSV", csv_target, "csv", "text/csv")
-                    with col_xlsx:
-                        _download(
-                            "📥 导出Excel",
-                            xlsx_target,
-                            "xlsx",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    st.markdown(f"#### {stage_name}")
+                    if profile:
+                        st.caption(
+                            f"使用交付物【{profile_label or profile.name}】的要素清单自动评估。"
                         )
-                else:
-                    st.caption("运行评估后将展示要素覆盖情况与整改建议。")
+                    else:
+                        st.warning("当前阶段未配置要素模板，暂无法运行评估。")
+
+                    source_paths = _gather_stage_sources(stage_summary)
+                    if elements_parsed_dir and elements_parsed_dir not in source_paths:
+                        os.makedirs(elements_parsed_dir, exist_ok=True)
+                    source_map[stage_slug] = source_paths
+
+                    job_state_key = f"{elements_job_state_key}_{stage_slug}"
+                    fragment_state_key = f"{elements_fragment_state_key}_{stage_slug}"
+                    status_cache_key = f"{elements_status_cache_key}_{stage_slug}"
+                    _debug_cache_key = f"{elements_debug_cache_key}_{stage_slug}"
+                    result_state_key = f"{elements_result_state_key}_{stage_slug}"
+                    loaded_path_key = f"{elements_loaded_path_key}_{stage_slug}"
+
+                    elements_job_status: Optional[Dict[str, Any]] = None
+                    elements_job_error: Optional[str] = None
+                    if backend_ready and backend_client is not None:
+                        stored_elements_job = st.session_state.get(job_state_key)
+                        if stored_elements_job:
+                            resp = backend_client.get_file_elements_job(stored_elements_job)
+                            if isinstance(resp, dict) and resp.get("job_id"):
+                                elements_job_status = resp
+                            elif isinstance(resp, dict) and resp.get("detail") == "未找到任务":
+                                st.session_state.pop(job_state_key, None)
+                            elif isinstance(resp, dict) and resp.get("status") == "error":
+                                elements_job_error = str(resp.get("message") or "后台任务查询失败")
+
+                        if elements_job_status is None:
+                            resp = backend_client.list_file_elements_jobs(session_id)
+                            if isinstance(resp, list) and resp:
+                                for status in resp:
+                                    if not isinstance(status, dict):
+                                        continue
+                                    metadata = status.get("metadata") or {}
+                                    if str(metadata.get("stage")) == str(profile.stage if profile else stage_name):
+                                        elements_job_status = status
+                                        break
+                                if elements_job_status is None:
+                                    elements_job_status = resp[0]
+                                if isinstance(elements_job_status, dict) and elements_job_status.get("job_id"):
+                                    st.session_state[job_state_key] = elements_job_status.get("job_id")
+                            elif isinstance(resp, dict) and resp.get("status") == "error":
+                                elements_job_error = str(resp.get("message") or "后台任务列表查询失败")
+                    elif not backend_ready:
+                        elements_job_error = "后台服务未连接"
+
+                    status_value = str(elements_job_status.get("status")) if elements_job_status else ""
+                    job_running = status_value in {"queued", "running"}
+
+                    if (
+                        backend_ready
+                        and backend_client is not None
+                        and profile
+                        and source_paths
+                        and trigger_token
+                        and not job_running
+                        and status_value != "succeeded"
+                        and auto_run_tokens.get(stage_slug) != trigger_token
+                    ):
+                        payload = {
+                            "session_id": session_id,
+                            "profile": _profile_to_payload(profile),
+                            "source_paths": source_paths,
+                            "turbo_mode": elements_turbo,
+                        }
+                        response = backend_client.start_file_elements_job(payload)
+                        if isinstance(response, dict) and response.get("job_id"):
+                            st.session_state[job_state_key] = response["job_id"]
+                            st.session_state.pop(loaded_path_key, None)
+                            st.session_state.pop(result_state_key, None)
+                            auto_run_tokens[stage_slug] = trigger_token
+                            st.info("已自动提交要素评估任务。")
+                        else:
+                            detail = ""
+                            if isinstance(response, dict):
+                                detail = str(response.get("detail") or response.get("message") or "")
+                            elements_job_error = detail or str(response)
+
+                    _render_file_elements_job_fragment(
+                        backend_ready=backend_ready,
+                        backend_client=backend_client,
+                        job_state_key=job_state_key,
+                        job_status=elements_job_status,
+                        job_error=elements_job_error,
+                        fragment_state_key=fragment_state_key,
+                        status_cache_key=status_cache_key,
+                    )
+
+                    live_status = st.session_state.get(status_cache_key)
+                    if isinstance(live_status, dict):
+                        elements_job_status = live_status
+                    status_value = str(elements_job_status.get("status")) if elements_job_status else ""
+                    job_running = status_value in {"queued", "running"}
+
+                    table_key = _compose_table_key(
+                        stage_name, profile_label or (profile.name if profile else None)
+                    )
+
+                    def _load_latest_result() -> Optional[EvaluationResult]:
+                        result_files = elements_job_status.get("result_files") if elements_job_status else None
+                        if not result_files:
+                            return None
+                        latest_path = str(result_files[0])
+                        if not latest_path:
+                            return None
+                        loaded_path = st.session_state.get(loaded_path_key)
+                        if loaded_path == latest_path and st.session_state.get(result_state_key):
+                            return st.session_state.get(result_state_key)
+                        loaded = _load_result_from_file(latest_path)
+                        if loaded:
+                            st.session_state[loaded_path_key] = latest_path
+                            st.session_state[result_state_key] = loaded
+                            if table_key:
+                                result_cache[table_key] = loaded
+                        return loaded
+
+                    if elements_job_status and status_value in {"succeeded", "failed"}:
+                        st.session_state.pop(job_state_key, None)
+
+                    if elements_job_error:
+                        st.warning(elements_job_error)
+
+                    active_result: Optional[EvaluationResult] = None
+                    if table_key:
+                        active_result = result_cache.get(table_key)
+                    if not active_result:
+                        active_result = st.session_state.get(result_state_key)
+                    if status_value == "succeeded":
+                        loaded = _load_latest_result()
+                        if loaded:
+                            active_result = loaded
+
+                    if active_result:
+                        _render_elements_overview(active_result)
+
+                        download_targets = (elements_job_status or {}).get("result_files") or []
+                        csv_target = next(
+                            (path for path in download_targets if str(path).lower().endswith(".csv")),
+                            None,
+                        )
+                        xlsx_target = next(
+                            (path for path in download_targets if str(path).lower().endswith(".xlsx")),
+                            None,
+                        )
+
+                        def _download(label: str, path: Optional[str], key_suffix: str, mime: str) -> None:
+                            if path and os.path.isfile(path):
+                                st.download_button(
+                                    label,
+                                    data=_load_file_bytes(path) or b"",
+                                    file_name=os.path.basename(path),
+                                    mime=mime,
+                                    key=f"apqp_elements_{key_suffix}_{stage_slug}_{session_id}",
+                                )
+                            else:
+                                st.download_button(
+                                    label,
+                                    data=b"",
+                                    file_name=f"file_elements_result.{key_suffix}",
+                                    key=f"apqp_elements_{key_suffix}_{stage_slug}_{session_id}",
+                                    disabled=True,
+                                )
+
+                        col_csv, col_xlsx = st.columns(2)
+                        with col_csv:
+                            _download("📥 导出CSV", csv_target, "csv", "text/csv")
+                        with col_xlsx:
+                            _download(
+                                "📥 导出Excel",
+                                xlsx_target,
+                                "xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            )
+                    else:
+                        st.caption("完成评估后将在此展示要素覆盖情况与整改建议。")
             else:
                 st.info("暂无阶段可选，无法发起要素评估。")
 

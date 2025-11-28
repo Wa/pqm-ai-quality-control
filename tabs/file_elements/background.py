@@ -57,6 +57,7 @@ def run_file_elements_job(
     *,
     profile_payload: Dict[str, object],
     source_paths: Optional[Sequence[str]] = None,
+    turbo_mode: bool = False,
     check_control: Optional[Callable[[], Dict[str, bool]]] = None,
 ) -> None:
     """Execute the文件要素检查 workflow inside the backend worker."""
@@ -138,7 +139,11 @@ def run_file_elements_job(
             }
         )
 
-        orchestrator = EvaluationOrchestrator(profile, initial_results_dir=initial_results_dir)
+        orchestrator = EvaluationOrchestrator(
+            profile,
+            initial_results_dir=initial_results_dir,
+            turbo_mode=turbo_mode,
+        )
         result_holder: Dict[str, object] = {}
         error_holder: Dict[str, BaseException] = {}
 
