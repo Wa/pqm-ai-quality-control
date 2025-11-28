@@ -144,6 +144,7 @@ def run_file_elements_job(
             profile,
             initial_results_dir=initial_results_dir,
             turbo_mode=turbo_mode,
+            source_files_for_logging=normalized_paths,
         )
         result_holder: Dict[str, object] = {}
         error_holder: Dict[str, BaseException] = {}

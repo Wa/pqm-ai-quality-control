@@ -320,10 +320,12 @@ class EvaluationOrchestrator:
         *,
         initial_results_dir: str | None = None,
         turbo_mode: bool = False,
+        source_files_for_logging: Sequence[str] | None = None,
     ):
         self.profile = profile
         self.initial_results_dir = initial_results_dir
         self.turbo_mode = turbo_mode
+        self.source_files_for_logging = list(source_files_for_logging or [])
         self._ollama_client: Optional[OllamaClient] = None
         self._ollama_init_error: Optional[Exception] = None
         self._llm_warnings: List[str] = []
@@ -477,7 +479,12 @@ class EvaluationOrchestrator:
                 warnings.append("大模型未返回内容，请稍后重试。")
             return [], warnings
 
-        self._save_prompt_and_response(source_file, user_prompt, response_text)
+        self._save_prompt_and_response(
+            source_file,
+            user_prompt,
+            response_text,
+            all_sources=self.source_files_for_logging,
+        )
 
         if not response_text.strip():
             warnings.append("大模型未返回内容，请稍后重试。")
@@ -489,19 +496,40 @@ class EvaluationOrchestrator:
         return parsed_items, warnings
 
     def _save_prompt_and_response(
-        self, source_file: str | None, prompt: str, response: str
+        self,
+        source_file: str | None,
+        prompt: str,
+        response: str,
+        *,
+        all_sources: Sequence[str] | None = None,
     ) -> None:
         if not self.initial_results_dir:
             return
         try:
             os.makedirs(self.initial_results_dir, exist_ok=True)
-            base_name = os.path.basename(source_file or "document") or "document"
-            prompt_path = os.path.join(self.initial_results_dir, f"prompt_{base_name}.txt")
-            response_path = os.path.join(self.initial_results_dir, f"response_{base_name}.txt")
-            with open(prompt_path, "w", encoding="utf-8") as prompt_handle:
-                prompt_handle.write(prompt)
-            with open(response_path, "w", encoding="utf-8") as response_handle:
-                response_handle.write(response)
+            used: set[str] = set()
+            base_candidates: List[str] = []
+            primary_name = os.path.basename(source_file or "document") or "document"
+            base_candidates.append(primary_name)
+            if all_sources:
+                for path in all_sources:
+                    base_candidates.append(os.path.basename(path) or "document")
+
+            for index, base in enumerate(base_candidates):
+                base_clean = base or "document"
+                if base_clean in used:
+                    base_clean = f"{base_clean}_{index+1}"
+                used.add(base_clean)
+                prompt_path = os.path.join(
+                    self.initial_results_dir, f"prompt_{base_clean}.txt"
+                )
+                response_path = os.path.join(
+                    self.initial_results_dir, f"response_{base_clean}.txt"
+                )
+                with open(prompt_path, "w", encoding="utf-8") as prompt_handle:
+                    prompt_handle.write(prompt)
+                with open(response_path, "w", encoding="utf-8") as response_handle:
+                    response_handle.write(response)
         except Exception as error:  # pragma: no cover - best-effort logging
             report_exception("保存评估提示/回复失败", error, level="warning")
 
