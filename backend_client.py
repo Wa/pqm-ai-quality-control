@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -44,6 +45,27 @@ class BackendClient:
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def upload_apqp_file(self, session_id: str, stage: str, file_obj) -> Dict:
+        """Upload an APQP file to backend"""
+
+        try:
+            files = {"file": (file_obj.name, file_obj, getattr(file_obj, "type", None) or "application/octet-stream")}
+            data = {"session_id": session_id, "stage": stage}
+            response = requests.post(f"{self.base_url}/apqp-one-click/upload", files=files, data=data, timeout=60)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_apqp_files(self, session_id: str, stage: Optional[str] = None) -> Dict:
+        """List APQP files for a session/stage."""
+
+        try:
+            params = {"stage": stage} if stage else None
+            response = requests.get(f"{self.base_url}/apqp-one-click/files/{session_id}", params=params, timeout=10)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
     
     def list_files(self, session_id: str, file_type: Optional[str] = None) -> Dict:
         """List files via the backend"""
@@ -77,12 +99,194 @@ class BackendClient:
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def start_apqp_parse_job(self, session_id: str, stages: Optional[List[str]] = None) -> Dict:
+        """Start background APQP parsing job."""
+
+        try:
+            payload: Dict[str, Any] = {"session_id": session_id}
+            if stages:
+                payload["stages"] = stages
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/jobs", json=payload, timeout=30
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_apqp_job_status(self, job_id: str) -> Dict:
+        """Fetch status for APQP parsing job."""
+
+        try:
+            response = requests.get(f"{self.base_url}/apqp-one-click/jobs/{job_id}", timeout=10)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def pause_apqp_job(self, job_id: str) -> Dict:
+        """Pause an APQP one-click parsing job."""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/jobs/{job_id}/pause", timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def resume_apqp_job(self, job_id: str) -> Dict:
+        """Resume a paused APQP one-click parsing job."""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/jobs/{job_id}/resume", timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_apqp_jobs(self, session_id: Optional[str] = None) -> Dict | List[Dict]:
+        """List APQP one-click parsing jobs for a session (or all sessions)."""
+
+        try:
+            params = {"session_id": session_id} if session_id else None
+            response = requests.get(
+                f"{self.base_url}/apqp-one-click/jobs", params=params, timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def start_apqp_classify_job(
+        self,
+        session_id: str,
+        stages: Optional[List[str]] = None,
+        head_chars: int = 3200,
+        tail_chars: int = 2000,
+        turbo_mode: bool = False,
+        control_job_id: Optional[str] = None,
+    ) -> Dict:
+        """Start a background APQP classification job."""
+
+        try:
+            payload: Dict[str, Any] = {
+                "session_id": session_id,
+                "head_chars": head_chars,
+                "tail_chars": tail_chars,
+                "turbo_mode": turbo_mode,
+                "control_job_id": control_job_id,
+            }
+            if stages:
+                payload["stages"] = stages
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/classify/jobs", json=payload, timeout=30
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_apqp_classify_job(self, job_id: str) -> Dict:
+        """Fetch status for APQP classification job."""
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/apqp-one-click/classify/jobs/{job_id}", timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_apqp_classify_jobs(self, session_id: Optional[str] = None) -> Dict | List[Dict]:
+        """List APQP classification jobs for a session (or all sessions)."""
+
+        try:
+            params = {"session_id": session_id} if session_id else None
+            response = requests.get(
+                f"{self.base_url}/apqp-one-click/classify/jobs", params=params, timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def pause_apqp_classify_job(self, job_id: str) -> Dict:
+        """Pause APQP classification job."""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/classify/jobs/{job_id}/pause", timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def resume_apqp_classify_job(self, job_id: str) -> Dict:
+        """Resume APQP classification job."""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/classify/jobs/{job_id}/resume", timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def classify_apqp_files(
+        self,
+        session_id: str,
+        stages: Optional[List[str]] = None,
+        head_chars: int = 3200,
+        tail_chars: int = 2000,
+        turbo_mode: bool = False,
+    ) -> Dict:
+        """Request backend to classify parsed APQP documents via LLM."""
+
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "head_chars": head_chars,
+            "tail_chars": tail_chars,
+            "turbo_mode": turbo_mode,
+        }
+        if stages:
+            payload["stages"] = stages
+
+        last_error: Optional[str] = None
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/apqp-one-click/classify",
+                    json=payload,
+                    timeout=900,
+                )
+                return response.json()
+            except Exception as e:
+                last_error = str(e)
+                time.sleep(2)
+        return {"status": "error", "message": last_error or "未知错误"}
     
     def clear_apqp_files(self, session_id: str, target: str = "all") -> Dict:
         """Clear APQP uploads and/or parsed outputs via the backend."""
         try:
             payload = {"session_id": session_id, "target": target}
             response = requests.post(f"{self.base_url}/apqp-one-click/clear", json=payload, timeout=120)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_apqp_results(self, session_id: str) -> Dict:
+        """List APQP one-click generated results."""
+
+        try:
+            response = requests.get(f"{self.base_url}/apqp-one-click/results/{session_id}", timeout=30)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def clear_apqp_results(self, session_id: str) -> Dict:
+        """Clear APQP one-click generated result files."""
+
+        try:
+            payload = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/apqp-one-click/results/clear", json=payload, timeout=120)
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}

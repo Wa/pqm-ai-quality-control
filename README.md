@@ -273,6 +273,7 @@ pip install -r requirements.txt
 - `GET /list-files/{session_id}` - File listing per session
 - `POST /clear-files` - Clear all parameter/reference/graph files for a session
 - `POST /apqp-one-click/parse` - Parse APQP uploads into normalized text by stage
+- `POST /apqp-one-click/classify` - Run LLM-based classification to map parsed texts to APQP deliverables
 - `POST /apqp-one-click/clear` - Clear APQP uploads/parsed outputs
 - `POST /enterprise-standard/jobs` - Start an enterprise-standard comparison job
 - `GET /enterprise-standard/jobs` / `GET /enterprise-standard/jobs/{job_id}` - Inspect enterprise jobs

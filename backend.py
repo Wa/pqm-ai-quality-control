@@ -1,19 +1,26 @@
+from collections import Counter
 from dataclasses import dataclass, field
+import json
 import multiprocessing
 from multiprocessing import Process, Queue
 from queue import Full
 import os
+from pathlib import Path
+import re
 import shutil
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock, Thread
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 import tempfile
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from ollama import Client as OllamaClient
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from config import CONFIG
@@ -22,17 +29,24 @@ from tabs.file_completeness import (
     run_file_completeness_job,
     STAGE_ORDER,
     STAGE_SLUG_MAP,
+    STAGE_REQUIREMENTS,
+    CANONICAL_APQP_DESCRIPTORS,
+    descriptor_for,
 )
 from tabs.file_elements.background import run_file_elements_job
 from tabs.parameters.background import run_parameters_job
 from tabs.history.background import run_history_job
 from tabs.special_symbols.background import run_special_symbols_job
 from tabs.shared.file_conversion import (
+    cleanup_orphan_txts,
+    detect_esafenet_encryption,
     process_excel_folder,
     process_pdf_folder,
     process_textlike_folder,
     process_word_ppt_folder,
 )
+from tabs.shared.modelscope_client import ModelScopeClient
+from util import resolve_ollama_host
 
 
 JOB_DEFINITIONS = {
@@ -59,6 +73,14 @@ JOB_DEFINITIONS = {
     "file_elements": {
         "runner": run_file_elements_job,
         "label": "文件要素检查",
+    },
+    "apqp_one_click_parse": {
+        "runner": None,  # Placeholder; assigned after function definition
+        "label": "APQP一键解析",
+    },
+    "apqp_one_click_classify": {
+        "runner": None,  # Placeholder; assigned after function definition
+        "label": "APQP一键分类",
     },
 }
 
@@ -129,9 +151,27 @@ class ApqpParseRequest(BaseModel):
     stages: Optional[List[str]] = None
 
 
+class ApqpParseJobRequest(BaseModel):
+    session_id: str
+    stages: Optional[List[str]] = None
+
+
 class ApqpClearRequest(BaseModel):
     session_id: str
     target: Optional[str] = "all"
+
+
+class ApqpResultsClearRequest(BaseModel):
+    session_id: str
+
+
+class ApqpClassifyRequest(BaseModel):
+    session_id: str
+    stages: Optional[List[str]] = None
+    head_chars: int = 3200
+    tail_chars: int = 2000
+    turbo_mode: bool = False
+    control_job_id: Optional[str] = None
 
 
 class EnterpriseJobStatus(BaseModel):
@@ -568,11 +608,13 @@ def _apqp_stage_layout(session_id: str) -> Dict[str, Dict[str, str]]:
 
     uploads_root = str(CONFIG["directories"]["uploads"])
     generated_root = str(CONFIG["directories"]["generated_files"])
+    parsed_root = os.path.join(generated_root, session_id, "APQP_one_click_check", "parsed_files")
+    os.makedirs(parsed_root, exist_ok=True)
     stage_layout: Dict[str, Dict[str, str]] = {}
     for stage_name in STAGE_ORDER:
         slug = STAGE_SLUG_MAP.get(stage_name, stage_name)
         upload_dir = os.path.join(uploads_root, session_id, "APQP_one_click_check", slug)
-        parsed_dir = os.path.join(generated_root, session_id, "APQP_one_click_check", slug)
+        parsed_dir = os.path.join(parsed_root, slug)
         os.makedirs(upload_dir, exist_ok=True)
         os.makedirs(parsed_dir, exist_ok=True)
         stage_layout[stage_name] = {
@@ -606,6 +648,855 @@ def _normalize_apqp_stages(
     if not result:
         raise HTTPException(status_code=400, detail="未提供有效的阶段名称")
     return result
+
+
+def _collect_parsed_txt_files(folder: str) -> List[str]:
+    """Return sorted .txt files from a parsed folder."""
+
+    if not folder or not os.path.isdir(folder):
+        return []
+    paths = [
+        os.path.join(folder, name)
+        for name in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, name)) and name.lower().endswith(".txt")
+    ]
+    return sorted(paths)
+
+
+def _source_label_from_parsed_file(
+    file_path: str, upload_dir: str, *, include_sheet: bool = True
+) -> str:
+    """Return a user-facing source label for a parsed txt, preferring upload names."""
+
+    base_name = os.path.basename(file_path)
+    stem = base_name[:-4] if base_name.lower().endswith(".txt") else base_name
+
+    def _first_marker() -> str:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+                for _ in range(50):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    match = re.search(r"【来源文件:\s*(.+?)】", line)
+                    if match:
+                        return match.group(1).strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _match_upload(target: str) -> str:
+        try:
+            for name in os.listdir(upload_dir or "."):
+                if not os.path.isfile(os.path.join(upload_dir, name)):
+                    continue
+                if name.lower() == target.lower():
+                    return name
+        except Exception:
+            return target
+        return target
+
+    marker = _first_marker()
+    annotated_file = marker
+    annotated_sheet = ""
+    if marker and "/" in marker:
+        parts = marker.split("/", 1)
+        annotated_file = parts[0].strip()
+        annotated_sheet = parts[1].strip()
+
+    if "_SHEET_" in stem:
+        prefix, sheet_token = stem.split("_SHEET_", 1)
+        upload_name = _match_upload(annotated_file or prefix)
+        sheet_label = annotated_sheet or sheet_token
+        if include_sheet:
+            return f"{upload_name}(工作表：{sheet_label})"
+        return upload_name
+
+    upload_name = _match_upload(annotated_file or stem)
+    return upload_name
+
+
+def _sheet_label_from_parsed_path(file_path: str) -> str:
+    """Extract sheet token from parsed Excel txt name if present."""
+
+    base = os.path.basename(file_path)
+    stem = base[:-4] if base.lower().endswith(".txt") else base
+    if "_SHEET_" in stem:
+        return stem.split("_SHEET_", 1)[1]
+    return ""
+
+
+def _group_parsed_txt_by_upload(txt_files: List[str], upload_dir: str) -> List[Dict[str, Any]]:
+    """Group parsed txt files by their originating upload (merge Excel sheets)."""
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for path in txt_files:
+        label = _source_label_from_parsed_file(path, upload_dir, include_sheet=False)
+        key = label.lower()
+        if key not in groups:
+            groups[key] = {"label": label, "paths": []}
+            order.append(key)
+        groups[key]["paths"].append(path)
+
+    return [groups[key] for key in order]
+
+
+def _build_group_preview(paths: List[str], head_chars: int, tail_chars: int) -> str:
+    """Combine multiple parsed txt files (e.g., Excel sheets) into a single preview."""
+
+    if not paths:
+        return ""
+    fragments: List[str] = []
+    for path in paths:
+        sheet_label = _sheet_label_from_parsed_path(path)
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        if not text:
+            continue
+        if sheet_label:
+            fragments.append(f"【工作表：{sheet_label}】\n{text}")
+        else:
+            fragments.append(text)
+
+    combined = "\n\n".join(fragments)
+    if not combined:
+        return ""
+    return _compose_preview(combined, head_chars=head_chars, tail_chars=tail_chars)
+
+
+def _resolve_control_dir(job_id: Optional[str], *, expected_type: Optional[str] = None, session_id: Optional[str] = None) -> str:
+    """Lookup control directory for a given job id if still cached in memory."""
+
+    if not job_id:
+        return ""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record:
+            return ""
+        if expected_type and record.job_type != expected_type:
+            return ""
+        if session_id and record.session_id != session_id:
+            return ""
+        return str(record.metadata.get("control_dir") or "")
+
+
+def _parse_apqp_stages(
+    layout: Dict[str, Dict[str, str]],
+    stages: List[str],
+    publish: Optional[Callable[[Dict[str, Any]], None]] = None,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Parse uploaded APQP files into text, optionally emitting progress updates."""
+
+    summary: Dict[str, Any] = {
+        "stage_order": stages,
+        "stages": {},
+        "total_created": 0,
+    }
+    total_stages = max(len(stages), 1)
+
+    def _emit(update: Dict[str, Any], *, log_message: Optional[str] = None, level: str = "info") -> None:
+        if not publish:
+            return
+        payload = dict(update or {})
+        if log_message:
+            payload["log"] = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": level,
+                "message": log_message,
+            }
+        publish(payload)
+
+    def _wait_if_paused(stage_label: str, detail: str = "") -> None:
+        """Honor pause/stop control flags if provided."""
+
+        if not check_control:
+            return
+
+        while True:
+            try:
+                status = check_control() or {}
+            except Exception:
+                status = {}
+            if status.get("stopped"):
+                raise RuntimeError("解析已被停止")
+            if status.get("paused"):
+                message = detail or f"{stage_label} 暂停中，等待恢复"
+                _emit(
+                    {
+                        "status": "paused",
+                        "stage": "paused",
+                        "message": message,
+                    },
+                    log_message=message,
+                )
+                time.sleep(1.0)
+                continue
+            break
+
+    for idx, stage_name in enumerate(stages):
+        _wait_if_paused(stage_name, f"{stage_name} 解析已暂停")
+
+        info = layout[stage_name]
+        upload_dir = info["upload_dir"]
+        parsed_dir = info["parsed_dir"]
+        logger = _ParseLogger()
+        stage_report: Dict[str, Any] = {
+            "slug": info["slug"],
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+            "files_found": 0,
+            "pdf_created": 0,
+            "word_ppt_created": 0,
+            "excel_created": 0,
+            "text_created": 0,
+            "total_created": 0,
+        }
+        skip_files: Set[str] = set()
+
+        step_weight = 1.0 / max(total_stages, 1)
+        stage_base_progress = idx * step_weight
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base_progress,
+                "message": f"开始解析 {stage_name}",
+            },
+            log_message=f"开始解析 {stage_name}",
+        )
+
+        try:
+            files_found = [
+                name
+                for name in os.listdir(upload_dir)
+                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
+            ]
+            stage_report["files_found"] = len(files_found)
+
+            for name in files_found:
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以检查文件加密状态")
+                encrypted, _ = detect_esafenet_encryption(Path(upload_dir) / name)
+                if encrypted:
+                    msg = f"《{name}》经亿赛通加密，无法读取，请上传解密版本"
+                    logger.warning(msg)
+                    _emit(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "message": msg,
+                        },
+                        log_message=msg,
+                        level="warning",
+                    )
+                    skip_files.add(name)
+            if skip_files:
+                stage_report["encrypted_files"] = sorted(skip_files)
+
+            removed_txts = cleanup_orphan_txts(upload_dir, parsed_dir, logger)
+            if removed_txts:
+                logger.info(f"已清理无关文本 {removed_txts} 个")
+            if not files_found:
+                logger.info("当前阶段没有上传文件，跳过解析。")
+            else:
+                substeps = 4
+                progress_increment = step_weight / max(substeps, 1)
+                subprogress = 0.0
+
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理PDF")
+                pdf_created = process_pdf_folder(
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
+                )
+                stage_report["pdf_created"] = len(pdf_created)
+                subprogress += progress_increment
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理PDF，共{len(pdf_created)}个",
+                    },
+                    log_message=f"已处理PDF，共{len(pdf_created)}个",
+                )
+
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理Word/PPT")
+                office_created = process_word_ppt_folder(
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
+                )
+                stage_report["word_ppt_created"] = len(office_created)
+                subprogress += progress_increment
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理Word/PPT，共{len(office_created)}个",
+                    },
+                    log_message=f"已处理Word/PPT，共{len(office_created)}个",
+                )
+
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理Excel")
+                excel_created = process_excel_folder(
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    annotate_sources=True,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
+                )
+                stage_report["excel_created"] = len(excel_created)
+                subprogress += progress_increment
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理Excel，共{len(excel_created)}个",
+                    },
+                    log_message=f"已处理Excel，共{len(excel_created)}个",
+                )
+
+                _wait_if_paused(stage_name, f"{stage_name} 等待恢复以处理文本类文件")
+                text_created = process_textlike_folder(
+                    upload_dir,
+                    parsed_dir,
+                    logger,
+                    skip_files=skip_files,
+                    warn_if_encrypted=False,
+                )
+                stage_report["text_created"] = len(text_created)
+                subprogress += progress_increment
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base_progress + subprogress,
+                        "message": f"已处理文本类文件，共{len(text_created)}个",
+                    },
+                    log_message=f"已处理文本类文件，共{len(text_created)}个",
+                )
+
+                total_created = (
+                    len(pdf_created)
+                    + len(office_created)
+                    + len(excel_created)
+                    + len(text_created)
+                )
+                stage_report["total_created"] = total_created
+                summary["total_created"] += total_created
+        except Exception as error:
+            logger.error(f"解析阶段失败: {error}")
+            stage_report["error"] = str(error)
+
+            _emit(
+                {
+                    "status": "running",
+                    "stage": stage_name,
+                    "message": f"解析阶段失败: {error}",
+                },
+                log_message=f"解析阶段失败: {error}",
+                level="error",
+            )
+
+        stage_report["messages"] = logger.messages
+        summary["stages"][stage_name] = stage_report
+
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": min(1.0, stage_base_progress + step_weight),
+                "message": f"完成 {stage_name} 解析",
+            },
+            log_message=f"完成 {stage_name} 解析",
+        )
+
+    _emit({"status": "succeeded", "stage": "completed", "progress": 1.0}, log_message="解析任务完成")
+
+    return summary
+
+
+def _compose_preview(text: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
+    """Build a truncated preview using head/tail slices from text content."""
+
+    if head_chars <= 0 and tail_chars <= 0:
+        return text
+    head = text[: max(head_chars, 0)] if head_chars > 0 else ""
+    tail = text[-max(tail_chars, 0) :] if tail_chars > 0 else ""
+    if tail and head:
+        return f"【开头】\n{head}\n\n【结尾】\n{tail}"
+    return head or tail
+
+
+def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
+    """Return a head/tail preview from a text file to control token usage."""
+
+    try:
+        text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return _compose_preview(text, head_chars=head_chars, tail_chars=tail_chars)
+
+
+def _safe_stem_for_record(name: str) -> str:
+    """Return a filesystem-friendly stem for prompt/response recording."""
+
+    stem = Path(name).stem or "file"
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", stem)
+    cleaned = cleaned.strip("._-")
+    return cleaned or "file"
+
+
+def _detect_project_serial(layout: Dict[str, Dict[str, str]]) -> Tuple[str, List[str]]:
+    """Best-effort extraction of项目编号 from uploaded or parsed texts."""
+
+    pattern = re.compile(r"\b\d{3}-\d{3,}[A-Za-z]?\b")
+    counts: Counter[str] = Counter()
+    sources: Dict[str, Set[str]] = {}
+
+    def _record(serial: str, source: str) -> None:
+        counts[serial] += 1
+        sources.setdefault(serial, set()).add(source)
+
+    for stage_name, info in layout.items():
+        upload_dir = info.get("upload_dir") or ""
+        parsed_dir = info.get("parsed_dir") or ""
+        try:
+            for name in os.listdir(upload_dir):
+                for match in pattern.findall(name):
+                    _record(match, f"{stage_name} 上传文件名")
+        except FileNotFoundError:
+            pass
+
+        for txt_path in _collect_parsed_txt_files(parsed_dir):
+            preview = _load_text_preview(txt_path, head_chars=2000, tail_chars=0)
+            for match in pattern.findall(preview):
+                _record(match, f"{stage_name} 解析文本")
+
+    if not counts:
+        return "", []
+
+    serial, _ = counts.most_common(1)[0]
+    return serial, sorted(sources.get(serial, set()))
+
+
+def _apqp_candidate_definitions(stage_name: str) -> List[Dict[str, str]]:
+    """Build canonical deliverable definitions for a stage."""
+
+    requirements = STAGE_REQUIREMENTS.get(stage_name) or tuple()
+    result: List[Dict[str, str]] = []
+    for item in requirements:
+        description = CANONICAL_APQP_DESCRIPTORS.get(item) or descriptor_for(item)
+        result.append({"name": item, "description": description})
+    return result
+
+
+def _completeness_dataframe(summary: Dict[str, Any]) -> pd.DataFrame:
+    """Flatten summary into a dataframe for CSV/XLSX export."""
+
+    records: List[Dict[str, str]] = []
+    stage_order = summary.get("stage_order") or list((summary.get("stages") or {}).keys())
+    for stage_name in stage_order:
+        stage_data = (summary.get("stages") or {}).get(stage_name) or {}
+        requirements = stage_data.get("requirements") or []
+        stage_warning = stage_data.get("warning") or ""
+        for item in requirements:
+            status_text = "已覆盖" if item.get("status") == "present" else "缺失"
+            sources = item.get("sources") or []
+            sources_text = "\n".join(sources)
+            confidence_text = ""
+            try:
+                conf_val = float(item.get("confidence", 0.0))
+                if conf_val > 0:
+                    confidence_text = f"{conf_val:.2f}"
+            except (TypeError, ValueError):
+                pass
+            records.append(
+                {
+                    "阶段": stage_name,
+                    "交付物": item.get("name") or "",
+                    "状态": status_text,
+                    "来源": sources_text,
+                    "置信度": confidence_text,
+                    "备注": stage_warning,
+                }
+            )
+
+    return pd.DataFrame(records)
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    """Best-effort JSON decoding that tolerates fenced blocks."""
+
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return {}
+
+
+@dataclass
+class _LLMProvider:
+    label: str
+    engine: str  # "ollama" or "modelscope"
+    model: str
+    client_factory: Callable[[], object]
+    max_retries: int = 1
+    supports_parallel: bool = True
+
+
+def _prepare_apqp_llm_providers(turbo_mode: bool) -> Tuple[List[_LLMProvider], List[_LLMProvider], List[str]]:
+    """Build provider lists for APQP classification.
+
+    Returns:
+        fast_providers: providers eligible for parallel/turbo usage (non-local).
+        serial_chain: ordered providers for serial fallback.
+        warnings: any initialization warnings.
+    """
+
+    warnings: List[str] = []
+    llm_settings = CONFIG.get("llm", {})
+
+    modelscope_api_key = os.getenv("MODELSCOPE_API_KEY") or llm_settings.get("modelscope_api_key")
+    modelscope_base = llm_settings.get("modelscope_base_url") or "https://api-inference.modelscope.cn/v1"
+    ms_models: List[Tuple[str, str]] = [
+        ("ModelScope DeepSeek-V3.2-Exp", "deepseek-ai/DeepSeek-V3.2-Exp"),
+        ("ModelScope DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),
+        ("ModelScope Qwen3-235B", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
+    ]
+
+    turbo_only_models: List[Tuple[str, str]] = [
+        ("ModelScope GLM-4.6", "ZhipuAI/GLM-4.6"),
+        ("ModelScope Qwen3-32B", "Qwen/Qwen3-32B"),
+    ]
+
+    def _mk_modelscope_provider(label: str, model_id: str) -> _LLMProvider:
+        return _LLMProvider(
+            label=label,
+            engine="modelscope",
+            model=model_id,
+            client_factory=lambda model=model_id: ModelScopeClient(
+                api_key=modelscope_api_key or "", model=model, base_url=modelscope_base, timeout=900.0
+            ),
+            max_retries=2,
+            supports_parallel=True,
+        )
+
+    fast_providers: List[_LLMProvider] = []
+    serial_chain: List[_LLMProvider] = []
+
+    local_model = llm_settings.get("ollama_model") or "gpt-oss:latest"
+    local_provider: Optional[_LLMProvider] = None
+    try:
+        host = resolve_ollama_host("ollama_9")
+        local_provider = _LLMProvider(
+            label="本地 gpt-oss",
+            engine="ollama",
+            model=local_model,
+            client_factory=lambda host=host: OllamaClient(host=host),
+            max_retries=1,
+            supports_parallel=False,
+        )
+    except Exception as error:
+        warnings.append(f"初始化本地 Ollama 失败：{error}")
+
+    cloud_host = llm_settings.get("ollama_cloud_host")
+    cloud_api_key = llm_settings.get("ollama_cloud_api_key")
+    cloud_provider: Optional[_LLMProvider] = None
+    if cloud_host and cloud_api_key:
+        try:
+            def _make_cloud() -> OllamaClient:
+                return OllamaClient(host=cloud_host, headers={"Authorization": f"Bearer {cloud_api_key}"})
+
+            cloud_provider = _LLMProvider(
+                label="云端 gpt-oss-20b",
+                engine="ollama",
+                model="gpt-oss:20b-cloud",
+                client_factory=_make_cloud,
+                max_retries=2,
+                supports_parallel=True,
+            )
+        except Exception as error:
+            warnings.append(f"初始化云端 Ollama 失败：{error}")
+
+    modelscope_providers: List[_LLMProvider] = []
+    if modelscope_api_key:
+        ms_candidates = list(ms_models)
+        if turbo_mode:
+            ms_candidates.extend(turbo_only_models)
+
+        for label, model_id in ms_candidates:
+            try:
+                provider = _mk_modelscope_provider(label, model_id)
+                # Validate factory lazily by instantiating once
+                provider.client_factory()
+                modelscope_providers.append(provider)
+            except Exception as error:
+                warnings.append(f"{label} 初始化失败：{error}")
+    elif turbo_mode:
+        warnings.append("未配置 ModelScope API Key，无法使用 ModelScope 高性能通道")
+
+    if turbo_mode:
+        fast_providers.extend(modelscope_providers)
+        if cloud_provider:
+            fast_providers.append(cloud_provider)
+        serial_chain.extend(fast_providers)
+        if local_provider:
+            serial_chain.append(local_provider)
+    else:
+        if local_provider:
+            serial_chain.append(local_provider)
+        serial_chain.extend(modelscope_providers)
+
+    return fast_providers, serial_chain, warnings
+
+
+def _extract_chat_content(response: Any) -> str:
+    """Return message content from Ollama/ModelScope responses.
+
+    Supports both dict-based responses and object responses (e.g., Pydantic
+    models) that expose ``message.content`` or ``model_dump``/``dict``.
+    """
+
+    if response is None:
+        return ""
+
+    # Object with ``message`` attribute (preferred for Ollama client)
+    message = getattr(response, "message", None)
+    if message is not None:
+        content = getattr(message, "content", None)
+        if content:
+            return content
+        if isinstance(message, dict):
+            content = message.get("content")
+            if content:
+                return str(content)
+
+    # Dict-like fallbacks
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(response, dict):
+        data = response
+    else:
+        if hasattr(response, "model_dump"):
+            try:
+                data = response.model_dump()
+            except Exception:
+                data = None
+        if data is None and hasattr(response, "dict"):
+            try:
+                data = response.dict()
+            except Exception:
+                data = None
+
+    if data is not None:
+        return str((data.get("message") or {}).get("content") or "")
+
+    return ""
+
+
+def _invoke_with_providers(providers: List[_LLMProvider], messages: List[Dict[str, str]]) -> Tuple[str, str, str]:
+    """Try providers in order; returns (raw_content, provider_label, model)."""
+
+    if not providers:
+        raise RuntimeError("无可用模型通道")
+
+    attempts: List[str] = []
+    for provider in providers:
+        tries = max(1, provider.max_retries)
+        for attempt in range(tries):
+            try:
+                client = provider.client_factory()
+                if provider.engine == "ollama":
+                    response = client.chat(
+                        model=provider.model,
+                        messages=messages,
+                        options={"num_ctx": 40001, "temperature": 0, "top_p": 0},
+                    )
+                    content = _extract_chat_content(response)
+                    if content:
+                        return content, provider.label, provider.model
+                    attempts.append(f"{provider.label} 响应为空")
+                elif provider.engine == "modelscope":
+                    response = provider.client_factory().chat(
+                        model=provider.model,
+                        messages=messages,
+                        options={"num_ctx": 40001},
+                    )
+                    content = _extract_chat_content(response)
+                    if content:
+                        return content, provider.label, provider.model
+                    attempts.append(f"{provider.label} 响应为空")
+                else:
+                    attempts.append(f"未知引擎 {provider.engine}")
+            except Exception as error:
+                attempts.append(f"{provider.label}# {attempt + 1} 失败: {error}")
+                time.sleep(1.0)
+
+    raise RuntimeError("；".join(attempts) or "无法完成请求")
+
+
+def _classify_document(
+    *,
+    invoker: Callable[[List[Dict[str, str]]], Tuple[str, str, str]],
+    stage_name: str,
+    file_path: str,
+    file_label: Optional[str] = None,
+    candidates: List[Dict[str, str]],
+    head_chars: int,
+    tail_chars: int,
+    preview_text: Optional[str] = None,
+    record_dir: Optional[Path] = None,
+    record_prefix: str = "",
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Call LLM to classify a parsed document into canonical APQP types."""
+
+    def _wait_if_paused(detail: str = "") -> None:
+        if not check_control:
+            return
+        while True:
+            status = check_control() or {}
+            if status.get("stopped"):
+                raise RuntimeError("分类已被停止")
+            if status.get("paused"):
+                time.sleep(1.0)
+                continue
+            break
+
+    _wait_if_paused(f"准备分类 {file_path}")
+
+    preview = preview_text
+    if preview is None:
+        preview = _load_text_preview(file_path, head_chars=head_chars, tail_chars=tail_chars)
+    file_name = file_label or os.path.basename(file_path)
+    payload = {
+        "file_name": file_name,
+        "path": file_path,
+        "preview_length": len(preview),
+        "primary_type": None,
+        "additional_types": [],
+        "confidence": 0.0,
+        "rationale": "",
+        "raw_response": None,
+        "status": "pending",
+    }
+
+    if not preview.strip():
+        payload.update(
+            {
+                "status": "error",
+                "error": "文本为空或无法读取",
+            }
+        )
+        return payload
+
+    candidates_text = "\n".join(
+        f"{idx+1}. {item['name']}：{item['description']}" for idx, item in enumerate(candidates)
+    )
+    prompt = f"""
+你是一名 APQP 交付物分类助手，请基于文档内容判断文件最符合的交付物类型。
+阶段：{stage_name}
+文件名：{file_name}
+候选交付物列表（仅可从中选择或回答 none）：
+{candidates_text}
+
+请阅读以下文件内容片段（已截取开头和结尾，以避免过长）：
+{preview}
+
+输出严格的 JSON（不含多余文字），字段要求：
+{{
+  "primary_type": "<从候选列表选择的名称，若无法匹配请填 none>",
+  "additional_types": ["<可选的额外交付物名称，用于表示1个文件覆盖多个交付物，可为空列表>"],
+  "confidence": <0到1之间的小数，表示匹配置信度>,
+  "rationale": "简要中文理由，说明为何匹配或为何选择 none"
+}}
+
+规则：
+- primary_type 必须是候选列表中的名称或 "none"，不得编造。
+- 如果文件同时覆盖多个交付物，可在 additional_types 中列出额外交付物名称（必须来自候选列表且不重复）。
+- 若文本与候选内容明显无关或信息太少，请输出 primary_type="none"，并给出低置信度原因。
+- 请结合文件名与内容综合判断，避免忽略文件名中的线索。
+"""
+
+    safe_stem = _safe_stem_for_record(file_name)
+    prompt_path: Optional[Path] = None
+    response_path: Optional[Path] = None
+
+    if record_dir:
+        record_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = record_dir / f"prompt_{record_prefix}{safe_stem}.txt"
+        try:
+            prompt_path.write_text(prompt, encoding="utf-8")
+            payload["prompt_file"] = str(prompt_path)
+        except Exception:
+            prompt_path = None
+
+    try:
+        messages = [
+            {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
+            {"role": "user", "content": prompt},
+        ]
+        _wait_if_paused(f"等待恢复后分类 {file_name}")
+        raw_content, provider_label, model_name = invoker(messages)
+        payload["raw_response"] = raw_content
+        payload["provider"] = provider_label
+        payload["model"] = model_name
+        if record_dir and raw_content:
+            response_path = record_dir / f"response_{record_prefix}{safe_stem}.txt"
+            try:
+                response_path.write_text(raw_content, encoding="utf-8")
+                payload["response_file"] = str(response_path)
+            except Exception:
+                response_path = None
+        data = _extract_json_object(raw_content)
+    except Exception as error:
+        payload.update({"status": "error", "error": str(error)})
+        return payload
+
+    primary_type = str(data.get("primary_type") or "").strip()
+    additional = data.get("additional_types") or []
+    if isinstance(additional, str):
+        additional = [additional]
+    additional_types = [str(item).strip() for item in additional if str(item).strip()]
+    rationale = str(data.get("rationale") or "").strip()
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(confidence, 1.0))
+
+    payload.update(
+        {
+            "primary_type": primary_type if primary_type else None,
+            "additional_types": additional_types,
+            "confidence": confidence,
+            "rationale": rationale,
+            "status": "success",
+        }
+    )
+    return payload
 
 
 def _clear_directory_contents(path: str) -> int:
@@ -741,6 +1632,108 @@ async def list_files(session_id: str, file_type: str = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"List files failed: {str(e)}")
 
+
+@app.post("/apqp-one-click/upload")
+async def apqp_upload_file(
+    session_id: str = Form(...),
+    stage: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload an APQP file to the specified stage directory."""
+
+    layout = _apqp_stage_layout(session_id)
+    stages = _normalize_apqp_stages(layout, [stage])
+    stage_name = stages[0]
+    target_dir = layout[stage_name]["upload_dir"]
+    os.makedirs(target_dir, exist_ok=True)
+    target_path = os.path.join(target_dir, file.filename)
+
+    try:
+        with open(target_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"上传失败: {error}")
+
+    return {
+        "status": "success",
+        "stage": stage_name,
+        "path": target_path,
+        "name": file.filename,
+    }
+
+
+@app.get("/apqp-one-click/files/{session_id}")
+async def apqp_list_files(session_id: str, stage: Optional[str] = None):
+    """List APQP uploaded files (optionally filtered by stage)."""
+
+    layout = _apqp_stage_layout(session_id)
+    if stage:
+        stages = _normalize_apqp_stages(layout, [stage])
+    else:
+        stages = list(layout.keys())
+
+    result: Dict[str, List[Dict[str, object]]] = {}
+    for stage_name in stages:
+        info = layout[stage_name]
+        entries: List[Dict[str, object]] = []
+        try:
+            for name in os.listdir(info["upload_dir"]):
+                file_path = os.path.join(info["upload_dir"], name)
+                if os.path.isfile(file_path) and name != ".gitkeep":
+                    stat = os.stat(file_path)
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                            "path": file_path,
+                        }
+                    )
+        except Exception:
+            entries = []
+        result[stage_name] = sorted(entries, key=lambda item: item["name"].lower())
+
+    return {
+        "status": "success",
+        "stage_order": stages,
+        "files": result,
+    }
+
+
+@app.get("/apqp-one-click/results/{session_id}")
+async def apqp_list_results(session_id: str):
+    """List generated APQP one-click final result files."""
+
+    root = Path(CONFIG["directories"]["generated_files"]) / session_id / "APQP_one_click_check" / "final_results"
+    entries: List[Dict[str, object]] = []
+    try:
+        for name in os.listdir(root):
+            file_path = root / name
+            if file_path.is_file():
+                stat = file_path.stat()
+                entries.append(
+                    {
+                        "name": name,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                        "path": str(file_path),
+                    }
+                )
+    except Exception:
+        entries = []
+
+    entries = sorted(entries, key=lambda item: item["modified"], reverse=True)
+    return {"status": "success", "files": entries}
+
+
+@app.post("/apqp-one-click/results/clear")
+async def apqp_clear_results(request: ApqpResultsClearRequest):
+    """Clear generated APQP one-click result files only."""
+
+    root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check" / "final_results"
+    deleted = _clear_directory_contents(str(root))
+    return {"status": "success", "deleted": deleted}
+
 @app.post("/clear-files")
 async def clear_files(request: ClearFilesRequest):
     """Clear all files for a session"""
@@ -771,71 +1764,7 @@ async def apqp_parse(request: ApqpParseRequest):
 
     layout = _apqp_stage_layout(request.session_id)
     stages = _normalize_apqp_stages(layout, request.stages)
-    summary: Dict[str, Any] = {
-        "stage_order": stages,
-        "stages": {},
-        "total_created": 0,
-    }
-
-    for stage_name in stages:
-        info = layout[stage_name]
-        upload_dir = info["upload_dir"]
-        parsed_dir = info["parsed_dir"]
-        logger = _ParseLogger()
-        stage_report: Dict[str, Any] = {
-            "slug": info["slug"],
-            "upload_dir": upload_dir,
-            "parsed_dir": parsed_dir,
-            "files_found": 0,
-            "pdf_created": 0,
-            "word_ppt_created": 0,
-            "excel_created": 0,
-            "text_created": 0,
-            "total_created": 0,
-        }
-
-        try:
-            files_found = [
-                name
-                for name in os.listdir(upload_dir)
-                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
-            ]
-            stage_report["files_found"] = len(files_found)
-            if not files_found:
-                logger.info("当前阶段没有上传文件，跳过解析。")
-            else:
-                pdf_created = process_pdf_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["pdf_created"] = len(pdf_created)
-
-                office_created = process_word_ppt_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["word_ppt_created"] = len(office_created)
-
-                excel_created = process_excel_folder(
-                    upload_dir, parsed_dir, logger, annotate_sources=True
-                )
-                stage_report["excel_created"] = len(excel_created)
-
-                text_created = process_textlike_folder(upload_dir, parsed_dir, logger)
-                stage_report["text_created"] = len(text_created)
-
-                total_created = (
-                    len(pdf_created)
-                    + len(office_created)
-                    + len(excel_created)
-                    + len(text_created)
-                )
-                stage_report["total_created"] = total_created
-                summary["total_created"] += total_created
-        except Exception as error:
-            logger.error(f"解析阶段失败: {error}")
-            stage_report["error"] = str(error)
-
-        stage_report["messages"] = logger.messages
-        summary["stages"][stage_name] = stage_report
+    summary = _parse_apqp_stages(layout, stages)
 
     return {
         "status": "success",
@@ -843,11 +1772,435 @@ async def apqp_parse(request: ApqpParseRequest):
     }
 
 
+def run_apqp_one_click_parse_job(
+    session_id: str,
+    publish: Callable[[Dict[str, Any]], None],
+    *,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+    stages: Optional[List[str]] = None,
+) -> None:
+    """Background runner for APQP一键解析任务。"""
+
+    layout = _apqp_stage_layout(session_id)
+    stage_list = _normalize_apqp_stages(layout, stages)
+
+    def _publish(update: Dict[str, Any]) -> None:
+        payload = dict(update or {})
+        payload.setdefault("message", "")
+        publish(payload)
+
+    _publish({"status": "running", "stage": "init", "message": "开始准备解析任务"})
+    try:
+        _parse_apqp_stages(layout, stage_list, publish=_publish, check_control=check_control)
+    except Exception as error:
+        _publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": str(error),
+                "message": f"解析失败: {error}",
+            }
+        )
+        raise
+
+
+# Bind runner after definition to avoid forward reference issues
+JOB_DEFINITIONS["apqp_one_click_parse"]["runner"] = run_apqp_one_click_parse_job
+
+
+def run_apqp_one_click_classify_job(
+    session_id: str,
+    publish: Callable[[Dict[str, Any]], None],
+    *,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+    stages: Optional[List[str]] = None,
+    head_chars: int = 3200,
+    tail_chars: int = 2000,
+    turbo_mode: bool = False,
+    control_job_id: Optional[str] = None,
+) -> None:
+    """Background runner for APQP一键分类任务。"""
+
+    request = ApqpClassifyRequest(
+        session_id=session_id,
+        stages=stages,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+        turbo_mode=turbo_mode,
+        control_job_id=control_job_id,
+    )
+    publish({"status": "running", "stage": "init", "message": "开始准备分类任务"})
+    try:
+        _run_apqp_classification(request, publish=publish, check_control=check_control)
+    except Exception as error:
+        publish(
+            {
+                "status": "failed",
+                "stage": "completed",
+                "error": str(error),
+                "message": f"分类失败: {error}",
+            }
+        )
+        raise
+
+
+JOB_DEFINITIONS["apqp_one_click_classify"]["runner"] = run_apqp_one_click_classify_job
+
+
+
+def _run_apqp_classification(
+    request: ApqpClassifyRequest,
+    *,
+    publish: Optional[Callable[[Dict[str, Any]], None]] = None,
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> Dict[str, Any]:
+    """Shared classification logic supporting sync and background runs."""
+
+    layout = _apqp_stage_layout(request.session_id)
+    stages = _normalize_apqp_stages(layout, request.stages)
+    summary: Dict[str, Any] = {"stage_order": stages, "stages": {}, "turbo_mode": bool(request.turbo_mode)}
+    fast_providers, serial_chain, provider_warnings = _prepare_apqp_llm_providers(bool(request.turbo_mode))
+    summary_warnings: List[str] = []
+    summary_warnings.extend(provider_warnings)
+
+    control_dir = _resolve_control_dir(
+        request.control_job_id,
+        expected_type="apqp_one_click_parse",
+        session_id=request.session_id,
+    )
+
+    def _check_control_flags() -> Dict[str, bool]:
+        if check_control:
+            try:
+                return check_control() or {}
+            except Exception:
+                return {"paused": False, "stopped": False}
+        if not control_dir:
+            return {"paused": False, "stopped": False}
+        try:
+            paused = os.path.isfile(os.path.join(control_dir, "pause"))
+            stopped = os.path.isfile(os.path.join(control_dir, "stop"))
+            return {"paused": paused, "stopped": stopped}
+        except Exception:
+            return {"paused": False, "stopped": False}
+
+    def _emit(update: Dict[str, Any], *, log_message: Optional[str] = None) -> None:
+        if not publish:
+            return
+        payload = dict(update or {})
+        if log_message:
+            payload["log"] = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": "info",
+                "message": log_message,
+            }
+        publish(payload)
+
+    def _wait_if_paused(detail: str = "") -> None:
+        status = _check_control_flags()
+        while status.get("paused"):
+            _emit({"status": "paused", "stage": "paused", "message": detail or "分类已暂停"}, log_message=detail)
+            time.sleep(1.0)
+            status = _check_control_flags()
+        if status.get("stopped"):
+            raise RuntimeError("分类已被停止")
+
+    if not serial_chain and not fast_providers:
+        raise HTTPException(status_code=500, detail="未找到可用的模型通道，请检查模型配置或网络。")
+
+    generated_root = Path(CONFIG["directories"]["generated_files"])
+    results_root = generated_root / request.session_id / "APQP_one_click_check"
+    final_results_dir = results_root / "final_results"
+    initial_results_dir = results_root / "initial_results_completeness"
+    final_results_dir.mkdir(parents=True, exist_ok=True)
+    initial_results_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary["results_dir"] = str(final_results_dir)
+    summary["initial_results_dir"] = str(initial_results_dir)
+    summary["timestamp_label"] = timestamp_label
+
+    project_serial, serial_sources = _detect_project_serial(layout)
+    if project_serial:
+        summary["project_serial"] = project_serial
+        if serial_sources:
+            summary["project_serial_sources"] = serial_sources
+    else:
+        summary_warnings.append("未能从上传或解析文件推断项目编号，将使用会话ID命名结果文件。")
+
+    serial_invoker = lambda messages: _invoke_with_providers(serial_chain or fast_providers, messages)
+    fast_invoker = lambda messages: _invoke_with_providers(fast_providers, messages)
+    parallel_enabled = bool(request.turbo_mode and fast_providers)
+
+    total_stages = max(len(stages), 1)
+    for idx, stage_name in enumerate(stages):
+        _wait_if_paused(f"{stage_name} 分类已暂停")
+        info = layout[stage_name]
+        parsed_dir = info["parsed_dir"]
+        upload_dir = info["upload_dir"]
+        candidates = _apqp_candidate_definitions(stage_name)
+        txt_files = _collect_parsed_txt_files(parsed_dir)
+        grouped_docs = _group_parsed_txt_by_upload(txt_files, upload_dir)
+
+        step_weight = 1.0 / total_stages
+        stage_base = idx * step_weight
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base,
+                "message": f"开始分类 {stage_name}",
+            },
+            log_message=f"开始分类 {stage_name}",
+        )
+
+        requirement_state: Dict[str, Dict[str, Any]] = {
+            name: {"status": "missing", "sources": [], "confidence": 0.0}
+            for name in (STAGE_REQUIREMENTS.get(stage_name) or tuple())
+        }
+
+        upload_files: List[str] = []
+        try:
+            upload_files = [
+                name
+                for name in os.listdir(upload_dir)
+                if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
+            ]
+        except Exception:
+            upload_files = []
+
+        documents: List[Dict[str, Any]] = []
+        pending_retry: List[Tuple[str, Dict[str, Any]]] = []
+
+        def _classify_group(group: Dict[str, Any], *, use_fast: bool) -> Dict[str, Any]:
+            _wait_if_paused(f"{stage_name} 分类暂停中")
+            invoker = fast_invoker if use_fast else serial_invoker
+            preview = _build_group_preview(
+                group.get("paths") or [],
+                max(0, int(request.head_chars)),
+                max(0, int(request.tail_chars)),
+            )
+            primary_path = (group.get("paths") or [""])[0]
+            result = _classify_document(
+                invoker=invoker,
+                stage_name=stage_name,
+                file_path=primary_path,
+                file_label=group.get("label") or os.path.basename(primary_path),
+                candidates=candidates,
+                head_chars=max(0, int(request.head_chars)),
+                tail_chars=max(0, int(request.tail_chars)),
+                preview_text=preview,
+                record_dir=initial_results_dir,
+                record_prefix=f"{info['slug']}_",
+                check_control=_check_control_flags,
+            )
+            result["source_label"] = group.get("label")
+            result["paths"] = group.get("paths") or []
+            return result
+
+        if parallel_enabled and len(grouped_docs) > 1:
+            max_workers = min(4, len(grouped_docs))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(_classify_group, group, use_fast=True): group for group in grouped_docs}
+                for future in as_completed(future_map):
+                    group = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as error:
+                        primary_path = (group.get("paths") or [""])[0]
+                        result = {
+                            "status": "error",
+                            "error": str(error),
+                            "file_name": group.get("label") or os.path.basename(primary_path),
+                            "path": primary_path,
+                            "source_label": group.get("label"),
+                        }
+                    if result.get("status") == "success":
+                        documents.append(result)
+                    else:
+                        pending_retry.append((group, result))
+                    _emit(
+                        {
+                            "status": "running",
+                            "stage": stage_name,
+                            "progress": stage_base
+                            + step_weight * (len(documents) + len(pending_retry)) / max(len(grouped_docs), 1),
+                            "message": f"正在分类 {group.get('label') or '文件'}",
+                        },
+                    )
+        else:
+            for processed, group in enumerate(grouped_docs):
+                result = _classify_group(group, use_fast=False)
+                if result.get("status") == "success":
+                    documents.append(result)
+                else:
+                    pending_retry.append((group, result))
+                _emit(
+                    {
+                        "status": "running",
+                        "stage": stage_name,
+                        "progress": stage_base
+                        + step_weight * (processed + 1) / max(len(grouped_docs), 1),
+                        "message": f"已处理 {processed + 1}/{len(grouped_docs)} 个文件",
+                    },
+                )
+
+        if pending_retry and serial_chain:
+            for group, first_result in pending_retry:
+                _wait_if_paused(f"{stage_name} 重试暂停中")
+                fallback_result = _classify_group(group, use_fast=False)
+                target_result = fallback_result
+                if fallback_result.get("status") != "success":
+                    if first_result.get("error"):
+                        fallback_result.setdefault("previous_errors", []).append(first_result.get("error"))
+                    merged_error = "; ".join(
+                        item
+                        for item in [first_result.get("error"), fallback_result.get("error")]
+                        if item
+                    )
+                    fallback_result["error"] = merged_error or fallback_result.get("error")
+                documents.append(target_result)
+
+        for result in documents:
+            matched: List[str] = []
+            suggested: List[str] = []
+            file_path = result.get("path", "")
+            if result.get("status") == "success":
+                if not result.get("source_label"):
+                    result["source_label"] = _source_label_from_parsed_file(
+                        result.get("path", ""), upload_dir, include_sheet=False
+                    )
+                names = []
+                primary = result.get("primary_type") or ""
+                if primary and primary.lower() != "none":
+                    names.append(primary)
+                for extra in result.get("additional_types") or []:
+                    if extra not in names:
+                        names.append(extra)
+                for name in names:
+                    if name in requirement_state:
+                        matched.append(name)
+                    else:
+                        suggested.append(name)
+                for req in matched:
+                    state = requirement_state[req]
+                    state["status"] = "present"
+                    state["confidence"] = max(state.get("confidence", 0.0), result.get("confidence") or 0.0)
+                    source_label = result.get("source_label") or result.get("file_name") or os.path.basename(file_path)
+                    state.setdefault("sources", []).append(source_label)
+            result["matched_requirements"] = matched
+            if suggested:
+                result["suggested_types"] = suggested
+
+        for state in requirement_state.values():
+            sources = state.get("sources") or []
+            if sources:
+                state["sources"] = sorted(dict.fromkeys(sources))
+
+        present_count = sum(1 for item in requirement_state.values() if item.get("status") == "present")
+        missing_count = len(requirement_state) - present_count
+
+        stage_summary = {
+            "slug": info["slug"],
+            "upload_dir": upload_dir,
+            "parsed_dir": parsed_dir,
+            "llm_mode": "turbo" if request.turbo_mode else "standard",
+            "requirements": [
+                {"name": name, **requirement_state[name]} for name in requirement_state
+            ],
+            "documents": documents,
+            "stats": {
+                "total_requirements": len(requirement_state),
+                "present": present_count,
+                "missing": max(missing_count, 0),
+                "files_classified": len(documents),
+                "parsed_files_found": len(grouped_docs),
+            },
+        }
+
+        if not grouped_docs and upload_files:
+            stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
+        if not candidates:
+            extra = "当前阶段未配置应交付物列表。"
+            if stage_summary.get("warning"):
+                stage_summary["warning"] = f"{stage_summary['warning']} {extra}"
+            else:
+                stage_summary["warning"] = extra
+        summary["stages"][stage_name] = stage_summary
+        _emit(
+            {
+                "status": "running",
+                "stage": stage_name,
+                "progress": stage_base + step_weight,
+                "message": f"{stage_name} 分类完成",
+            },
+            log_message=f"{stage_name} 分类完成",
+        )
+
+    df = _completeness_dataframe(summary)
+    serial_label = project_serial or request.session_id
+    serial_label = serial_label.replace(os.sep, "_")
+    if os.altsep:
+        serial_label = serial_label.replace(os.altsep, "_")
+    export_basename = f"{serial_label}项目交付物齐套性检查结果"
+    export_with_ts = f"{export_basename}_{timestamp_label}"
+    summary_path = final_results_dir / f"{export_with_ts}.json"
+    csv_path = final_results_dir / f"{export_with_ts}.csv"
+    xlsx_path = final_results_dir / f"{export_with_ts}.xlsx"
+
+    try:
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["summary_file"] = str(summary_path)
+    except Exception as error:
+        summary["summary_file"] = None
+        summary_warnings.append(f"保存分类结果JSON失败：{error}")
+
+    try:
+        if df.empty:
+            df = pd.DataFrame(columns=["阶段", "交付物", "状态", "来源", "置信度", "备注"])
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        summary["csv_file"] = str(csv_path)
+    except Exception as error:
+        summary_warnings.append(f"导出CSV失败：{error}")
+
+    try:
+        df.to_excel(xlsx_path, index=False)
+        summary["xlsx_file"] = str(xlsx_path)
+    except Exception as error:
+        summary_warnings.append(f"导出XLSX失败：{error}")
+
+    if summary_warnings:
+        summary["warnings"] = summary_warnings
+
+    _emit(
+        {
+            "status": "succeeded",
+            "stage": "completed",
+            "progress": 1.0,
+            "message": "分类完成",
+            "result_files": [str(p) for p in [summary_path, csv_path, xlsx_path] if p],
+            "checkpoint": {"summary": summary},
+        }
+    )
+
+    return {"status": "success", "summary": summary}
+
+
+@app.post("/apqp-one-click/classify")
+async def apqp_classify(request: ApqpClassifyRequest):
+    """Classify parsed APQP documents via LLM to assess completeness."""
+
+    return _run_apqp_classification(request)
+
+
 @app.post("/apqp-one-click/clear")
 async def apqp_clear(request: ApqpClearRequest):
     """Clear APQP uploads and/or parsed outputs for a session."""
 
     layout = _apqp_stage_layout(request.session_id)
+    results_root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check"
+    extra_dirs = {
+        "initial_results_completeness": results_root / "initial_results_completeness",
+    }
     target = (request.target or "all").lower()
     if target not in {"uploads", "parsed", "all"}:
         raise HTTPException(status_code=400, detail="target 必须是 uploads、parsed 或 all")
@@ -867,6 +2220,13 @@ async def apqp_clear(request: ApqpClearRequest):
             "uploads_deleted": uploads_deleted,
             "parsed_deleted": parsed_deleted,
         }
+
+    if target in {"parsed", "all"}:
+        for name, path in extra_dirs.items():
+            removed = _clear_directory_contents(str(path))
+            if removed:
+                total_deleted += removed
+            details[name] = {"deleted": removed}
 
     return {
         "status": "success",
@@ -888,6 +2248,129 @@ async def file_exists(session_id: str, file_path: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Check file failed: {str(e)}")
+
+
+@app.post("/apqp-one-click/jobs", response_model=EnterpriseJobStatus)
+async def start_apqp_one_click_job(request: ApqpParseJobRequest):
+    """Start a background APQP parse job."""
+
+    record = _start_job(
+        "apqp_one_click_parse",
+        request.session_id,
+        runner_kwargs={"stages": request.stages},
+    )
+    return _record_to_status(record)
+
+
+@app.get("/apqp-one-click/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_apqp_one_click_job(job_id: str):
+    _prune_jobs()
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        return _record_to_status(record)
+
+
+@app.get("/apqp-one-click/jobs", response_model=List[EnterpriseJobStatus])
+async def list_apqp_one_click_jobs(session_id: Optional[str] = None):
+    """List APQP one-click parsing jobs for a session (or all sessions)."""
+
+    _prune_jobs()
+    with jobs_lock:
+        records = [
+            _record_to_status(record)
+            for record in jobs.values()
+            if record.job_type == "apqp_one_click_parse"
+            and (session_id is None or record.session_id == session_id)
+        ]
+    records.sort(key=lambda status: status.created_at, reverse=True)
+    return records
+
+
+@app.post("/apqp-one-click/classify/jobs", response_model=EnterpriseJobStatus)
+async def start_apqp_classify_job(request: ApqpClassifyRequest) -> EnterpriseJobStatus:
+    record = _start_job(
+        "apqp_one_click_classify",
+        request.session_id,
+        runner_kwargs={
+            "stages": request.stages,
+            "head_chars": request.head_chars,
+            "tail_chars": request.tail_chars,
+            "turbo_mode": request.turbo_mode,
+            "control_job_id": request.control_job_id,
+        },
+    )
+    return _record_to_status(record)
+
+
+@app.get("/apqp-one-click/classify/jobs/{job_id}", response_model=EnterpriseJobStatus)
+async def get_apqp_classify_job(job_id: str):
+    return _get_job_status(job_id, expected_type="apqp_one_click_classify")
+
+
+@app.get("/apqp-one-click/classify/jobs", response_model=List[EnterpriseJobStatus])
+async def list_apqp_classify_jobs(session_id: Optional[str] = None):
+    return _list_jobs("apqp_one_click_classify", session_id)
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="pause", job_type="apqp_one_click_classify")
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="resume", job_type="apqp_one_click_classify")
+
+
+@app.post("/apqp-one-click/classify/jobs/{job_id}/stop", response_model=EnterpriseJobStatus)
+async def stop_apqp_classify_job(job_id: str) -> EnterpriseJobStatus:
+    return _pause_resume_stop_job(job_id, action="stop", job_type="apqp_one_click_classify")
+
+
+@app.post("/apqp-one-click/jobs/{job_id}/pause", response_model=EnterpriseJobStatus)
+async def pause_apqp_one_click_job(job_id: str):
+    """Pause an APQP一键解析任务 if supported."""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持暂停")
+        try:
+            open(os.path.join(control_dir, "pause"), "a").close()
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"设置暂停失败: {error}")
+        record.status = "paused"
+        record.stage = "paused"
+        record.updated_at = time.time()
+        return _record_to_status(record)
+
+
+@app.post("/apqp-one-click/jobs/{job_id}/resume", response_model=EnterpriseJobStatus)
+async def resume_apqp_one_click_job(job_id: str):
+    """Resume a paused APQP一键解析任务."""
+
+    with jobs_lock:
+        record = jobs.get(job_id)
+        if not record or record.job_type != "apqp_one_click_parse":
+            raise HTTPException(status_code=404, detail="未找到解析任务")
+        control_dir = record.metadata.get("control_dir")
+        if not control_dir:
+            raise HTTPException(status_code=400, detail="任务不支持恢复")
+        try:
+            pause_flag = os.path.join(control_dir, "pause")
+            if os.path.isfile(pause_flag):
+                os.remove(pause_flag)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"取消暂停失败: {error}")
+        record.status = "running"
+        record.stage = record.stage or "running"
+        record.updated_at = time.time()
+        return _record_to_status(record)
 
 
 @app.post("/enterprise-standard/jobs", response_model=EnterpriseJobStatus)
