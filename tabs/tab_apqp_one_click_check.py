@@ -512,11 +512,11 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     st.write("（未上传）")
                     continue
                 for info in files:
-                    cols = st.columns([6, 1])
+                    cols = st.columns([4, 1])
                     cols[0].write(f"📄 {info['name']}")
                     delete_key = f"apqp_delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
                     if cols[1].button(
-                        "🗑️ 删除",
+                        "删除",
                         key=delete_key,
                         disabled=not backend_ready,
                     ):
