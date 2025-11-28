@@ -271,6 +271,25 @@ class BackendClient:
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def list_apqp_results(self, session_id: str) -> Dict:
+        """List APQP one-click generated results."""
+
+        try:
+            response = requests.get(f"{self.base_url}/apqp-one-click/results/{session_id}", timeout=30)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def clear_apqp_results(self, session_id: str) -> Dict:
+        """Clear APQP one-click generated result files."""
+
+        try:
+            payload = {"session_id": session_id}
+            response = requests.post(f"{self.base_url}/apqp-one-click/results/clear", json=payload, timeout=120)
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
     
     def file_exists(self, session_id: str, file_path: str) -> Dict:
         """Check if a file exists via the backend"""

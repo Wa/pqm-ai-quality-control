@@ -95,6 +95,24 @@ def _fetch_stage_files(backend_client, session_id: str, stage_name: str) -> List
     return sorted(normalized, key=lambda item: (item["name"] or "").lower())
 
 
+def _fetch_result_files(backend_client, session_id: str) -> List[Dict[str, object]]:
+    response = backend_client.list_apqp_results(session_id)
+    if not isinstance(response, dict) or response.get("status") != "success":
+        return []
+    entries = response.get("files") or []
+    normalized: List[Dict[str, object]] = []
+    for entry in entries:
+        normalized.append(
+            {
+                "name": entry.get("name"),
+                "size": int(entry.get("size", 0)),
+                "modified": float(entry.get("modified", 0.0)),
+                "path": entry.get("path") or "",
+            }
+        )
+    return sorted(normalized, key=lambda item: item["modified"], reverse=True)
+
+
 def _render_classification_results(summary: Dict[str, Any]) -> None:
     """Render APQP classification summary in the UI."""
 
@@ -457,7 +475,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         detail = str(response.get("detail") or "")
                         message = str(response.get("message") or "")
                     st.error(f"删除失败：{detail or message or response}")
-        stage_tabs = st.tabs(list(STAGE_ORDER))
+        tab_labels = list(STAGE_ORDER) + ["分析结果"]
+        stage_tabs = st.tabs(tab_labels)
         for idx, stage_name in enumerate(STAGE_ORDER):
             with stage_tabs[idx]:
                 files = _fetch_stage_files(backend_client, session_id, stage_name) if backend_client else []
@@ -490,4 +509,38 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                         detail = str(response.get("detail") or "")
                                         message = str(response.get("message") or "")
                                     st.error(f"删除失败：{detail or message or response}")
+
+        with stage_tabs[-1]:
+            result_files = _fetch_result_files(backend_client, session_id) if backend_client else []
+            if st.button(
+                "🗑️ 删除全部分析结果",
+                key=f"apqp_clear_results_{session_id}",
+                disabled=not backend_ready,
+            ):
+                if not backend_ready or backend_client is None:
+                    st.error("后台服务不可用，无法删除分析结果。")
+                else:
+                    response = backend_client.clear_apqp_results(session_id)
+                    if isinstance(response, dict) and response.get("status") == "success":
+                        deleted = int(response.get("deleted") or 0)
+                        st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
+                        st.rerun()
+                    else:
+                        detail = ""
+                        message = ""
+                        if isinstance(response, dict):
+                            detail = str(response.get("detail") or "")
+                            message = str(response.get("message") or "")
+                        st.error(f"删除失败：{detail or message or response}")
+
+            if not result_files:
+                st.write("（暂无分析结果）")
+            else:
+                for info in result_files:
+                    display_name = _truncate_filename(info["name"])
+                    with st.expander(f"📑 {display_name}", expanded=False):
+                        st.write(f"**文件名:** {info['name']}")
+                        st.write(f"**大小:** {_format_file_size(int(info['size']))}")
+                        st.write(f"**修改时间:** {_format_timestamp(float(info['modified']))}")
+                        st.caption(info.get("path") or "")
 

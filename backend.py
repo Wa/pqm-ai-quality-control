@@ -161,6 +161,10 @@ class ApqpClearRequest(BaseModel):
     target: Optional[str] = "all"
 
 
+class ApqpResultsClearRequest(BaseModel):
+    session_id: str
+
+
 class ApqpClassifyRequest(BaseModel):
     session_id: str
     stages: Optional[List[str]] = None
@@ -1628,6 +1632,41 @@ async def apqp_list_files(session_id: str, stage: Optional[str] = None):
         "files": result,
     }
 
+
+@app.get("/apqp-one-click/results/{session_id}")
+async def apqp_list_results(session_id: str):
+    """List generated APQP one-click final result files."""
+
+    root = Path(CONFIG["directories"]["generated_files"]) / session_id / "APQP_one_click_check" / "final_results"
+    entries: List[Dict[str, object]] = []
+    try:
+        for name in os.listdir(root):
+            file_path = root / name
+            if file_path.is_file():
+                stat = file_path.stat()
+                entries.append(
+                    {
+                        "name": name,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                        "path": str(file_path),
+                    }
+                )
+    except Exception:
+        entries = []
+
+    entries = sorted(entries, key=lambda item: item["modified"], reverse=True)
+    return {"status": "success", "files": entries}
+
+
+@app.post("/apqp-one-click/results/clear")
+async def apqp_clear_results(request: ApqpResultsClearRequest):
+    """Clear generated APQP one-click result files only."""
+
+    root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check" / "final_results"
+    deleted = _clear_directory_contents(str(root))
+    return {"status": "success", "deleted": deleted}
+
 @app.post("/clear-files")
 async def clear_files(request: ClearFilesRequest):
     """Clear all files for a session"""
@@ -1808,9 +1847,10 @@ def _run_apqp_classification(
     initial_results_dir = results_root / "initial_results_completeness"
     final_results_dir.mkdir(parents=True, exist_ok=True)
     initial_results_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = final_results_dir / "classification_summary.json"
+    timestamp_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary["results_dir"] = str(final_results_dir)
     summary["initial_results_dir"] = str(initial_results_dir)
+    summary["timestamp_label"] = timestamp_label
 
     project_serial, serial_sources = _detect_project_serial(layout)
     if project_serial:
@@ -2018,8 +2058,10 @@ def _run_apqp_classification(
     if os.altsep:
         serial_label = serial_label.replace(os.altsep, "_")
     export_basename = f"{serial_label}项目交付物齐套性检查结果"
-    csv_path = final_results_dir / f"{export_basename}.csv"
-    xlsx_path = final_results_dir / f"{export_basename}.xlsx"
+    export_with_ts = f"{export_basename}_{timestamp_label}"
+    summary_path = final_results_dir / f"{export_with_ts}.json"
+    csv_path = final_results_dir / f"{export_with_ts}.csv"
+    xlsx_path = final_results_dir / f"{export_with_ts}.xlsx"
 
     try:
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2073,7 +2115,6 @@ async def apqp_clear(request: ApqpClearRequest):
     layout = _apqp_stage_layout(request.session_id)
     results_root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check"
     extra_dirs = {
-        "final_results": results_root / "final_results",
         "initial_results_completeness": results_root / "initial_results_completeness",
     }
     target = (request.target or "all").lower()
