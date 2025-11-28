@@ -31,6 +31,40 @@ from bisheng_client import (
 )
 
 
+def _extract_chat_content(response: Any) -> str:
+    """Return chat text from Ollama/ModelScope responses (dict or object)."""
+
+    if response is None:
+        return ""
+
+    message_obj = getattr(response, "message", None)
+    if message_obj is not None:
+        content = getattr(message_obj, "content", None)
+        if content:
+            return content
+        if isinstance(message_obj, dict):
+            content = message_obj.get("content")
+            if content:
+                return str(content)
+
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(response, dict):
+        data = response
+    else:
+        for attr in ("model_dump", "dict"):
+            if hasattr(response, attr):
+                try:
+                    data = getattr(response, attr)()
+                    break
+                except Exception:
+                    data = None
+
+    if data is not None:
+        return str((data.get("message") or {}).get("content") or data.get("response") or data.get("text") or "")
+
+    return ""
+
+
 PDF_EXTENSIONS = {".pdf"}
 WORD_PPT_EXTENSIONS = {".doc", ".docx", ".ppt", ".pptx"}
 SPREADSHEET_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".csv"}
@@ -1579,9 +1613,7 @@ def _call_llm_for_issue_lists(text: str, file_label: str, progress_area) -> tupl
         except Exception as error:
             progress_area.error(f"调用 gpt-oss 失败 ({file_label} 第{index}段): {error}")
             continue
-        content = ""
-        if isinstance(result, dict):
-            content = result.get("message", {}).get("content") or result.get("response") or ""
+        content = _extract_chat_content(result)
         if not content:
             progress_area.warning(f"gpt-oss 未返回内容 ({file_label} 第{index}段)")
             continue

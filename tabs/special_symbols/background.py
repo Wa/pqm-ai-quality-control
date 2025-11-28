@@ -42,6 +42,40 @@ from . import (
 from .summaries import persist_compare_outputs
 from .workflow import SPECIAL_SYMBOLS_CHUNK_PROMPT_PREFIX
 
+
+def _extract_chat_content(response: Any) -> str:
+    """Return chat text from Ollama/ModelScope responses (dict or object)."""
+
+    if response is None:
+        return ""
+
+    message_obj = getattr(response, "message", None)
+    if message_obj is not None:
+        content = getattr(message_obj, "content", None)
+        if content:
+            return content
+        if isinstance(message_obj, dict):
+            content = message_obj.get("content")
+            if content:
+                return str(content)
+
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(response, dict):
+        data = response
+    else:
+        for attr in ("model_dump", "dict"):
+            if hasattr(response, attr):
+                try:
+                    data = getattr(response, attr)()
+                    break
+                except Exception:
+                    data = None
+
+    if data is not None:
+        return str((data.get("message") or {}).get("content") or data.get("response") or data.get("text") or "")
+
+    return ""
+
 GPT_OSS_PROMPT_PREFIX = (
     "你是一名质量工程专家。任务：从文本中找出在“特殊特性”分类列中被标记的项目，并输出清单。\n\n"
     "严格规则：\n"
@@ -109,11 +143,7 @@ def _execute_ollama_chat_with_timeout(
             raise TimeoutError(f"{provider_label} 调用超时（超过{timeout_s}秒未返回）") from exc
 
     duration_ms = int((time.time() - start_ts) * 1000)
-    text = (
-        response.get("message", {}).get("content")
-        or response.get("response")
-        or ""
-    )
+    text = _extract_chat_content(response)
     stats = response.get("eval_info") or response.get("stats") or {}
     used_model = response.get("model") or model_name
     return text, stats, used_model, duration_ms
@@ -857,11 +887,7 @@ def _run_gpt_extraction_parallel(
                         last_error = call_error
                         continue
 
-                    message = (
-                        response.get("message", {}).get("content")
-                        or response.get("response")
-                        or ""
-                    )
+                    message = _extract_chat_content(response)
                     stats = response.get("eval_info") or response.get("stats") or {}
                     used_model = response.get("model") or provider_model
                     duration_ms = int((time.time() - start_ts) * 1000)

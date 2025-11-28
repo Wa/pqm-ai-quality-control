@@ -25,13 +25,36 @@ from .mcp_tools import (
 )
 
 
-def _extract_message_text(resp: Dict[str, Any]) -> str:
-    return (
-        (resp.get("message") or {}).get("content")
-        or resp.get("response")
-        or resp.get("text")
-        or ""
-    )
+def _extract_message_text(resp: Any) -> str:
+    if resp is None:
+        return ""
+
+    message_obj = getattr(resp, "message", None)
+    if message_obj is not None:
+        content = getattr(message_obj, "content", None)
+        if content:
+            return content
+        if isinstance(message_obj, dict):
+            content = message_obj.get("content")
+            if content:
+                return str(content)
+
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(resp, dict):
+        data = resp
+    else:
+        for attr in ("model_dump", "dict"):
+            if hasattr(resp, attr):
+                try:
+                    data = getattr(resp, attr)()
+                    break
+                except Exception:
+                    data = None
+
+    if data is not None:
+        return str((data.get("message") or {}).get("content") or data.get("response") or data.get("text") or "")
+
+    return ""
 
 
 def _extract_tool_calls_from_chunk(chunk) -> Optional[List[Dict[str, Any]]]:
