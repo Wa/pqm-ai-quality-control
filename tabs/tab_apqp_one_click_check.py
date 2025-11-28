@@ -512,31 +512,28 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     st.write("（未上传）")
                     continue
                 for info in files:
-                    display_name = _truncate_filename(info["name"])
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        st.write(f"**文件名:** {info['name']}")
-                        st.write(f"**大小:** {_format_file_size(int(info['size']))}")
-                        st.write(f"**修改时间:** {_format_timestamp(float(info['modified']))}")
-                        delete_key = f"apqp_delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
-                        if st.button(
-                            "🗑️ 删除",
-                            key=delete_key,
-                            disabled=not backend_ready,
-                        ):
-                            if not backend_ready or backend_client is None:
-                                st.error("后台服务不可用，无法删除文件。")
+                    cols = st.columns([6, 1])
+                    cols[0].write(f"📄 {info['name']}")
+                    delete_key = f"apqp_delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
+                    if cols[1].button(
+                        "🗑️ 删除",
+                        key=delete_key,
+                        disabled=not backend_ready,
+                    ):
+                        if not backend_ready or backend_client is None:
+                            st.error("后台服务不可用，无法删除文件。")
+                        else:
+                            response = backend_client.delete_file(session_id, info["path"])
+                            if isinstance(response, dict) and response.get("status") == "success":
+                                st.success(f"已删除: {info['name']}")
+                                st.rerun()
                             else:
-                                response = backend_client.delete_file(session_id, info["path"])
-                                if isinstance(response, dict) and response.get("status") == "success":
-                                    st.success(f"已删除: {info['name']}")
-                                    st.rerun()
-                                else:
-                                    detail = ""
-                                    message = ""
-                                    if isinstance(response, dict):
-                                        detail = str(response.get("detail") or "")
-                                        message = str(response.get("message") or "")
-                                    st.error(f"删除失败：{detail or message or response}")
+                                detail = ""
+                                message = ""
+                                if isinstance(response, dict):
+                                    detail = str(response.get("detail") or "")
+                                    message = str(response.get("message") or "")
+                                st.error(f"删除失败：{detail or message or response}")
 
         with stage_tabs[-1]:
             result_files = _fetch_result_files(backend_client, session_id) if backend_client else []

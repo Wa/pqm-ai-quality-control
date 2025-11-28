@@ -663,7 +663,9 @@ def _collect_parsed_txt_files(folder: str) -> List[str]:
     return sorted(paths)
 
 
-def _source_label_from_parsed_file(file_path: str, upload_dir: str) -> str:
+def _source_label_from_parsed_file(
+    file_path: str, upload_dir: str, *, include_sheet: bool = True
+) -> str:
     """Return a user-facing source label for a parsed txt, preferring upload names."""
 
     base_name = os.path.basename(file_path)
@@ -706,10 +708,64 @@ def _source_label_from_parsed_file(file_path: str, upload_dir: str) -> str:
         prefix, sheet_token = stem.split("_SHEET_", 1)
         upload_name = _match_upload(annotated_file or prefix)
         sheet_label = annotated_sheet or sheet_token
-        return f"{upload_name}(工作表：{sheet_label})"
+        if include_sheet:
+            return f"{upload_name}(工作表：{sheet_label})"
+        return upload_name
 
     upload_name = _match_upload(annotated_file or stem)
     return upload_name
+
+
+def _sheet_label_from_parsed_path(file_path: str) -> str:
+    """Extract sheet token from parsed Excel txt name if present."""
+
+    base = os.path.basename(file_path)
+    stem = base[:-4] if base.lower().endswith(".txt") else base
+    if "_SHEET_" in stem:
+        return stem.split("_SHEET_", 1)[1]
+    return ""
+
+
+def _group_parsed_txt_by_upload(txt_files: List[str], upload_dir: str) -> List[Dict[str, Any]]:
+    """Group parsed txt files by their originating upload (merge Excel sheets)."""
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for path in txt_files:
+        label = _source_label_from_parsed_file(path, upload_dir, include_sheet=False)
+        key = label.lower()
+        if key not in groups:
+            groups[key] = {"label": label, "paths": []}
+            order.append(key)
+        groups[key]["paths"].append(path)
+
+    return [groups[key] for key in order]
+
+
+def _build_group_preview(paths: List[str], head_chars: int, tail_chars: int) -> str:
+    """Combine multiple parsed txt files (e.g., Excel sheets) into a single preview."""
+
+    if not paths:
+        return ""
+    fragments: List[str] = []
+    for path in paths:
+        sheet_label = _sheet_label_from_parsed_path(path)
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        if not text:
+            continue
+        if sheet_label:
+            fragments.append(f"【工作表：{sheet_label}】\n{text}")
+        else:
+            fragments.append(text)
+
+    combined = "\n\n".join(fragments)
+    if not combined:
+        return ""
+    return _compose_preview(combined, head_chars=head_chars, tail_chars=tail_chars)
 
 
 def _resolve_control_dir(job_id: Optional[str], *, expected_type: Optional[str] = None, session_id: Optional[str] = None) -> str:
@@ -975,6 +1031,18 @@ def _parse_apqp_stages(
     return summary
 
 
+def _compose_preview(text: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
+    """Build a truncated preview using head/tail slices from text content."""
+
+    if head_chars <= 0 and tail_chars <= 0:
+        return text
+    head = text[: max(head_chars, 0)] if head_chars > 0 else ""
+    tail = text[-max(tail_chars, 0) :] if tail_chars > 0 else ""
+    if tail and head:
+        return f"【开头】\n{head}\n\n【结尾】\n{tail}"
+    return head or tail
+
+
 def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int = 2000) -> str:
     """Return a head/tail preview from a text file to control token usage."""
 
@@ -982,13 +1050,7 @@ def _load_text_preview(file_path: str, head_chars: int = 3200, tail_chars: int =
         text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return ""
-    if head_chars <= 0 and tail_chars <= 0:
-        return text
-    head = text[: max(head_chars, 0)]
-    tail = text[-max(tail_chars, 0) :] if tail_chars > 0 else ""
-    if tail and head:
-        return f"【开头】\n{head}\n\n【结尾】\n{tail}"
-    return head or tail
+    return _compose_preview(text, head_chars=head_chars, tail_chars=tail_chars)
 
 
 def _safe_stem_for_record(name: str) -> str:
@@ -1300,9 +1362,11 @@ def _classify_document(
     invoker: Callable[[List[Dict[str, str]]], Tuple[str, str, str]],
     stage_name: str,
     file_path: str,
+    file_label: Optional[str] = None,
     candidates: List[Dict[str, str]],
     head_chars: int,
     tail_chars: int,
+    preview_text: Optional[str] = None,
     record_dir: Optional[Path] = None,
     record_prefix: str = "",
     check_control: Optional[Callable[[], Dict[str, bool]]] = None,
@@ -1323,8 +1387,10 @@ def _classify_document(
 
     _wait_if_paused(f"准备分类 {file_path}")
 
-    preview = _load_text_preview(file_path, head_chars=head_chars, tail_chars=tail_chars)
-    file_name = os.path.basename(file_path)
+    preview = preview_text
+    if preview is None:
+        preview = _load_text_preview(file_path, head_chars=head_chars, tail_chars=tail_chars)
+    file_name = file_label or os.path.basename(file_path)
     payload = {
         "file_name": file_name,
         "path": file_path,
@@ -1352,6 +1418,7 @@ def _classify_document(
     prompt = f"""
 你是一名 APQP 交付物分类助手，请基于文档内容判断文件最符合的交付物类型。
 阶段：{stage_name}
+文件名：{file_name}
 候选交付物列表（仅可从中选择或回答 none）：
 {candidates_text}
 
@@ -1370,7 +1437,7 @@ def _classify_document(
 - primary_type 必须是候选列表中的名称或 "none"，不得编造。
 - 如果文件同时覆盖多个交付物，可在 additional_types 中列出额外交付物名称（必须来自候选列表且不重复）。
 - 若文本与候选内容明显无关或信息太少，请输出 primary_type="none"，并给出低置信度原因。
-- 仅依据文本内容做判断，避免依赖文件名。
+- 请结合文件名与内容综合判断，避免忽略文件名中的线索。
 """
 
     safe_stem = _safe_stem_for_record(file_name)
@@ -1872,6 +1939,7 @@ def _run_apqp_classification(
         upload_dir = info["upload_dir"]
         candidates = _apqp_candidate_definitions(stage_name)
         txt_files = _collect_parsed_txt_files(parsed_dir)
+        grouped_docs = _group_parsed_txt_by_upload(txt_files, upload_dir)
 
         step_weight = 1.0 / total_stages
         stage_base = idx * step_weight
@@ -1903,70 +1971,83 @@ def _run_apqp_classification(
         documents: List[Dict[str, Any]] = []
         pending_retry: List[Tuple[str, Dict[str, Any]]] = []
 
-        def _classify_path(path: str, *, use_fast: bool) -> Dict[str, Any]:
+        def _classify_group(group: Dict[str, Any], *, use_fast: bool) -> Dict[str, Any]:
             _wait_if_paused(f"{stage_name} 分类暂停中")
             invoker = fast_invoker if use_fast else serial_invoker
-            return _classify_document(
+            preview = _build_group_preview(
+                group.get("paths") or [],
+                max(0, int(request.head_chars)),
+                max(0, int(request.tail_chars)),
+            )
+            primary_path = (group.get("paths") or [""])[0]
+            result = _classify_document(
                 invoker=invoker,
                 stage_name=stage_name,
-                file_path=path,
+                file_path=primary_path,
+                file_label=group.get("label") or os.path.basename(primary_path),
                 candidates=candidates,
                 head_chars=max(0, int(request.head_chars)),
                 tail_chars=max(0, int(request.tail_chars)),
+                preview_text=preview,
                 record_dir=initial_results_dir,
                 record_prefix=f"{info['slug']}_",
                 check_control=_check_control_flags,
             )
+            result["source_label"] = group.get("label")
+            result["paths"] = group.get("paths") or []
+            return result
 
-        if parallel_enabled and len(txt_files) > 1:
-            max_workers = min(4, len(txt_files))
+        if parallel_enabled and len(grouped_docs) > 1:
+            max_workers = min(4, len(grouped_docs))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {executor.submit(_classify_path, path, use_fast=True): path for path in txt_files}
+                future_map = {executor.submit(_classify_group, group, use_fast=True): group for group in grouped_docs}
                 for future in as_completed(future_map):
-                    path = future_map[future]
+                    group = future_map[future]
                     try:
                         result = future.result()
                     except Exception as error:
+                        primary_path = (group.get("paths") or [""])[0]
                         result = {
                             "status": "error",
                             "error": str(error),
-                            "file_name": os.path.basename(path),
-                            "path": path,
+                            "file_name": group.get("label") or os.path.basename(primary_path),
+                            "path": primary_path,
+                            "source_label": group.get("label"),
                         }
                     if result.get("status") == "success":
                         documents.append(result)
                     else:
-                        pending_retry.append((path, result))
+                        pending_retry.append((group, result))
                     _emit(
                         {
                             "status": "running",
                             "stage": stage_name,
                             "progress": stage_base
-                            + step_weight * (len(documents) + len(pending_retry)) / max(len(txt_files), 1),
-                            "message": f"正在分类 {os.path.basename(path)}",
+                            + step_weight * (len(documents) + len(pending_retry)) / max(len(grouped_docs), 1),
+                            "message": f"正在分类 {group.get('label') or '文件'}",
                         },
                     )
         else:
-            for processed, file_path in enumerate(txt_files):
-                result = _classify_path(file_path, use_fast=False)
+            for processed, group in enumerate(grouped_docs):
+                result = _classify_group(group, use_fast=False)
                 if result.get("status") == "success":
                     documents.append(result)
                 else:
-                    pending_retry.append((file_path, result))
+                    pending_retry.append((group, result))
                 _emit(
                     {
                         "status": "running",
                         "stage": stage_name,
                         "progress": stage_base
-                        + step_weight * (processed + 1) / max(len(txt_files), 1),
-                        "message": f"已处理 {processed + 1}/{len(txt_files)} 个文件",
+                        + step_weight * (processed + 1) / max(len(grouped_docs), 1),
+                        "message": f"已处理 {processed + 1}/{len(grouped_docs)} 个文件",
                     },
                 )
 
         if pending_retry and serial_chain:
-            for path, first_result in pending_retry:
+            for group, first_result in pending_retry:
                 _wait_if_paused(f"{stage_name} 重试暂停中")
-                fallback_result = _classify_path(path, use_fast=False)
+                fallback_result = _classify_group(group, use_fast=False)
                 target_result = fallback_result
                 if fallback_result.get("status") != "success":
                     if first_result.get("error"):
@@ -1984,7 +2065,10 @@ def _run_apqp_classification(
             suggested: List[str] = []
             file_path = result.get("path", "")
             if result.get("status") == "success":
-                result["source_label"] = _source_label_from_parsed_file(result.get("path", ""), upload_dir)
+                if not result.get("source_label"):
+                    result["source_label"] = _source_label_from_parsed_file(
+                        result.get("path", ""), upload_dir, include_sheet=False
+                    )
                 names = []
                 primary = result.get("primary_type") or ""
                 if primary and primary.lower() != "none":
@@ -2029,11 +2113,11 @@ def _run_apqp_classification(
                 "present": present_count,
                 "missing": max(missing_count, 0),
                 "files_classified": len(documents),
-                "parsed_files_found": len(txt_files),
+                "parsed_files_found": len(grouped_docs),
             },
         }
 
-        if not txt_files and upload_files:
+        if not grouped_docs and upload_files:
             stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
         if not candidates:
             extra = "当前阶段未配置应交付物列表。"
