@@ -811,18 +811,16 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
                             if should_submit:
                                 if backend_ready and backend_client is not None:
-                                    payload = _profile_to_payload(profile)
-                                    payload.update(
-                                        {
-                                            "session_id": session_id,
-                                            "source_paths": source_paths,
-                                            "turbo_mode": elements_turbo,
-                                            "initial_results_dir": elements_initial_results_dir,
-                                            "result_root_dir": os.path.join(
-                                                generated_root, session_id, "APQP_one_click_check"
-                                            ),
-                                        }
-                                    )
+                                    payload = {
+                                        "session_id": session_id,
+                                        "profile": _profile_to_payload(profile),
+                                        "source_paths": source_paths,
+                                        "turbo_mode": elements_turbo,
+                                        "initial_results_dir": elements_initial_results_dir,
+                                        "result_root_dir": os.path.join(
+                                            generated_root, session_id, "APQP_one_click_check"
+                                        ),
+                                    }
                                     response = backend_client.start_file_elements_job(payload)
                                     if isinstance(response, dict) and response.get("job_id"):
                                         st.session_state[job_state_key] = response.get("job_id")
@@ -850,6 +848,17 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             if isinstance(live_status, dict):
                                 elements_job_status = live_status
                             status_value = str(elements_job_status.get("status")) if elements_job_status else ""
+
+                            if elements_job_status:
+                                progress_value = float(elements_job_status.get("progress") or 0.0)
+                                progress_ratio = progress_value / 100.0 if progress_value > 1.0 else progress_value
+                                progress_ratio = max(0.0, min(progress_ratio, 1.0))
+                                progress_pct = int(round(progress_ratio * 100))
+                                bar_col, pct_col = st.columns([9, 1])
+                                with bar_col:
+                                    st.progress(progress_ratio)
+                                with pct_col:
+                                    st.markdown(f"**{progress_pct}%**")
 
                             table_key = _compose_table_key(
                                 stage_name, f"{profile_label or (profile.name if profile else '')}::{label}"
