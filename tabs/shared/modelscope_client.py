@@ -43,6 +43,7 @@ class ModelScopeClient:
             "messages": messages or [],
             "temperature": self._temperature,
             "stream": False,
+            "enable_thinking": False,  # Required for some models (e.g., Qwen3-32B) in non-streaming mode
         }
 
         num_ctx: Optional[int] = None
