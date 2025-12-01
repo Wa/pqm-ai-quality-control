@@ -81,7 +81,7 @@ def run_file_elements_job(
         generated_root, session_id, "file_elements_check", "initial_results"
     )
     base_results_root = result_root_dir or os.path.join(generated_root, session_id, "file_elements_check")
-    export_dir = base_results_root
+    export_dir = os.path.join(base_results_root, "json_element")
     final_results_dir = os.path.join(base_results_root, "final_results")
 
     for path in (source_dir, parsed_dir, initial_results_dir, export_dir, final_results_dir):
@@ -207,7 +207,7 @@ def run_file_elements_job(
             )
             return
 
-        saved_path = save_result_payload(result, export_dir)
+        saved_path = save_result_payload(result, export_dir, base_filename=source_file)
         tabular_exports = result.export_tabular(final_results_dir, base_filename=source_file)
         result_files: List[str] = []
         if saved_path:

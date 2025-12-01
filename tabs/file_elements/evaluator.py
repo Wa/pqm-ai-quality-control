@@ -184,9 +184,14 @@ class EvaluationResult:
             "warnings": list(self.warnings),
         }
 
-    def export_json(self, target_folder: str) -> str | None:
+    def export_json(self, target_folder: str, base_filename: str | None = None) -> str | None:
         os.makedirs(target_folder, exist_ok=True)
-        target_path = os.path.join(target_folder, PREFERRED_EXPORT_NAME)
+        sanitized_base = os.path.splitext(os.path.basename(base_filename or self.source_file or ""))[0]
+        if not sanitized_base:
+            sanitized_base = self.profile.id or "file_elements"
+        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d%H%M%S")
+        file_stub = f"{sanitized_base}要素检查结果_{timestamp}"
+        target_path = os.path.join(target_folder, f"{file_stub}.json")
         with open(target_path, "w", encoding="utf-8") as handle:
             json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
         return target_path
@@ -1045,8 +1050,10 @@ def parse_deliverable_stub(
     return text_content, source_file, warnings
 
 
-def save_result_payload(result: EvaluationResult, target_folder: str) -> str | None:
-    return result.export_json(target_folder)
+def save_result_payload(
+    result: EvaluationResult, target_folder: str, *, base_filename: str | None = None
+) -> str | None:
+    return result.export_json(target_folder, base_filename=base_filename)
 
 
 __all__ = [

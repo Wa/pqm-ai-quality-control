@@ -790,8 +790,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                             if str(metadata.get("stage")) == str(profile.stage if profile else stage_name) and str(metadata.get("source_file")) == label:
                                                 elements_job_status = status
                                                 break
-                                        if elements_job_status is None:
-                                            elements_job_status = resp[0]
                                         if isinstance(elements_job_status, dict) and elements_job_status.get("job_id"):
                                             st.session_state[job_state_key] = elements_job_status.get("job_id")
                                     elif isinstance(resp, dict) and resp.get("status") == "error":
