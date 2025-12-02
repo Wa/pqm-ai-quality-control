@@ -144,6 +144,9 @@ class FileElementsJobRequest(BaseModel):
     session_id: str
     profile: FileElementsProfilePayload
     source_paths: Optional[List[str]] = None
+    turbo_mode: bool = False
+    initial_results_dir: Optional[str] = None
+    result_root_dir: Optional[str] = None
 
 
 class ApqpParseRequest(BaseModel):
@@ -1704,23 +1707,29 @@ async def apqp_list_files(session_id: str, stage: Optional[str] = None):
 async def apqp_list_results(session_id: str):
     """List generated APQP one-click final result files."""
 
-    root = Path(CONFIG["directories"]["generated_files"]) / session_id / "APQP_one_click_check" / "final_results"
+    base_root = Path(CONFIG["directories"]["generated_files"]) / session_id / "APQP_one_click_check"
+    roots = [
+        base_root / "final_results",
+        base_root / "json_completeness",
+        base_root / "json_element",
+    ]
     entries: List[Dict[str, object]] = []
-    try:
-        for name in os.listdir(root):
-            file_path = root / name
-            if file_path.is_file():
-                stat = file_path.stat()
-                entries.append(
-                    {
-                        "name": name,
-                        "size": stat.st_size,
-                        "modified": stat.st_mtime,
-                        "path": str(file_path),
-                    }
-                )
-    except Exception:
-        entries = []
+    for root in roots:
+        try:
+            for name in os.listdir(root):
+                file_path = root / name
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                            "path": str(file_path),
+                        }
+                    )
+        except Exception:
+            continue
 
     entries = sorted(entries, key=lambda item: item["modified"], reverse=True)
     return {"status": "success", "files": entries}
@@ -1730,8 +1739,15 @@ async def apqp_list_results(session_id: str):
 async def apqp_clear_results(request: ApqpResultsClearRequest):
     """Clear generated APQP one-click result files only."""
 
-    root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check" / "final_results"
-    deleted = _clear_directory_contents(str(root))
+    base_root = Path(CONFIG["directories"]["generated_files"]) / request.session_id / "APQP_one_click_check"
+    roots = [
+        base_root / "final_results",
+        base_root / "json_completeness",
+        base_root / "json_element",
+    ]
+    deleted = 0
+    for root in roots:
+        deleted += _clear_directory_contents(str(root))
     return {"status": "success", "deleted": deleted}
 
 @app.post("/clear-files")
@@ -1911,8 +1927,10 @@ def _run_apqp_classification(
     generated_root = Path(CONFIG["directories"]["generated_files"])
     results_root = generated_root / request.session_id / "APQP_one_click_check"
     final_results_dir = results_root / "final_results"
+    json_completeness_dir = results_root / "json_completeness"
     initial_results_dir = results_root / "initial_results_completeness"
     final_results_dir.mkdir(parents=True, exist_ok=True)
+    json_completeness_dir.mkdir(parents=True, exist_ok=True)
     initial_results_dir.mkdir(parents=True, exist_ok=True)
     timestamp_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary["results_dir"] = str(final_results_dir)
@@ -2143,7 +2161,7 @@ def _run_apqp_classification(
         serial_label = serial_label.replace(os.altsep, "_")
     export_basename = f"{serial_label}项目交付物齐套性检查结果"
     export_with_ts = f"{export_basename}_{timestamp_label}"
-    summary_path = final_results_dir / f"{export_with_ts}.json"
+    summary_path = json_completeness_dir / f"{export_with_ts}.json"
     csv_path = final_results_dir / f"{export_with_ts}.csv"
     xlsx_path = final_results_dir / f"{export_with_ts}.xlsx"
 
@@ -2513,6 +2531,7 @@ async def start_file_elements_job(request: FileElementsJobRequest):
     metadata = {
         "stage": request.profile.stage or "",
         "deliverable": request.profile.name,
+        "turbo_mode": bool(request.turbo_mode),
     }
     record = _start_job(
         "file_elements",
@@ -2521,6 +2540,9 @@ async def start_file_elements_job(request: FileElementsJobRequest):
         runner_kwargs={
             "profile_payload": profile_payload,
             "source_paths": request.source_paths or [],
+            "turbo_mode": bool(request.turbo_mode),
+            "initial_results_dir": request.initial_results_dir,
+            "result_root_dir": request.result_root_dir,
         },
     )
     return _record_to_status(record)
