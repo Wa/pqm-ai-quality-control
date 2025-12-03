@@ -278,7 +278,13 @@ def run_parameters_job(
 
     if graph_dir and os.path.isdir(graph_dir):
         emitter.info("正在解析图纸文件")
-        process_pdf_folder(graph_dir, examined_txt_dir, emitter, annotate_sources=False)
+        process_pdf_folder(
+            graph_dir,
+            examined_txt_dir,
+            emitter,
+            annotate_sources=False,
+            use_structured_drawings=True,
+        )
         process_word_ppt_folder(graph_dir, examined_txt_dir, emitter, annotate_sources=False)
         process_excel_folder(graph_dir, examined_txt_dir, emitter, annotate_sources=False)
         process_textlike_folder(graph_dir, examined_txt_dir, emitter)
