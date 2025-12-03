@@ -30,6 +30,7 @@ openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.1
 pillow==11.3.0
+PyMuPDF==1.24.11
 protobuf==6.31.1
 pyarrow==21.0.0
 pydantic==2.11.7

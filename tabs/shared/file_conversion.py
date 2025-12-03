@@ -12,6 +12,7 @@ from typing import List, Optional, Set, Tuple
 import requests
 
 from config import CONFIG
+from pdf_to_structured_txt import extract_pdf_to_txt, has_vector_text
 from .text_processing import annotate_txt_file_inplace
 
 
@@ -149,8 +150,10 @@ def process_pdf_folder(
     *,
     skip_files: Optional[Set[str]] = None,
     warn_if_encrypted: bool = True,
+    use_structured_drawings: bool = False,
+    structured_word_threshold: int = 15,
 ):
-    """Process all PDFs in input_dir via MinerU and write .txts into output_dir."""
+    """Convert PDFs to text, optionally using structured extraction for drawings."""
 
     pdf_paths = list_pdfs(input_dir)
     if not pdf_paths:
@@ -169,15 +172,46 @@ def process_pdf_folder(
             if os.path.exists(out_txt) and os.path.getsize(out_txt) > 0:
                 progress_area.info(f"已存在（跳过）: {os.path.basename(out_txt)}")
                 continue
-            progress_area.write(f"解析: {os.path.basename(pdf_path)} …")
-            zip_bytes = mineru_parse_pdf(pdf_path)
-            ok = zip_to_txts(zip_bytes, out_txt)
+            used_structured = False
+            ok = False
+
+            if use_structured_drawings:
+                try:
+                    if has_vector_text(
+                        pdf_path,
+                        min_words=max(structured_word_threshold, 1),
+                        sample_pages=3,
+                    ):
+                        progress_area.write(f"结构化解析: {os.path.basename(pdf_path)} …")
+                        extract_pdf_to_txt(pdf_path, out_txt)
+                        used_structured = True
+                        ok = True
+                    else:
+                        progress_area.info(
+                            f"检测为扫描件或文本稀少，改用通用解析: {os.path.basename(pdf_path)}"
+                        )
+                except Exception as exc:
+                    progress_area.warning(
+                        f"结构化解析失败，改用通用流程: {exc}"
+                    )
+
+            if not ok:
+                progress_area.write(f"解析: {os.path.basename(pdf_path)} …")
+                zip_bytes = mineru_parse_pdf(pdf_path)
+                ok = zip_to_txts(zip_bytes, out_txt)
+
             if ok:
                 if annotate_sources:
                     annotate_txt_file_inplace(out_txt, orig_name)
                 created.append(out_txt)
+            elif used_structured:
+                progress_area.warning(
+                    f"结构化解析失败且未找到可用文本: {os.path.basename(pdf_path)}"
+                )
             else:
-                progress_area.warning(f"未发现可用的 .md 内容，跳过: {os.path.basename(pdf_path)}")
+                progress_area.warning(
+                    f"未发现可用的 .md 内容，跳过: {os.path.basename(pdf_path)}"
+                )
         except Exception as exc:  # pragma: no cover - Streamlit UI feedback
             progress_area.error(f"失败: {os.path.basename(pdf_path)} → {exc}")
     return created
