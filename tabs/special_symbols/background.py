@@ -1143,6 +1143,7 @@ def run_special_symbols_job(
 
     reference_dir = paths.standards_dir
     examined_dir = paths.examined_dir
+    drawing_dir = session_dirs.get("special_drawings", "")
     output_root = paths.output_root
     reference_txt_dir = paths.standards_txt_dir
     examined_txt_dir = paths.examined_txt_dir
@@ -1223,6 +1224,32 @@ def run_special_symbols_job(
     process_archives(examined_dir, examined_txt_dir, emitter)
     if not ensure_running("conversion", "解析待检查文件（压缩包）"):
         return {"final_results": []}
+
+    if drawing_dir and os.path.isdir(drawing_dir):
+        if not ensure_running("conversion", "准备解析图纸文件"):
+            return {"final_results": []}
+        emitter.info("正在解析图纸文件")
+        process_pdf_folder(
+            drawing_dir,
+            examined_txt_dir,
+            emitter,
+            annotate_sources=False,
+            use_structured_drawings=True,
+        )
+        if not ensure_running("conversion", "解析图纸文件（PDF）"):
+            return {"final_results": []}
+        process_word_ppt_folder(drawing_dir, examined_txt_dir, emitter, annotate_sources=False)
+        if not ensure_running("conversion", "解析图纸文件（Word/PPT）"):
+            return {"final_results": []}
+        process_excel_folder(drawing_dir, examined_txt_dir, emitter, annotate_sources=False)
+        if not ensure_running("conversion", "解析图纸文件（Excel）"):
+            return {"final_results": []}
+        process_textlike_folder(drawing_dir, examined_txt_dir, emitter)
+        if not ensure_running("conversion", "解析图纸文件（文本类）"):
+            return {"final_results": []}
+        process_archives(drawing_dir, examined_txt_dir, emitter)
+        if not ensure_running("conversion", "解析图纸文件（压缩包）"):
+            return {"final_results": []}
 
     try:
         updated_txts = preprocess_txt_directories(reference_txt_dir, examined_txt_dir)

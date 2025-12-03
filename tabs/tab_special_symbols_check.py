@@ -43,6 +43,7 @@ def render_special_symbols_check_tab(session_id):
 
     reference_dir = workflow_paths.standards_dir
     inspected_dir = workflow_paths.examined_dir
+    drawing_dir = session_dirs.get("special_drawings", "")
     special_out_root = workflow_paths.output_root
     reference_txt_dir = workflow_paths.standards_txt_dir
     inspected_txt_dir = workflow_paths.examined_txt_dir
@@ -154,7 +155,7 @@ def render_special_symbols_check_tab(session_id):
             return truncated_name + ext
 
         # Clear buttons
-        col_clear1, col_clear2, col_clear3 = st.columns(3)
+        col_clear1, col_clear2, col_clear3, col_clear4 = st.columns(4)
         with col_clear1:
             if st.button("🗑️ 清空基准文件", key=f"clear_special_symbols_reference_{session_id}"):
                 try:
@@ -163,6 +164,7 @@ def render_special_symbols_check_tab(session_id):
                         if os.path.isfile(file_path):
                             os.remove(file_path)
                     st.success("已清空基准文件")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"清空失败: {e}")
         with col_clear2:
@@ -173,9 +175,24 @@ def render_special_symbols_check_tab(session_id):
                         if os.path.isfile(file_path):
                             os.remove(file_path)
                     st.success("已清空待检查文件")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"清空失败: {e}")
         with col_clear3:
+            if st.button("🗑️ 清空图纸文件", key=f"clear_special_symbols_drawings_{session_id}"):
+                try:
+                    deleted = 0
+                    if drawing_dir and os.path.isdir(drawing_dir):
+                        for file in os.listdir(drawing_dir):
+                            file_path = os.path.join(drawing_dir, file)
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                                deleted += 1
+                    st.success(f"已清空图纸文件（{deleted} 个）")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"清空失败: {e}")
+        with col_clear4:
             if st.button("🗑️ 清空分析结果", key=f"clear_special_symbols_results_{session_id}"):
                 try:
                     deleted_count = 0
@@ -186,11 +203,17 @@ def render_special_symbols_check_tab(session_id):
                                 os.remove(fpath)
                                 deleted_count += 1
                     st.success(f"已清空分析结果（{deleted_count} 个文件）")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"清空失败: {e}")
 
         # File lists in tabs (fixed order)
-        tab_std, tab_exam, tab_results = st.tabs(["基准文件", "待检查文件", "分析结果"])
+        tab_std, tab_exam, tab_drawings, tab_results = st.tabs([
+            "基准文件",
+            "待检查文件",
+            "图纸文件",
+            "分析结果",
+        ])
         with tab_std:
             reference_files = _sorted_files(reference_dir)
             if reference_files:
@@ -226,6 +249,28 @@ def render_special_symbols_check_tab(session_id):
                             st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
                         with col_a:
                             delete_key = f"del_exam_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(file_info['path'])
+                                    st.success(f"已删除: {file_info['name']}")
+                                except Exception as e:
+                                    st.error(f"删除失败: {e}")
+            else:
+                st.write("（未上传）")
+
+        with tab_drawings:
+            drawing_files = _sorted_files(drawing_dir)
+            if drawing_files:
+                for file_info in drawing_files:
+                    display_name = truncate_filename(file_info['name'])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_i, col_a = st.columns([3, 1])
+                        with col_i:
+                            st.write(f"**文件名:** {file_info['name']}")
+                            st.write(f"**大小:** {format_file_size(file_info['size'])}")
+                            st.write(f"**修改时间:** {format_timestamp(file_info['modified'])}")
+                        with col_a:
+                            delete_key = f"del_drawing_{file_info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
                             if st.button("🗑️ 删除", key=delete_key):
                                 try:
                                     os.remove(file_info['path'])
@@ -280,7 +325,7 @@ def render_special_symbols_check_tab(session_id):
             st.info("当前任务正在以高性能模式运行，暂停/继续功能暂不可用。")
         st.markdown(
             "第1步：重要！在右侧文件列表清空上一轮任务的文件（可保留分析结果）。  \n"
-            "第2步：上传基准文件与待检查文件，一次可上传多份文件。  \n"
+            "第2步：上传基准、待检查与图纸文件，一次可上传多份文件。  \n"
             "第3步：点击开始，AI 会比对待检文件中的符号与基准文件不一致的地方。  \n"
             "第4步：在下方或右侧文件列表下载分析结果。  \n"
             "审核时间取决于文件数量与长度，通常约需 10~60 分钟。  \n"
@@ -299,6 +344,20 @@ def render_special_symbols_check_tab(session_id):
             if files_exam:
                 handle_file_upload(files_exam, inspected_dir)
                 st.success(f"已上传 {len(files_exam)} 个待检查文件")
+
+        drawing_uploads = st.file_uploader(
+            "点击上传图纸文件",
+            type=None,
+            accept_multiple_files=True,
+            key=f"special_symbols_drawings_{session_id}",
+            help="图纸会使用结构化解析路径并与待检文本合并进行比对。",
+        )
+        if drawing_uploads:
+            if drawing_dir:
+                handle_file_upload(drawing_uploads, drawing_dir)
+                st.success(f"已上传 {len(drawing_uploads)} 份图纸文件")
+            else:
+                st.warning("未配置图纸目录，无法保存图纸文件。")
 
         # Start / Pause / Demo buttons
         btn_col1, btn_col_pause, btn_col2 = st.columns([1, 1, 1])

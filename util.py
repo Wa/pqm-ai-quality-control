@@ -284,6 +284,7 @@ def ensure_session_dirs(base_dirs, session_id):
         _ensure_upload_subdir("enterprise_examined", "enterprise_standard", "examined")
         _ensure_upload_subdir("special_reference", "special_symbols", "reference")
         _ensure_upload_subdir("special_examined", "special_symbols", "examined")
+        _ensure_upload_subdir("special_drawings", "special_symbols", "drawings")
         _ensure_upload_subdir("history_issue_lists", "history_issues", "issue_lists")
         _ensure_upload_subdir("history_dfmea", "history_issues", "dfmea")
         _ensure_upload_subdir("history_pfmea", "history_issues", "pfmea")
