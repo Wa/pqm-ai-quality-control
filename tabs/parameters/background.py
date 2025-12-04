@@ -144,7 +144,7 @@ def _build_run_manifest(
         chunks = split_to_chunks(doc_text, int(get_bisheng_settings().max_words))
         for chunk_index, piece in enumerate(chunks):
             entry_id += 1
-            prompt_text = PARAMETERS_WORKFLOW_SURFACE.build_chunk_prompt(piece)
+            prompt_text = PARAMETERS_WORKFLOW_SURFACE.build_chunk_prompt(piece, source_file=fname)
             num = chunk_index + 1
             prompt_name = f"checkpoint_prompt_{fname}_pt{num}.txt"
             prompt_path = os.path.join(checkpoint_dir, prompt_name)
@@ -440,7 +440,7 @@ def run_parameters_job(
                         "total_chunks": total_chunks,
                     })
                     return {"final_results": []}
-            prompt_text = PARAMETERS_WORKFLOW_SURFACE.build_chunk_prompt(piece)
+            prompt_text = PARAMETERS_WORKFLOW_SURFACE.build_chunk_prompt(piece, source_file=name)
             prompt_texts.append(prompt_text)
             publish(
                 {

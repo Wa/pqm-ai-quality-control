@@ -149,8 +149,8 @@ def get_bisheng_settings() -> BishengSettings:
     api_key = _bisheng_setting("BISHENG_API_KEY", config_key="api_key", default="") or ""
 
     max_words = _safe_int(
-        _bisheng_setting("BISHENG_MAX_WORDS", config_key="max_words", default="2000"),
-        2000,
+        _bisheng_setting("BISHENG_MAX_WORDS", config_key="max_words", default="8000"),
+        8000,
     )
     timeout_s = _safe_int(
         _bisheng_setting("BISHENG_TIMEOUT_S", config_key="timeout_s", default="90"),

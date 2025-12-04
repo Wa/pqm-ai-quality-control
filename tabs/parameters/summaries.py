@@ -40,21 +40,21 @@ def summarize_with_ollama(
     try:
         original_name = name_no_ext
         prompt_lines = [
-            "你是一名严谨的参数差异整理助手。以下内容来自一个基于检索增强的大语言模型 (RAG-LLM) 系统，",
+            "你是一名严谨的参数差异整理助手。以下内容来自一个RAG-LLM系统，",
             "用于分析待检文件/图纸与基准文件之间的参数一致性。该部分原始技术文件名称为：",
             f"{original_name}。",
             "\n请将后续全文内容转换为 JSON 数组（list of objects），每个对象应包含以下键：",
-            "- parameter：参数或特性名称；",
-            "- target_value：待检文件或图纸中的取值/范围（未知时留空字符串）；",
-            "- reference_value：基准文件中的取值/范围（未知时留空字符串）；",
-            "- location：用于追溯的定位信息，例如目标文件/图纸文件名、Sheet 名称、段落；",
-            "- issue：一句话描述发现的不一致或风险；",
-            "- suggestion：针对该问题的修订或沟通建议。",
+            "- 参数：参数或特性名称；",
+            "- 基准文件名：基准文件名称和工作表名（如果有工作表名信息）；",
+            "- 基准参数值：基准文件中的取值/范围（未知时留空字符串）；",
+            "- 待检文件名：待检查文件或图纸的文件名称和工作表名（如果有工作表名信息）；",
+            "- 待检参数值：待检文件或图纸中的取值/范围（未知时留空字符串）；",
+            "- 问题描述：一句话描述发现的不一致或风险；",
             "\n要求：",
-            "1) 仅输出严格的 JSON（UTF-8，无注释、无额外文本），键名使用上面给出的英文；",
+            "1) 仅输出严格的 JSON（UTF-8，无注释、无额外文本），键名使用上面给出的中文；",
             "2) 若内容包含多处问题，请拆分为多个对象；",
             "3) 若某项信息缺失，请以空字符串 \"\" 占位，不要编造；",
-            "4) 在 location 中保留可追溯的原文线索（如文件名、页码、Sheet 名称等）。",
+            "4) 如果需要转换的原始比对输出无内容，或者表明未发现不一致项，请输出空数组 []",
             "\n下面是需要转换的原始比对输出：\n\n",
         ]
         instruction = "".join(prompt_lines)
@@ -231,8 +231,8 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
         report_exception("读取参数初始结果目录失败", error, level="warning")
         json_files = []
 
-    columns = ["parameter", "target_value", "reference_value", "location", "issue", "suggestion"]
-    rows = []
+    columns: list[str] = []
+    rows: list[dict[str, str]] = []
 
     try:
         import pandas as pd  # type: ignore
@@ -302,19 +302,29 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
         if not isinstance(data, list):
             continue
 
+        def _stringify(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                try:
+                    return json.dumps(value, ensure_ascii=False)
+                except Exception:
+                    return str(value)
+            return str(value)
+
         for row in data:
-            if not isinstance(row, dict):
-                continue
-            rows.append(
-                [
-                    str(row.get("parameter", "")),
-                    str(row.get("target_value", "")),
-                    str(row.get("reference_value", "")),
-                    str(row.get("location", "")),
-                    str(row.get("issue", "")),
-                    str(row.get("suggestion", "")),
-                ]
-            )
+            normalized: dict[str, str] = {}
+            if isinstance(row, dict):
+                items = row.items()
+            else:
+                items = [("值", row)]
+            for key, value in items:
+                column_name = str(key).strip() or "值"
+                value_str = _stringify(value)
+                normalized[column_name] = value_str
+                if column_name not in columns:
+                    columns.append(column_name)
+            rows.append(normalized)
 
     csv_path: str | None = None
     xlsx_path: str | None = None
@@ -325,16 +335,17 @@ def aggregate_outputs(initial_dir: str, parameters_out: str, session_id: str) ->
             with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
                 import csv
 
-                writer = csv.writer(handle)
-                writer.writerow(["参数名称", "目标取值", "基准取值", "定位信息", "问题描述", "整改建议"])
-                writer.writerows(rows)
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({column: row.get(column, "") for column in columns})
         except Exception as error:
             report_exception("写入参数检查CSV失败", error)
             csv_path = None
 
     if rows and "pd" in locals() and pd is not None:
         try:
-            df = pd.DataFrame(rows, columns=["参数名称", "目标取值", "基准取值", "定位信息", "问题描述", "整改建议"])
+            df = pd.DataFrame([{column: row.get(column, "") for column in columns} for row in rows], columns=columns)
             xlsx_path = os.path.join(final_dir, f"设计制程参数检查结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
             df.to_excel(xlsx_path, index=False)
         except Exception as error:

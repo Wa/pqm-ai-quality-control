@@ -41,10 +41,15 @@ class WorkflowSurface:
 
         return f"{session_id}_{self.slug}".strip("_")
 
-    def build_chunk_prompt(self, chunk: str) -> str:
+    def build_chunk_prompt(self, chunk: str, source_file: Optional[str] = None) -> str:
         """Construct the comparison prompt for a document chunk."""
 
-        return f"{self.chunk_prompt_prefix}{chunk}" if chunk else self.chunk_prompt_prefix
+        prefix = self.chunk_prompt_prefix
+        try:
+            prefix = prefix.format(source_file=source_file or "")
+        except Exception:
+            pass
+        return f"{prefix}{chunk}" if chunk else prefix
 
     def prepare_paths(self, session_dirs: Mapping[str, str]) -> WorkflowPaths:
         """Ensure the workflow directories exist and return their paths."""
