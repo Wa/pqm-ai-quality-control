@@ -1129,6 +1129,14 @@ def _completeness_dataframe(summary: Dict[str, Any]) -> pd.DataFrame:
                     confidence_text = f"{conf_val:.2f}"
             except (TypeError, ValueError):
                 pass
+            notes: List[str] = []
+            item_note = item.get("note") or item.get("notes") or []
+            if isinstance(item_note, list):
+                notes.extend(str(val) for val in item_note if str(val).strip())
+            elif isinstance(item_note, str) and item_note.strip():
+                notes.append(item_note.strip())
+            if stage_warning:
+                notes.append(stage_warning)
             records.append(
                 {
                     "阶段": stage_name,
@@ -1136,7 +1144,7 @@ def _completeness_dataframe(summary: Dict[str, Any]) -> pd.DataFrame:
                     "状态": status_text,
                     "来源": sources_text,
                     "置信度": confidence_text,
-                    "备注": stage_warning,
+                    "备注": "\n".join(dict.fromkeys(notes)),
                 }
             )
 
@@ -1500,6 +1508,171 @@ def _classify_document(
         }
     )
     return payload
+
+
+def _classify_encrypted_by_filename(
+    *,
+    invoker: Callable[[List[Dict[str, str]]], Tuple[str, str, str]],
+    stage_name: str,
+    file_names: List[str],
+    candidates: List[Dict[str, str]],
+    record_dir: Optional[Path] = None,
+    record_prefix: str = "",
+    check_control: Optional[Callable[[], Dict[str, bool]]] = None,
+) -> List[Dict[str, Any]]:
+    """Classify encrypted files using filenames only.
+
+    Aggregates the encrypted files of a stage, asks the LLM to map filenames to
+    required deliverables, and returns document-like payloads.
+    """
+
+    def _wait_if_paused(detail: str = "") -> None:
+        if not check_control:
+            return
+        while True:
+            status = check_control() or {}
+            if status.get("stopped"):
+                raise RuntimeError("分类已被停止")
+            if status.get("paused"):
+                time.sleep(1.0)
+                continue
+            break
+
+    if not file_names or not candidates:
+        return []
+
+    candidates_text = "\n".join(
+        f"{idx+1}. {item['name']}：{item['description']}" for idx, item in enumerate(candidates)
+    )
+    file_list_text = "\n".join(f"- {name}" for name in file_names)
+
+    prompt = f"""
+你是一名 APQP 交付物分类助手，需要基于文件名对加密文件进行齐套性判断。
+阶段：{stage_name}
+加密文件列表（仅可使用文件名推断，不可假设内容）：
+{file_list_text}
+
+候选交付物列表（仅可从中选择或回答 none）：
+{candidates_text}
+
+请仅依据文件名判断每个文件最可能对应的交付物类型，输出严格的 JSON：
+{{
+  "files": [
+    {{
+      "file_name": "<文件名>",
+      "primary_type": "<从候选列表选择的名称，无法匹配填 none>",
+      "additional_types": ["<可选的额外交付物名称，可为空列表>"] ,
+      "confidence": <0到1之间的小数>,
+      "rationale": "简要中文理由，需说明仅根据文件名判断"
+    }}
+  ]
+}}
+
+规则：
+- 仅依据文件名判断，不得虚构文件内容。
+- primary_type 必须来自候选列表或为 "none"。
+- 如果文件名指向多个交付物，可在 additional_types 中列出额外交付物名称。
+"""
+
+    safe_stem = _safe_stem_for_record("encrypted_files")
+    prompt_path: Optional[Path] = None
+    response_path: Optional[Path] = None
+
+    if record_dir:
+        record_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = record_dir / f"prompt_{record_prefix}{safe_stem}.txt"
+        try:
+            prompt_path.write_text(prompt, encoding="utf-8")
+        except Exception:
+            prompt_path = None
+
+    payloads: List[Dict[str, Any]] = []
+
+    try:
+        messages = [
+            {"role": "system", "content": "你是严谨的APQP文件分类专家，回答请使用简体中文。"},
+            {"role": "user", "content": prompt},
+        ]
+        _wait_if_paused("等待恢复后进行加密文件分类")
+        raw_content, provider_label, model_name = invoker(messages)
+        if record_dir and raw_content:
+            response_path = record_dir / f"response_{record_prefix}{safe_stem}.txt"
+            try:
+                response_path.write_text(raw_content, encoding="utf-8")
+            except Exception:
+                response_path = None
+        data = _extract_json_object(raw_content)
+    except Exception as error:
+        return [
+            {
+                "file_name": name,
+                "path": "",
+                "primary_type": None,
+                "additional_types": [],
+                "confidence": 0.0,
+                "rationale": "",
+                "raw_response": None,
+                "status": "error",
+                "error": str(error),
+                "source_label": name,
+                "classification_mode": "filename_only",
+            }
+            for name in file_names
+        ]
+
+    entries: List[Dict[str, Any]] = []
+    if isinstance(data, dict):
+        maybe_entries = data.get("files") if isinstance(data.get("files"), list) else None
+        if maybe_entries is None and all(key in data for key in ("file_name", "primary_type")):
+            maybe_entries = [data]
+        entries = maybe_entries or []
+    elif isinstance(data, list):
+        entries = data
+
+    for name in file_names:
+        base_payload = {
+            "file_name": name,
+            "path": "",
+            "primary_type": None,
+            "additional_types": [],
+            "confidence": 0.0,
+            "rationale": "",
+            "raw_response": data,
+            "status": "success",
+            "source_label": name,
+            "classification_mode": "filename_only",
+            "provider": provider_label,
+            "model": model_name,
+            "prompt_file": str(prompt_path) if prompt_path else None,
+            "response_file": str(response_path) if response_path else None,
+            "preview_length": 0,
+        }
+
+        match = next((item for item in entries if str(item.get("file_name")) == name), None)
+        if match is None:
+            base_payload.update({"status": "error", "error": "未返回匹配结果"})
+            payloads.append(base_payload)
+            continue
+
+        primary = str(match.get("primary_type") or "none")
+        additional = match.get("additional_types") if isinstance(match.get("additional_types"), list) else []
+        try:
+            confidence = float(match.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+
+        base_payload.update(
+            {
+                "primary_type": primary,
+                "additional_types": [str(item) for item in additional if str(item).strip()],
+                "confidence": confidence,
+                "rationale": str(match.get("rationale") or ""),
+            }
+        )
+        payloads.append(base_payload)
+
+    return payloads
 
 
 def _clear_directory_contents(path: str) -> int:
@@ -1972,17 +2145,25 @@ def _run_apqp_classification(
         )
 
         requirement_state: Dict[str, Dict[str, Any]] = {
-            name: {"status": "missing", "sources": [], "confidence": 0.0}
+            name: {"status": "missing", "sources": [], "confidence": 0.0, "notes": []}
             for name in (STAGE_REQUIREMENTS.get(stage_name) or tuple())
         }
 
         upload_files: List[str] = []
+        encrypted_files: List[str] = []
         try:
             upload_files = [
                 name
                 for name in os.listdir(upload_dir)
                 if os.path.isfile(os.path.join(upload_dir, name)) and name != ".gitkeep"
             ]
+            for name in upload_files:
+                try:
+                    encrypted, _ = detect_esafenet_encryption(Path(upload_dir) / name)
+                except Exception:
+                    encrypted = False
+                if encrypted:
+                    encrypted_files.append(name)
         except Exception:
             upload_files = []
 
@@ -2078,6 +2259,23 @@ def _run_apqp_classification(
                     fallback_result["error"] = merged_error or fallback_result.get("error")
                 documents.append(target_result)
 
+        if encrypted_files:
+            encrypted_results = _classify_encrypted_by_filename(
+                invoker=serial_invoker,
+                stage_name=stage_name,
+                file_names=sorted(dict.fromkeys(encrypted_files)),
+                candidates=candidates,
+                record_dir=initial_results_dir,
+                record_prefix=f"{info['slug']}_encrypted_",
+                check_control=_check_control_flags,
+            )
+            for result in encrypted_results:
+                if not result.get("path"):
+                    candidate_path = Path(upload_dir) / (result.get("file_name") or "")
+                    if candidate_path.is_file():
+                        result["path"] = str(candidate_path)
+                documents.append(result)
+
         for result in documents:
             matched: List[str] = []
             suggested: List[str] = []
@@ -2094,6 +2292,12 @@ def _run_apqp_classification(
                 for extra in result.get("additional_types") or []:
                     if extra not in names:
                         names.append(extra)
+                note_text: Optional[str] = None
+                if result.get("classification_mode") == "filename_only":
+                    noted_file = result.get("source_label") or result.get("file_name") or os.path.basename(file_path)
+                    note_text = (
+                        f"{noted_file} file is encrypted with esafenet so only its filename is used to do the completeness check"
+                    )
                 for name in names:
                     if name in requirement_state:
                         matched.append(name)
@@ -2105,6 +2309,8 @@ def _run_apqp_classification(
                     state["confidence"] = max(state.get("confidence", 0.0), result.get("confidence") or 0.0)
                     source_label = result.get("source_label") or result.get("file_name") or os.path.basename(file_path)
                     state.setdefault("sources", []).append(source_label)
+                    if note_text:
+                        state.setdefault("notes", []).append(note_text)
             result["matched_requirements"] = matched
             if suggested:
                 result["suggested_types"] = suggested
@@ -2113,6 +2319,9 @@ def _run_apqp_classification(
             sources = state.get("sources") or []
             if sources:
                 state["sources"] = sorted(dict.fromkeys(sources))
+            notes = state.get("notes") or []
+            if notes:
+                state["notes"] = list(dict.fromkeys(str(note) for note in notes if str(note).strip()))
 
         present_count = sum(1 for item in requirement_state.values() if item.get("status") == "present")
         missing_count = len(requirement_state) - present_count
@@ -2126,6 +2335,7 @@ def _run_apqp_classification(
                 {"name": name, **requirement_state[name]} for name in requirement_state
             ],
             "documents": documents,
+            "encrypted_files": sorted(dict.fromkeys(encrypted_files)),
             "stats": {
                 "total_requirements": len(requirement_state),
                 "present": present_count,
@@ -2136,7 +2346,10 @@ def _run_apqp_classification(
         }
 
         if not grouped_docs and upload_files:
-            stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
+            if encrypted_files:
+                stage_summary["warning"] = "上传文件包含加密内容，已基于文件名进行有限齐套性判断。"
+            else:
+                stage_summary["warning"] = "未生成解析文本，已将交付物标记为缺失。"
         if not candidates:
             extra = "当前阶段未配置应交付物列表。"
             if stage_summary.get("warning"):

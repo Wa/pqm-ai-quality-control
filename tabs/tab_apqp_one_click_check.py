@@ -694,6 +694,10 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.divider()
             st.subheader("🧩 交付物要素自动评估")
 
+            overall_progress_placeholder = st.container()
+            overall_progress_total = 0
+            overall_progress_sum = 0.0
+
             elements_turbo = bool(classification_summary.get("turbo_mode"))
             elements_initial_results_dir = os.path.join(
                 generated_root, session_id, "APQP_one_click_check", "initial_results_element"
@@ -750,8 +754,10 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             label = group["label"]
                             token = group["token"]
                             stage_file_key = f"{stage_slug}_{token}"
+                            overall_progress_total += 1
                             st.markdown(f"##### 文件：{label}")
                             if group.get("skip_reason"):
+                                overall_progress_sum += 1.0
                                 st.warning(group.get("skip_reason"))
                                 continue
 
@@ -857,6 +863,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                     st.progress(progress_ratio)
                                 with pct_col:
                                     st.markdown(f"**{progress_pct}%**")
+                                if status_value in {"succeeded", "failed"}:
+                                    overall_progress_sum += 1.0
+                                elif status_value in {"queued", "running"}:
+                                    overall_progress_sum += progress_ratio
+                            else:
+                                progress_ratio = 0.0
 
                             table_key = _compose_table_key(
                                 stage_name, f"{profile_label or (profile.name if profile else '')}::{label}"
@@ -941,6 +953,18 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                 st.caption("完成评估后将在此展示要素覆盖情况与整改建议。")
             else:
                 st.info("暂无阶段可选，无法发起要素评估。")
+
+            with overall_progress_placeholder:
+                if overall_progress_total > 0:
+                    overall_ratio = overall_progress_sum / overall_progress_total
+                    overall_ratio = max(0.0, min(overall_ratio, 1.0))
+                    bar_col, pct_col = st.columns([9, 1])
+                    with bar_col:
+                        st.progress(overall_ratio)
+                    with pct_col:
+                        st.markdown(f"**{int(round(overall_ratio * 100))}%**")
+                else:
+                    st.caption("暂无要素评估任务进度。")
 
         if job_active:
             st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")

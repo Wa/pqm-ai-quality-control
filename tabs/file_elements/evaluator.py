@@ -189,7 +189,7 @@ class EvaluationResult:
         sanitized_base = os.path.splitext(os.path.basename(base_filename or self.source_file or ""))[0]
         if not sanitized_base:
             sanitized_base = self.profile.id or "file_elements"
-        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d%H%M%S")
+        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d_%H%M%S")
         file_stub = f"{sanitized_base}要素检查结果_{timestamp}"
         target_path = os.path.join(target_folder, f"{file_stub}.json")
         with open(target_path, "w", encoding="utf-8") as handle:
@@ -201,7 +201,7 @@ class EvaluationResult:
         sanitized_base = os.path.splitext(os.path.basename(base_filename or ""))[0]
         if not sanitized_base:
             sanitized_base = self.profile.id or "file_elements"
-        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d%H%M%S")
+        timestamp = (self.generated_at or datetime.utcnow()).strftime("%Y%m%d_%H%M%S")
         file_stub = f"{sanitized_base}要素检查结果_{timestamp}"
 
         rows: List[Dict[str, object]] = []
