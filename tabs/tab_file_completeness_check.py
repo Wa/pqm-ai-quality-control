@@ -68,6 +68,64 @@ def truncate_filename(filename: str, max_length: int = 40) -> str:
     return name[:available] + "..." + ext
 
 
+@st.fragment()
+def _render_file_completeness_file_lists(
+    *, stage_dirs: Dict[str, str], final_results_dir: str, session_id: str
+) -> None:
+    """Render the right-hand file listing column as a fragment."""
+
+    st.subheader("📁 文件管理")
+    tab_labels = list(STAGE_ORDER) + ["分析结果"]
+    tabs = st.tabs(tab_labels)
+    for idx, stage_name in enumerate(STAGE_ORDER):
+        with tabs[idx]:
+            folder = stage_dirs.get(stage_name, "")
+            files = get_file_list(folder)
+            if files:
+                for info in files:
+                    display_name = truncate_filename(info["name"])
+                    with st.expander(f"📄 {display_name}", expanded=False):
+                        col_i, col_a = st.columns([3, 1])
+                        with col_i:
+                            st.write(f"**文件名:** {info['name']}")
+                            st.write(f"**大小:** {format_file_size(int(info['size']))}")
+                            st.write(f"**修改时间:** {format_timestamp(float(info['modified']))}")
+                        with col_a:
+                            delete_key = f"delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
+                            if st.button("🗑️ 删除", key=delete_key):
+                                try:
+                                    os.remove(info["path"])
+                                    st.success(f"已删除: {info['name']}")
+                                    st.rerun(scope="fragment")
+                                except Exception as error:
+                                    st.error(f"删除失败: {error}")
+            else:
+                st.write("（未上传）")
+    with tabs[-1]:
+        result_files = get_file_list(final_results_dir)
+        if result_files:
+            for idx, info in enumerate(result_files):
+                display_name = truncate_filename(info["name"])
+                with st.expander(f"📊 {display_name}", expanded=False):
+                    st.write(f"**文件名:** {info['name']}")
+                    st.write(f"**大小:** {format_file_size(int(info['size']))}")
+                    st.write(f"**修改时间:** {format_timestamp(float(info['modified']))}")
+                    try:
+                        with open(info["path"], "rb") as handle:
+                            data = handle.read()
+                        st.download_button(
+                            label="⬇️ 下载",
+                            data=data,
+                            file_name=info["name"],
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_result_{session_id}_{idx}",
+                        )
+                    except Exception as error:
+                        st.warning(f"无法提供下载: {error}")
+        else:
+            st.write("（暂无分析结果）")
+
+
 def _copy_tree(src: str, dst: str) -> int:
     count = 0
     if not os.path.isdir(src):
@@ -384,56 +442,11 @@ def render_file_completeness_check_tab(session_id: Optional[str]) -> None:
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
-        st.subheader("📁 文件管理")
-        tab_labels = list(STAGE_ORDER) + ["分析结果"]
-        tabs = st.tabs(tab_labels)
-        for idx, stage_name in enumerate(STAGE_ORDER):
-            with tabs[idx]:
-                folder = stage_dirs.get(stage_name, "")
-                files = get_file_list(folder)
-                if files:
-                    for info in files:
-                        display_name = truncate_filename(info["name"])
-                        with st.expander(f"📄 {display_name}", expanded=False):
-                            col_i, col_a = st.columns([3, 1])
-                            with col_i:
-                                st.write(f"**文件名:** {info['name']}")
-                                st.write(f"**大小:** {format_file_size(int(info['size']))}")
-                                st.write(f"**修改时间:** {format_timestamp(float(info['modified']))}")
-                            with col_a:
-                                delete_key = f"delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
-                                if st.button("🗑️ 删除", key=delete_key):
-                                    try:
-                                        os.remove(info["path"])
-                                        st.success(f"已删除: {info['name']}")
-                                        st.rerun()
-                                    except Exception as error:
-                                        st.error(f"删除失败: {error}")
-                else:
-                    st.write("（未上传）")
-        with tabs[-1]:
-            result_files = get_file_list(final_results_dir)
-            if result_files:
-                for idx, info in enumerate(result_files):
-                    display_name = truncate_filename(info["name"])
-                    with st.expander(f"📊 {display_name}", expanded=False):
-                        st.write(f"**文件名:** {info['name']}")
-                        st.write(f"**大小:** {format_file_size(int(info['size']))}")
-                        st.write(f"**修改时间:** {format_timestamp(float(info['modified']))}")
-                        try:
-                            with open(info["path"], "rb") as handle:
-                                data = handle.read()
-                            st.download_button(
-                                label="⬇️ 下载",
-                                data=data,
-                                file_name=info["name"],
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key=f"download_result_{session_id}_{idx}",
-                            )
-                        except Exception as error:
-                            st.warning(f"无法提供下载: {error}")
-            else:
-                st.write("（暂无分析结果）")
+        _render_file_completeness_file_lists(
+            stage_dirs=stage_dirs,
+            final_results_dir=final_results_dir,
+            session_id=session_id,
+        )
 
     with col_main:
 
