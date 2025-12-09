@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import time
 from io import BytesIO
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -52,7 +53,6 @@ DEFAULT_SEVERITY = "major"
 JOB_POLL_INTERVAL_SECONDS = 5.0
 
 
-@st.fragment(run_every=JOB_POLL_INTERVAL_SECONDS)
 def _render_file_elements_job_fragment(
     *,
     backend_ready: bool,
@@ -63,7 +63,7 @@ def _render_file_elements_job_fragment(
     fragment_state_key: str,
     status_cache_key: str,
 ) -> None:
-    """Show job progress and poll backend without rerunning the full app."""
+    """Show job progress and poll backend within the main app render."""
 
     stored_job_id = st.session_state.get(job_state_key)
     current_status = job_status
@@ -1053,4 +1053,14 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
     else:
         st.info("结果文件目录未初始化，请刷新后重试。")
 
+    status_value = str(job_status.get("status")) if job_status else ""
+    job_running = status_value in {"queued", "running"}
+
     flush_preferences()
+
+    if backend_ready and job_running:
+        st.caption(
+            f"页面将在 {int(JOB_POLL_INTERVAL_SECONDS)} 秒后自动刷新以更新后台任务进度…"
+        )
+        time.sleep(JOB_POLL_INTERVAL_SECONDS)
+        st.rerun()
