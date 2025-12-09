@@ -96,7 +96,7 @@ def _render_file_completeness_file_lists(
                                 try:
                                     os.remove(info["path"])
                                     st.success(f"已删除: {info['name']}")
-                                    st.rerun()
+                                    st.rerun(scope="fragment")
                                 except Exception as error:
                                     st.error(f"删除失败: {error}")
             else:

@@ -89,7 +89,7 @@ def _render_history_file_lists(
                             if os.path.isfile(path):
                                 os.remove(path)
                     st.success(f"已清空 {target['label']} 文件")
-                    st.rerun()
+                    st.rerun(scope="fragment")
                 except Exception as error:
                     st.error(f"清空失败: {error}")
 
@@ -116,7 +116,7 @@ def _render_history_file_lists(
                             try:
                                 os.remove(str(info["path"]))
                                 st.success(f"已删除 {info['name']}")
-                                st.rerun()
+                                st.rerun(scope="fragment")
                             except Exception as error:
                                 st.error(f"删除失败: {error}")
 

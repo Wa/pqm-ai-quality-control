@@ -91,7 +91,7 @@ def _render_parameters_file_lists(
                 for info in reference_files:
                     os.remove(info["path"])
                 st.success("已清空基准文件")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as error:
                 st.error(f"清空失败: {error}")
     with col_clear2:
@@ -100,7 +100,7 @@ def _render_parameters_file_lists(
                 for info in target_files:
                     os.remove(info["path"])
                 st.success("已清空待检查文件")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as error:
                 st.error(f"清空失败: {error}")
     with col_clear3:
@@ -109,7 +109,7 @@ def _render_parameters_file_lists(
                 for info in graph_files:
                     os.remove(info["path"])
                 st.success("已清空图纸文件")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as error:
                 st.error(f"清空失败: {error}")
     with col_clear4:
@@ -118,7 +118,7 @@ def _render_parameters_file_lists(
                 for info in result_files:
                     os.remove(info["path"])
                 st.success("已清空分析结果")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as error:
                 st.error(f"清空失败: {error}")
 
@@ -148,7 +148,7 @@ def _render_parameters_file_lists(
                             try:
                                 os.remove(str(info["path"]))
                                 st.success(f"已删除 {info['name']}")
-                                st.rerun()
+                                st.rerun(scope="fragment")
                             except Exception as error:
                                 st.error(f"删除失败: {error}")
 

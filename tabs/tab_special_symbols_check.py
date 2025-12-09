@@ -103,7 +103,7 @@ def _render_special_symbols_file_lists(
                     if os.path.isfile(file_path):
                         os.remove(file_path)
                 st.success("已清空基准文件")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as e:
                 st.error(f"清空失败: {e}")
     with col_clear2:
@@ -114,7 +114,7 @@ def _render_special_symbols_file_lists(
                     if os.path.isfile(file_path):
                         os.remove(file_path)
                 st.success("已清空待检查文件")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as e:
                 st.error(f"清空失败: {e}")
     with col_clear3:
@@ -128,7 +128,7 @@ def _render_special_symbols_file_lists(
                             os.remove(file_path)
                             deleted += 1
                 st.success(f"已清空图纸文件（{deleted} 个）")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as e:
                 st.error(f"清空失败: {e}")
     with col_clear4:
@@ -142,7 +142,7 @@ def _render_special_symbols_file_lists(
                             os.remove(fpath)
                             deleted_count += 1
                 st.success(f"已清空分析结果（{deleted_count} 个文件）")
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as e:
                 st.error(f"清空失败: {e}")
 

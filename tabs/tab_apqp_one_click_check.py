@@ -158,7 +158,7 @@ def _render_apqp_file_lists_fragment(
             if isinstance(response, dict) and response.get("status") == "success":
                 deleted = int(response.get("deleted") or 0)
                 st.success(f"已清空上传及解析文件（共删除 {deleted} 个条目）。")
-                st.rerun()
+                st.rerun(scope="fragment")
             else:
                 detail = ""
                 message = ""
@@ -178,7 +178,7 @@ def _render_apqp_file_lists_fragment(
             if isinstance(response, dict) and response.get("status") == "success":
                 deleted = int(response.get("deleted") or 0)
                 st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
-                st.rerun()
+                st.rerun(scope="fragment")
             else:
                 detail = ""
                 message = ""
@@ -209,7 +209,7 @@ def _render_apqp_file_lists_fragment(
                         response = backend_client.delete_file(session_id, info["path"])
                         if isinstance(response, dict) and response.get("status") == "success":
                             st.success(f"已删除: {info['name']}")
-                            st.rerun()
+                            st.rerun(scope="fragment")
                         else:
                             detail = ""
                             message = ""
