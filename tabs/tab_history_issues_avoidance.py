@@ -63,6 +63,91 @@ def _latest_file(paths: Iterable[str]) -> str | None:
     return candidates[-1]
 
 
+@st.fragment()
+def _render_history_file_lists(
+    *,
+    upload_targets: list[dict[str, str]],
+    final_results_dir: str,
+    session_id: str,
+) -> None:
+    """Render the right-hand history issues file listings as a fragment."""
+
+    st.subheader("📁 文件管理")
+    col_clear1, col_clear2 = st.columns(2)
+    col_clear3, col_clear4 = st.columns(2)
+    clear_buttons = [col_clear1, col_clear2, col_clear3, col_clear4]
+    for column, target in zip(clear_buttons, upload_targets):
+        with column:
+            if st.button(
+                f"🗑️ 清空{target['label']}",
+                key=f"history_clear_{target['key']}_{session_id}",
+            ):
+                try:
+                    if target["dir"] and os.path.isdir(target["dir"]):
+                        for name in os.listdir(target["dir"]):
+                            path = os.path.join(target["dir"], name)
+                            if os.path.isfile(path):
+                                os.remove(path)
+                    st.success(f"已清空 {target['label']} 文件")
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"清空失败: {error}")
+
+    tabs = st.tabs([target["label"] for target in upload_targets])
+    for tab, target in zip(tabs, upload_targets):
+        with tab:
+            files = _collect_files(target["dir"])
+            if not files:
+                st.info("暂无文件")
+                continue
+            for info in files:
+                display = _truncate_filename(str(info["name"]))
+                with st.expander(f"📄 {display}", expanded=False):
+                    col_meta, col_actions = st.columns([3, 1])
+                    with col_meta:
+                        st.write(f"**文件名：** {info['name']}")
+                        st.write(f"**大小：** {_format_file_size(int(info['size']))}")
+                        st.write(f"**修改时间：** {_format_timestamp(float(info['modified']))}")
+                    with col_actions:
+                        delete_key = (
+                            f"history_delete_{target['key']}_{info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                        )
+                        if st.button("🗑️ 删除", key=delete_key):
+                            try:
+                                os.remove(str(info["path"]))
+                                st.success(f"已删除 {info['name']}")
+                                st.rerun()
+                            except Exception as error:
+                                st.error(f"删除失败: {error}")
+
+    st.markdown("---")
+    result_files = _collect_files(final_results_dir)
+    if result_files:
+        st.markdown("**下载最新结果**")
+        csv_paths = [str(info["path"]) for info in result_files if str(info["name"]).lower().endswith(".csv")]
+        xlsx_paths = [str(info["path"]) for info in result_files if str(info["name"]).lower().endswith(".xlsx")]
+        latest_csv = _latest_file(csv_paths)
+        latest_xlsx = _latest_file(xlsx_paths)
+        if latest_csv:
+            with open(latest_csv, "rb") as handle:
+                st.download_button(
+                    label=f"下载CSV（{os.path.basename(latest_csv)}）",
+                    data=handle.read(),
+                    file_name=os.path.basename(latest_csv),
+                    mime="text/csv",
+                    key=f"history_download_csv_{session_id}",
+                )
+        if latest_xlsx:
+            with open(latest_xlsx, "rb") as handle:
+                st.download_button(
+                    label=f"下载Excel（{os.path.basename(latest_xlsx)}）",
+                    data=handle.read(),
+                    file_name=os.path.basename(latest_xlsx),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"history_download_xlsx_{session_id}",
+                )
+
+
 def render_history_issues_avoidance_tab(session_id: str | None) -> None:
     if session_id is None:
         st.warning("请先登录以使用此功能。")
@@ -137,80 +222,11 @@ def render_history_issues_avoidance_tab(session_id: str | None) -> None:
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
-        st.subheader("📁 文件管理")
-        col_clear1, col_clear2 = st.columns(2)
-        col_clear3, col_clear4 = st.columns(2)
-        clear_buttons = [col_clear1, col_clear2, col_clear3, col_clear4]
-        for column, target in zip(clear_buttons, upload_targets):
-            with column:
-                if st.button(
-                    f"🗑️ 清空{target['label']}",
-                    key=f"history_clear_{target['key']}_{session_id}",
-                ):
-                    try:
-                        if target["dir"] and os.path.isdir(target["dir"]):
-                            for name in os.listdir(target["dir"]):
-                                path = os.path.join(target["dir"], name)
-                                if os.path.isfile(path):
-                                    os.remove(path)
-                        st.success(f"已清空 {target['label']} 文件")
-                        st.rerun()
-                    except Exception as error:
-                        st.error(f"清空失败: {error}")
-
-        tabs = st.tabs([target["label"] for target in upload_targets])
-        for tab, target in zip(tabs, upload_targets):
-            with tab:
-                files = _collect_files(target["dir"])
-                if not files:
-                    st.info("暂无文件")
-                    continue
-                for info in files:
-                    display = _truncate_filename(str(info["name"]))
-                    with st.expander(f"📄 {display}", expanded=False):
-                        col_meta, col_actions = st.columns([3, 1])
-                        with col_meta:
-                            st.write(f"**文件名：** {info['name']}")
-                            st.write(f"**大小：** {_format_file_size(int(info['size']))}")
-                            st.write(f"**修改时间：** {_format_timestamp(float(info['modified']))}")
-                        with col_actions:
-                            delete_key = (
-                                f"history_delete_{target['key']}_{info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            )
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(str(info["path"]))
-                                    st.success(f"已删除 {info['name']}")
-                                    st.rerun()
-                                except Exception as error:
-                                    st.error(f"删除失败: {error}")
-
-        st.markdown("---")
-        result_files = _collect_files(final_results_dir)
-        if result_files:
-            st.markdown("**下载最新结果**")
-            csv_paths = [str(info["path"]) for info in result_files if str(info["name"]).lower().endswith(".csv")]
-            xlsx_paths = [str(info["path"]) for info in result_files if str(info["name"]).lower().endswith(".xlsx")]
-            latest_csv = _latest_file(csv_paths)
-            latest_xlsx = _latest_file(xlsx_paths)
-            if latest_csv:
-                with open(latest_csv, "rb") as handle:
-                    st.download_button(
-                        label=f"下载CSV（{os.path.basename(latest_csv)}）",
-                        data=handle.read(),
-                        file_name=os.path.basename(latest_csv),
-                        mime="text/csv",
-                        key=f"history_download_csv_{session_id}",
-                    )
-            if latest_xlsx:
-                with open(latest_xlsx, "rb") as handle:
-                    st.download_button(
-                        label=f"下载Excel（{os.path.basename(latest_xlsx)}）",
-                        data=handle.read(),
-                        file_name=os.path.basename(latest_xlsx),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"history_download_xlsx_{session_id}",
-                    )
+        _render_history_file_lists(
+            upload_targets=upload_targets,
+            final_results_dir=final_results_dir,
+            session_id=session_id,
+        )
 
     with col_main:
         st.subheader("📋 历史问题规避")

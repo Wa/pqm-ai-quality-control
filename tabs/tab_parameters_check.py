@@ -66,6 +66,128 @@ def _latest_file(paths: Iterable[str]) -> str | None:
     return candidates[-1]
 
 
+@st.fragment()
+def _render_parameters_file_lists(
+    *,
+    reference_dir: str,
+    target_dir: str,
+    graph_dir: str,
+    final_results_dir: str,
+    session_id: str,
+) -> None:
+    """Render the right-hand file management column as a fragment."""
+
+    st.subheader("📁 文件管理")
+
+    reference_files = _collect_files(reference_dir)
+    target_files = _collect_files(target_dir)
+    graph_files = _collect_files(graph_dir)
+    result_files = _collect_files(final_results_dir)
+
+    col_clear1, col_clear2, col_clear3, col_clear4 = st.columns(4)
+    with col_clear1:
+        if st.button("🗑️ 清空基准文件", key=f"parameters_clear_reference_{session_id}"):
+            try:
+                for info in reference_files:
+                    os.remove(info["path"])
+                st.success("已清空基准文件")
+                st.rerun()
+            except Exception as error:
+                st.error(f"清空失败: {error}")
+    with col_clear2:
+        if st.button("🗑️ 清空待检查", key=f"parameters_clear_target_{session_id}"):
+            try:
+                for info in target_files:
+                    os.remove(info["path"])
+                st.success("已清空待检查文件")
+                st.rerun()
+            except Exception as error:
+                st.error(f"清空失败: {error}")
+    with col_clear3:
+        if st.button("🗑️ 清空图纸", key=f"parameters_clear_graph_{session_id}"):
+            try:
+                for info in graph_files:
+                    os.remove(info["path"])
+                st.success("已清空图纸文件")
+                st.rerun()
+            except Exception as error:
+                st.error(f"清空失败: {error}")
+    with col_clear4:
+        if st.button("🗑️ 清空结果", key=f"parameters_clear_results_{session_id}"):
+            try:
+                for info in result_files:
+                    os.remove(info["path"])
+                st.success("已清空分析结果")
+                st.rerun()
+            except Exception as error:
+                st.error(f"清空失败: {error}")
+
+    tab_reference, tab_target, tab_graph, tab_results = st.tabs([
+        "基准文件",
+        "待检查文件",
+        "图纸文件",
+        "分析结果",
+    ])
+
+    def _render_file_list(tab, entries, delete_prefix: str) -> None:
+        with tab:
+            if not entries:
+                st.info("暂无文件")
+                return
+            for info in entries:
+                display_name = _truncate_filename(str(info["name"]))
+                with st.expander(f"📄 {display_name}", expanded=False):
+                    col_meta, col_action = st.columns([3, 1])
+                    with col_meta:
+                        st.write(f"**文件名：** {info['name']}")
+                        st.write(f"**大小：** {_format_file_size(int(info['size']))}")
+                        st.write(f"**修改时间：** {_format_timestamp(float(info['modified']))}")
+                    with col_action:
+                        delete_key = f"{delete_prefix}_{info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
+                        if st.button("🗑️ 删除", key=delete_key):
+                            try:
+                                os.remove(str(info["path"]))
+                                st.success(f"已删除 {info['name']}")
+                                st.rerun()
+                            except Exception as error:
+                                st.error(f"删除失败: {error}")
+
+    _render_file_list(tab_reference, reference_files, "parameters_delete_reference")
+    _render_file_list(tab_target, target_files, "parameters_delete_target")
+    _render_file_list(tab_graph, graph_files, "parameters_delete_graph")
+    _render_file_list(tab_results, result_files, "parameters_delete_result")
+
+    st.markdown("---")
+    try:
+        result_names = os.listdir(final_results_dir)
+    except Exception:
+        result_names = []
+    csv_paths = [os.path.join(final_results_dir, name) for name in result_names if name.lower().endswith(".csv")]
+    xlsx_paths = [os.path.join(final_results_dir, name) for name in result_names if name.lower().endswith(".xlsx")]
+    latest_csv = _latest_file(csv_paths)
+    latest_xlsx = _latest_file(xlsx_paths)
+    if latest_csv or latest_xlsx:
+        st.markdown("**下载最新结果**")
+    if latest_csv:
+        with open(latest_csv, "rb") as handle:
+            st.download_button(
+                label=f"下载CSV（{os.path.basename(latest_csv)}）",
+                data=handle.read(),
+                file_name=os.path.basename(latest_csv),
+                mime="text/csv",
+                key=f"parameters_download_csv_{session_id}",
+            )
+    if latest_xlsx:
+        with open(latest_xlsx, "rb") as handle:
+            st.download_button(
+                label=f"下载Excel（{os.path.basename(latest_xlsx)}）",
+                data=handle.read(),
+                file_name=os.path.basename(latest_xlsx),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"parameters_download_xlsx_{session_id}",
+            )
+
+
 def render_parameters_check_tab(session_id: str | None) -> None:
     if session_id is None:
         st.warning("请先登录以使用此功能。")
@@ -144,115 +266,13 @@ def render_parameters_check_tab(session_id: str | None) -> None:
     col_main, col_info = st.columns([2, 1])
 
     with col_info:
-        st.subheader("📁 文件管理")
-
-        reference_files = _collect_files(reference_dir)
-        target_files = _collect_files(target_dir)
-        graph_files = _collect_files(graph_dir)
-        result_files = _collect_files(final_results_dir)
-
-        col_clear1, col_clear2, col_clear3, col_clear4 = st.columns(4)
-        with col_clear1:
-            if st.button("🗑️ 清空基准文件", key=f"parameters_clear_reference_{session_id}"):
-                try:
-                    for info in reference_files:
-                        os.remove(info["path"])
-                    st.success("已清空基准文件")
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"清空失败: {error}")
-        with col_clear2:
-            if st.button("🗑️ 清空待检查", key=f"parameters_clear_target_{session_id}"):
-                try:
-                    for info in target_files:
-                        os.remove(info["path"])
-                    st.success("已清空待检查文件")
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"清空失败: {error}")
-        with col_clear3:
-            if st.button("🗑️ 清空图纸", key=f"parameters_clear_graph_{session_id}"):
-                try:
-                    for info in graph_files:
-                        os.remove(info["path"])
-                    st.success("已清空图纸文件")
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"清空失败: {error}")
-        with col_clear4:
-            if st.button("🗑️ 清空结果", key=f"parameters_clear_results_{session_id}"):
-                try:
-                    for info in result_files:
-                        os.remove(info["path"])
-                    st.success("已清空分析结果")
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"清空失败: {error}")
-
-        tab_reference, tab_target, tab_graph, tab_results = st.tabs([
-            "基准文件",
-            "待检查文件",
-            "图纸文件",
-            "分析结果",
-        ])
-
-        def _render_file_list(tab, entries, delete_prefix: str) -> None:
-            with tab:
-                if not entries:
-                    st.info("暂无文件")
-                    return
-                for info in entries:
-                    display_name = _truncate_filename(str(info["name"]))
-                    with st.expander(f"📄 {display_name}", expanded=False):
-                        col_meta, col_action = st.columns([3, 1])
-                        with col_meta:
-                            st.write(f"**文件名：** {info['name']}")
-                            st.write(f"**大小：** {_format_file_size(int(info['size']))}")
-                            st.write(f"**修改时间：** {_format_timestamp(float(info['modified']))}")
-                        with col_action:
-                            delete_key = f"{delete_prefix}_{info['name'].replace(' ', '_').replace('.', '_')}_{session_id}"
-                            if st.button("🗑️ 删除", key=delete_key):
-                                try:
-                                    os.remove(str(info["path"]))
-                                    st.success(f"已删除 {info['name']}")
-                                    st.rerun()
-                                except Exception as error:
-                                    st.error(f"删除失败: {error}")
-
-        _render_file_list(tab_reference, reference_files, "parameters_delete_reference")
-        _render_file_list(tab_target, target_files, "parameters_delete_target")
-        _render_file_list(tab_graph, graph_files, "parameters_delete_graph")
-        _render_file_list(tab_results, result_files, "parameters_delete_result")
-
-        st.markdown("---")
-        try:
-            result_names = os.listdir(final_results_dir)
-        except Exception:
-            result_names = []
-        csv_paths = [os.path.join(final_results_dir, name) for name in result_names if name.lower().endswith(".csv")]
-        xlsx_paths = [os.path.join(final_results_dir, name) for name in result_names if name.lower().endswith(".xlsx")]
-        latest_csv = _latest_file(csv_paths)
-        latest_xlsx = _latest_file(xlsx_paths)
-        if latest_csv or latest_xlsx:
-            st.markdown("**下载最新结果**")
-        if latest_csv:
-            with open(latest_csv, "rb") as handle:
-                st.download_button(
-                    label=f"下载CSV（{os.path.basename(latest_csv)}）",
-                    data=handle.read(),
-                    file_name=os.path.basename(latest_csv),
-                    mime="text/csv",
-                    key=f"parameters_download_csv_{session_id}",
-                )
-        if latest_xlsx:
-            with open(latest_xlsx, "rb") as handle:
-                st.download_button(
-                    label=f"下载Excel（{os.path.basename(latest_xlsx)}）",
-                    data=handle.read(),
-                    file_name=os.path.basename(latest_xlsx),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"parameters_download_xlsx_{session_id}",
-                )
+        _render_parameters_file_lists(
+            reference_dir=reference_dir,
+            target_dir=target_dir,
+            graph_dir=graph_dir,
+            final_results_dir=final_results_dir,
+            session_id=session_id,
+        )
 
     with col_main:
         st.subheader("⚙️ 参数一致性检查")

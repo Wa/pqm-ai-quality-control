@@ -137,6 +137,107 @@ def _load_file_bytes(path: str) -> Optional[bytes]:
         return None
 
 
+@st.fragment()
+def _render_apqp_file_lists_fragment(
+    *, session_id: str, backend_ready: bool, backend_client: Optional[Any]
+) -> None:
+    """Render the right-hand file list column without rerunning the full app."""
+
+    st.subheader("📁 文件管理")
+    st.caption("如果上传的文件没有在此显示，可点击 Ctrl + R 刷新页面。")
+    clear_disabled = not backend_ready
+    if st.button(
+        "🗑️ 删除全部上传文件",
+        key=f"apqp_clear_all_{session_id}",
+        disabled=clear_disabled,
+    ):
+        if not backend_ready or backend_client is None:
+            st.error("后台服务不可用，无法删除文件。")
+        else:
+            response = backend_client.clear_apqp_files(session_id, target="all")
+            if isinstance(response, dict) and response.get("status") == "success":
+                deleted = int(response.get("deleted") or 0)
+                st.success(f"已清空上传及解析文件（共删除 {deleted} 个条目）。")
+                st.rerun()
+            else:
+                detail = ""
+                message = ""
+                if isinstance(response, dict):
+                    detail = str(response.get("detail") or "")
+                    message = str(response.get("message") or "")
+                st.error(f"删除失败：{detail or message or response}")
+    if st.button(
+        "🗑️ 删除全部分析结果",
+        key=f"apqp_clear_results_{session_id}",
+        disabled=not backend_ready,
+    ):
+        if not backend_ready or backend_client is None:
+            st.error("后台服务不可用，无法删除分析结果。")
+        else:
+            response = backend_client.clear_apqp_results(session_id)
+            if isinstance(response, dict) and response.get("status") == "success":
+                deleted = int(response.get("deleted") or 0)
+                st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
+                st.rerun()
+            else:
+                detail = ""
+                message = ""
+                if isinstance(response, dict):
+                    detail = str(response.get("detail") or "")
+                    message = str(response.get("message") or "")
+                st.error(f"删除失败：{detail or message or response}")
+    tab_labels = list(STAGE_ORDER) + ["分析结果"]
+    stage_tabs = st.tabs(tab_labels)
+    for idx, stage_name in enumerate(STAGE_ORDER):
+        with stage_tabs[idx]:
+            files = _fetch_stage_files(backend_client, session_id, stage_name) if backend_client else []
+            if not files:
+                st.write("（未上传）")
+                continue
+            for info in files:
+                cols = st.columns([4, 1])
+                cols[0].write(f"📄 {info['name']}")
+                delete_key = f"apqp_delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
+                if cols[1].button(
+                    "删除",
+                    key=delete_key,
+                    disabled=not backend_ready,
+                ):
+                    if not backend_ready or backend_client is None:
+                        st.error("后台服务不可用，无法删除文件。")
+                    else:
+                        response = backend_client.delete_file(session_id, info["path"])
+                        if isinstance(response, dict) and response.get("status") == "success":
+                            st.success(f"已删除: {info['name']}")
+                            st.rerun()
+                        else:
+                            detail = ""
+                            message = ""
+                            if isinstance(response, dict):
+                                detail = str(response.get("detail") or "")
+                                message = str(response.get("message") or "")
+                            st.error(f"删除失败：{detail or message or response}")
+
+    with stage_tabs[-1]:
+        result_files = _fetch_result_files(backend_client, session_id) if backend_client else []
+        if not result_files:
+            st.write("（暂无分析结果）")
+        else:
+            for info in result_files:
+                cols = st.columns([6, 2])
+                cols[0].write(f"📑 {info['name']}")
+                data = _load_file_bytes(info.get("path") or "")
+                disabled = data is None or not backend_ready
+                cols[1].download_button(
+                    "⬇️ 下载",
+                    data=data or b"",
+                    file_name=info.get("name") or "result",
+                    mime="application/octet-stream",
+                    disabled=disabled,
+                    key=f"apqp_result_download_{info.get('name')}_{session_id}",
+                )
+
+
 def _render_classification_results(summary: Dict[str, Any]) -> None:
     """Render APQP classification summary in the UI."""
 
@@ -972,97 +1073,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.rerun()
 
     with col_info:
-        st.subheader("📁 文件管理")
-        st.caption("如果上传的文件没有在此显示，可点击 Ctrl + R 刷新页面。")
-        clear_disabled = not backend_ready
-        if st.button(
-            "🗑️ 删除全部上传文件",
-            key=f"apqp_clear_all_{session_id}",
-            disabled=clear_disabled,
-        ):
-            if not backend_ready or backend_client is None:
-                st.error("后台服务不可用，无法删除文件。")
-            else:
-                response = backend_client.clear_apqp_files(session_id, target="all")
-                if isinstance(response, dict) and response.get("status") == "success":
-                    deleted = int(response.get("deleted") or 0)
-                    st.success(f"已清空上传及解析文件（共删除 {deleted} 个条目）。")
-                    st.rerun()
-                else:
-                    detail = ""
-                    message = ""
-                    if isinstance(response, dict):
-                        detail = str(response.get("detail") or "")
-                        message = str(response.get("message") or "")
-                    st.error(f"删除失败：{detail or message or response}")
-        if st.button(
-            "🗑️ 删除全部分析结果",
-            key=f"apqp_clear_results_{session_id}",
-            disabled=not backend_ready,
-        ):
-            if not backend_ready or backend_client is None:
-                st.error("后台服务不可用，无法删除分析结果。")
-            else:
-                response = backend_client.clear_apqp_results(session_id)
-                if isinstance(response, dict) and response.get("status") == "success":
-                    deleted = int(response.get("deleted") or 0)
-                    st.success(f"已清空分析结果，共删除 {deleted} 个文件。")
-                    st.rerun()
-                else:
-                    detail = ""
-                    message = ""
-                    if isinstance(response, dict):
-                        detail = str(response.get("detail") or "")
-                        message = str(response.get("message") or "")
-                    st.error(f"删除失败：{detail or message or response}")
-        tab_labels = list(STAGE_ORDER) + ["分析结果"]
-        stage_tabs = st.tabs(tab_labels)
-        for idx, stage_name in enumerate(STAGE_ORDER):
-            with stage_tabs[idx]:
-                files = _fetch_stage_files(backend_client, session_id, stage_name) if backend_client else []
-                if not files:
-                    st.write("（未上传）")
-                    continue
-                for info in files:
-                    cols = st.columns([4, 1])
-                    cols[0].write(f"📄 {info['name']}")
-                    delete_key = f"apqp_delete_{stage_name}_{info['name'].replace(' ', '_')}_{session_id}"
-                    if cols[1].button(
-                        "删除",
-                        key=delete_key,
-                        disabled=not backend_ready,
-                    ):
-                        if not backend_ready or backend_client is None:
-                            st.error("后台服务不可用，无法删除文件。")
-                        else:
-                            response = backend_client.delete_file(session_id, info["path"])
-                            if isinstance(response, dict) and response.get("status") == "success":
-                                st.success(f"已删除: {info['name']}")
-                                st.rerun()
-                            else:
-                                detail = ""
-                                message = ""
-                                if isinstance(response, dict):
-                                    detail = str(response.get("detail") or "")
-                                    message = str(response.get("message") or "")
-                                st.error(f"删除失败：{detail or message or response}")
-
-        with stage_tabs[-1]:
-            result_files = _fetch_result_files(backend_client, session_id) if backend_client else []
-            if not result_files:
-                st.write("（暂无分析结果）")
-            else:
-                for info in result_files:
-                    cols = st.columns([6, 2])
-                    cols[0].write(f"📑 {info['name']}")
-                    data = _load_file_bytes(info.get("path") or "")
-                    disabled = data is None or not backend_ready
-                    cols[1].download_button(
-                        "⬇️ 下载",
-                        data=data or b"",
-                        file_name=info.get("name") or "result",
-                        mime="application/octet-stream",
-                        disabled=disabled,
-                        key=f"apqp_result_download_{info.get('name')}_{session_id}",
-                    )
+        _render_apqp_file_lists_fragment(
+            session_id=session_id,
+            backend_ready=backend_ready,
+            backend_client=backend_client,
+        )
 

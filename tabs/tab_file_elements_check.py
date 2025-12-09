@@ -324,6 +324,68 @@ def _select_latest_by_ext(entries: List[Dict[str, object]], extension: str) -> O
     return None
 
 
+@st.fragment()
+def _render_file_elements_results_fragment(
+    *, final_results_dir: str, session_id: str
+) -> None:
+    """Render the bottom results file list without rerunning the full tab."""
+
+    st.markdown("### 5. 评审结果下载")
+    if final_results_dir:
+        col_clear, col_hint = st.columns([1, 3])
+        with col_clear:
+            if st.button(
+                "🗑️ 清空结果文件夹",
+                key=f"file_elements_clear_final_{session_id}",
+                help="删除所有评审结果文件。",
+            ):
+                try:
+                    for entry in os.listdir(final_results_dir):
+                        path = os.path.join(final_results_dir, entry)
+                        if os.path.isfile(path):
+                            os.remove(path)
+                    st.success("已清空结果文件夹。")
+                    st.rerun()
+                except OSError as error:
+                    st.error(f"清理结果文件夹失败：{error}")
+        with col_hint:
+            st.caption("每次评估完成后会生成CSV与Excel文件，可在此处统一下载或清理。")
+
+        final_files = get_file_list(final_results_dir)
+        if final_files:
+            for entry in final_files:
+                cols = st.columns([2, 1, 1, 1])
+                cols[0].markdown(f"**{entry['name']}**")
+                cols[1].caption(_format_size(int(entry.get("size", 0))))
+                cols[2].caption(_format_time(float(entry.get("modified", 0.0))))
+                if os.path.isfile(entry["path"]):
+                    with open(entry["path"], "rb") as handle:
+                        payload = handle.read()
+                    cols[3].download_button(
+                        "下载",
+                        payload,
+                        file_name=entry["name"],
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            if entry["name"].lower().endswith(".xlsx")
+                            else "text/csv"
+                        ),
+                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
+                    )
+                else:
+                    cols[3].download_button(
+                        "下载",
+                        data=b"",
+                        file_name=entry["name"],
+                        disabled=True,
+                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
+                    )
+        else:
+            st.info("结果文件夹暂无文件，运行评估后将自动生成。")
+    else:
+        st.info("结果文件目录未初始化，请刷新后重试。")
+
+
 def render_file_elements_check_tab(session_id: str | None) -> None:
     if session_id is None:
         st.warning("请先登录以使用此功能。")
@@ -998,59 +1060,9 @@ def render_file_elements_check_tab(session_id: str | None) -> None:
 
         st.caption("如需再次分析，请使用上方“重新评估”按钮；评审结果将自动保存在结果目录中供下载。")
 
-    st.markdown("### 5. 评审结果下载")
-    if final_results_dir:
-        col_clear, col_hint = st.columns([1, 3])
-        with col_clear:
-            if st.button(
-                "🗑️ 清空结果文件夹",
-                key=f"file_elements_clear_final_{session_id}",
-                help="删除所有评审结果文件。",
-            ):
-                try:
-                    for entry in os.listdir(final_results_dir):
-                        path = os.path.join(final_results_dir, entry)
-                        if os.path.isfile(path):
-                            os.remove(path)
-                    st.success("已清空结果文件夹。")
-                    st.rerun()
-                except OSError as error:
-                    st.error(f"清理结果文件夹失败：{error}")
-        with col_hint:
-            st.caption("每次评估完成后会生成CSV与Excel文件，可在此处统一下载或清理。")
-
-        final_files = get_file_list(final_results_dir)
-        if final_files:
-            for entry in final_files:
-                cols = st.columns([2, 1, 1, 1])
-                cols[0].markdown(f"**{entry['name']}**")
-                cols[1].caption(_format_size(int(entry.get("size", 0))))
-                cols[2].caption(_format_time(float(entry.get("modified", 0.0))))
-                if os.path.isfile(entry["path"]):
-                    with open(entry["path"], "rb") as handle:
-                        payload = handle.read()
-                    cols[3].download_button(
-                        "下载",
-                        payload,
-                        file_name=entry["name"],
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            if entry["name"].lower().endswith(".xlsx")
-                            else "text/csv"
-                        ),
-                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
-                    )
-                else:
-                    cols[3].download_button(
-                        "下载",
-                        data=b"",
-                        file_name=entry["name"],
-                        disabled=True,
-                        key=f"file_elements_final_download_{session_id}_{entry['name']}",
-                    )
-        else:
-            st.info("结果文件夹暂无文件，运行评估后将自动生成。")
-    else:
-        st.info("结果文件目录未初始化，请刷新后重试。")
+    _render_file_elements_results_fragment(
+        final_results_dir=final_results_dir,
+        session_id=session_id,
+    )
 
     flush_preferences()
