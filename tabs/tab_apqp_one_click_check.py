@@ -953,6 +953,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             if isinstance(live_status, dict):
                                 elements_job_status = live_status
                             status_value = str(elements_job_status.get("status")) if elements_job_status else ""
+                            message_hint = str(elements_job_status.get("message")) if elements_job_status else ""
+                            if status_value not in {"queued", "running", "failed", "succeeded"} and "完成" in message_hint:
+                                status_value = "succeeded"
 
                             if elements_job_status:
                                 progress_value = float(elements_job_status.get("progress") or 0.0)
