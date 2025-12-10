@@ -706,16 +706,30 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
         pending_info = st.session_state.get(pending_state_key)
         with classify_log_container:
-            display_status = active_status or classify_status or parse_status
-            if display_status:
-                current_status = str(display_status.get("status"))
-                progress_val = float(display_status.get("progress") or 0.0)
-                progress_pct = int(progress_val * 100)
+            def _render_job_bar(label: str, status: Optional[Dict[str, Any]]) -> None:
+                st.caption(label)
+                if not status:
+                    st.progress(0.0)
+                    st.caption("未开始")
+                    return
+                progress_val = float(status.get("progress") or 0.0)
+                # Normalize if backend returns 0-100
+                if progress_val > 1.0:
+                    progress_val = progress_val / 100.0
+                progress_val = max(0.0, min(progress_val, 1.0))
+                progress_pct = int(round(progress_val * 100))
                 bar_col, pct_col = st.columns([9, 1])
                 with bar_col:
                     st.progress(progress_val)
                 with pct_col:
                     st.markdown(f"**{progress_pct}%**")
+
+            _render_job_bar("解析进度", parse_status)
+            _render_job_bar("齐套性进度", classify_status)
+
+            display_status = active_status or classify_status or parse_status
+            if display_status:
+                current_status = str(display_status.get("status"))
                 stage_label = display_status.get("stage") or "运行中"
                 message = display_status.get("message") or "正在处理..."
                 st.info(f"{stage_label} · {message}")
@@ -1059,16 +1073,27 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 st.info("暂无阶段可选，无法发起要素评估。")
 
             with overall_progress_placeholder:
-                if overall_progress_total > 0:
-                    overall_ratio = overall_progress_sum / overall_progress_total
-                    overall_ratio = max(0.0, min(overall_ratio, 1.0))
-                    bar_col, pct_col = st.columns([9, 1])
-                    with bar_col:
-                        st.progress(overall_ratio)
-                    with pct_col:
-                        st.markdown(f"**{int(round(overall_ratio * 100))}%**")
+                if backend_ready and backend_client is not None:
+                    done_statuses = {"succeeded", "failed"}
+                    running_statuses = {"queued", "running"}
+                    counts = {"total": 0, "done": 0, "running": 0, "pending": 0}
+                    resp = backend_client.list_file_elements_jobs(session_id)
+                    if isinstance(resp, list):
+                        counts["total"] = len(resp)
+                        for job in resp:
+                            if not isinstance(job, dict):
+                                continue
+                            status = str(job.get("status", "")).lower()
+                            if status in done_statuses:
+                                counts["done"] += 1
+                            elif status in running_statuses:
+                                counts["running"] += 1
+                        counts["pending"] = max(0, counts["total"] - counts["done"] - counts["running"])
+                    st.info(
+                        f"{counts['total']}个交付物，未开始：{counts['pending']}个，进行中：{counts['running']}个，已完成：{counts['done']}个"
+                    )
                 else:
-                    st.caption("暂无要素评估任务进度。")
+                    st.info("后台服务未连接，无法获取进度。")
 
         if job_active:
             st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")

@@ -1,3 +1,5 @@
+# Per-session turbo concurrency cap for file elements jobs
+MAX_TURBO_FILE_ELEMENTS_PER_SESSION = 5
 from collections import Counter
 from dataclasses import dataclass, field
 import json
@@ -458,6 +460,9 @@ def _start_job(
         raise HTTPException(status_code=404, detail="未知任务类型")
 
     _prune_jobs()
+    is_file_elements_job = job_type == "file_elements"
+    incoming_turbo = bool((metadata or {}).get("turbo_mode")) if is_file_elements_job else False
+    active_turbo_count = 0
     with jobs_lock:
         for record in jobs.values():
             if (
@@ -465,7 +470,20 @@ def _start_job(
                 and record.job_type == job_type
                 and record.status in {"queued", "running"}
             ):
-                raise HTTPException(status_code=409, detail=f"已有{_job_label(job_type)}任务正在运行")
+                if is_file_elements_job:
+                    record_turbo = bool((record.metadata or {}).get("turbo_mode"))
+                    if incoming_turbo and record_turbo:
+                        active_turbo_count += 1
+                        continue
+                    if not incoming_turbo:
+                        raise HTTPException(status_code=409, detail=f"已有{_job_label(job_type)}任务正在运行")
+                else:
+                    raise HTTPException(status_code=409, detail=f"已有{_job_label(job_type)}任务正在运行")
+        if is_file_elements_job and incoming_turbo and active_turbo_count >= MAX_TURBO_FILE_ELEMENTS_PER_SESSION:
+            raise HTTPException(
+                status_code=409,
+                detail=f"已有{active_turbo_count}个加速要素任务在运行，超出并发上限（{MAX_TURBO_FILE_ELEMENTS_PER_SESSION}）。",
+            )
         job_id = uuid4().hex
         record = JobRecord(job_id=job_id, session_id=session_id, job_type=job_type)
         record.stage = "queued"
