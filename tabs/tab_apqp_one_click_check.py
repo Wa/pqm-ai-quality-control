@@ -520,78 +520,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
     )
     elements_source_dir = session_dirs.get("elements", "")
     elements_parsed_dir = session_dirs.get("generated_file_elements_check_parsed", "")
-    log_reset_key = f"apqp_one_click_log_reset_{session_id}"
-    debug_log_dir = os.path.join(generated_root, "debug_logs")
-    classification_state_key = f"apqp_classification_summary_{session_id}"
-    turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
-    parse_job_state_key = f"apqp_one_click_job_id_{session_id}"
-    classify_job_state_key = f"apqp_one_click_classify_job_id_{session_id}"
-    elements_job_state_key = f"apqp_one_click_elements_job_id_{session_id}"
-    elements_fragment_state_key = f"apqp_one_click_elements_job_fragment_{session_id}"
-    elements_status_cache_key = f"{elements_fragment_state_key}_status"
-    elements_debug_cache_key = f"{elements_fragment_state_key}_details"
-    elements_result_state_key = f"apqp_one_click_elements_result_{session_id}"
-    elements_loaded_path_key = f"apqp_one_click_elements_loaded_{session_id}"
-    elements_source_state_key = f"apqp_one_click_elements_sources_{session_id}"
-    elements_result_cache_key = f"apqp_one_click_elements_result_cache_{session_id}"
-    elements_autorun_key = f"apqp_one_click_elements_autorun_{session_id}"
-    elements_progress_start_key = f"apqp_one_click_elements_progress_start_{session_id}"
-    elements_progress_last_pct_key = f"apqp_one_click_elements_progress_last_pct_{session_id}"
-    elements_progress_logged_initial_key = f"apqp_one_click_elements_progress_logged_initial_{session_id}"
-    elements_progress_denominator_key = f"apqp_one_click_elements_progress_den_{session_id}"
-    elements_progress_ratio_key = f"apqp_one_click_elements_progress_ratio_{session_id}"
-    upload_tracker_key = f"apqp_one_click_uploads_{session_id}"
-    if not st.session_state.get(log_reset_key):
-        os.makedirs(debug_log_dir, exist_ok=True)
-        for fname in [
-            "apqp_elements_progress.log",
-            "apqp_elements_api.log",
-            "apqp_elements_progress_diag.log",
-        ]:
-            try:
-                with open(os.path.join(debug_log_dir, fname), "w", encoding="utf-8"):
-                    pass
-            except Exception:
-                pass
-        # reset progress state caches to avoid stale carry-over
-        for key in [
-            elements_progress_last_pct_key,
-            elements_progress_logged_initial_key,
-            elements_progress_denominator_key,
-            elements_progress_ratio_key,
-        ]:
-            st.session_state.pop(key, None)
-        st.session_state[log_reset_key] = True
-
-    upload_tracker: Dict[str, Dict[str, Any]] = st.session_state.setdefault(upload_tracker_key, {})
 
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
-
-    finished_uploads: List[str] = []
-    upload_messages: List[Tuple[str, str]] = []
-    if backend_ready and backend_client and upload_tracker:
-        for upload_id, info in list(upload_tracker.items()):
-            status_resp = backend_client.get_apqp_upload_status(upload_id)
-            if isinstance(status_resp, dict) and status_resp.get("status"):
-                upload_tracker[upload_id].update(status_resp)
-                state = status_resp.get("status")
-                if state in {"completed", "error"}:
-                    finished_uploads.append(upload_id)
-                    name = status_resp.get("name") or info.get("name") or upload_id
-                    if state == "completed":
-                        upload_messages.append(("success", f"{name} 上传完成"))
-                    else:
-                        detail = status_resp.get("error") or status_resp.get("detail")
-                        upload_messages.append(("error", f"{name} 上传失败：{detail}"))
-            else:
-                upload_messages.append(("error", f"上传 {info.get('name', upload_id)} 状态获取失败"))
-                finished_uploads.append(upload_id)
-
-    for upload_id in finished_uploads:
-        upload_tracker.pop(upload_id, None)
-    if finished_uploads:
-        st.session_state[upload_tracker_key] = upload_tracker
 
     col_main, col_info = st.columns([2, 1])
 
@@ -604,22 +535,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             "• 第2步：右侧可以查看、确认或删除已上传文件。  \n"
             "• 第3步：文件分类与齐套性自动分析功能正在开发中，敬请期待。"
         )
-        if upload_messages:
-            for level, text in upload_messages:
-                if level == "success":
-                    st.success(text)
-                else:
-                    st.error(text)
-        if upload_tracker:
-            st.markdown("#### 正在上传")
-            st.caption("文件会在后台写入完成，不影响其他操作。关闭页面后后台仍会继续保存已传输的数据。")
-            for upload in upload_tracker.values():
-                stage_label = upload.get("stage") or ""
-                status_label = upload.get("status") or "queued"
-                progress_value = float(upload.get("progress") or 0.0)
-                name = upload.get("name") or "未命名文件"
-                progress_text = f"{name} · {stage_label} · {status_label}"
-                st.progress(progress_value, text=progress_text)
         upload_columns = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"apqp_one_click_uploader_{stage_name}_{session_id}"
@@ -635,32 +550,18 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         st.error("后台服务不可用，无法上传文件。")
                     else:
                         success = 0
-                        queued = 0
                         for file in uploaded_files:
                             resp = backend_client.upload_apqp_file(
                                 session_id, stage_slugs.get(stage_name, stage_name), file
                             )
-                            if isinstance(resp, dict) and resp.get("upload_id"):
-                                upload_tracker[resp["upload_id"]] = {
-                                    "status": resp.get("status", "queued"),
-                                    "progress": resp.get("progress", 0.0),
-                                    "name": resp.get("name") or file.name,
-                                    "stage": stage_name,
-                                    "path": resp.get("path"),
-                                }
-                                queued += 1
-                            elif isinstance(resp, dict) and resp.get("status") == "success":
+                            if isinstance(resp, dict) and resp.get("status") == "success":
                                 success += 1
                             else:
                                 detail = ""
                                 if isinstance(resp, dict):
                                     detail = str(resp.get("detail") or resp.get("message") or "")
                                 st.warning(f"上传 {file.name} 失败：{detail or resp}")
-                        if queued:
-                            st.session_state[upload_tracker_key] = upload_tracker
-                            st.success(f"已提交 {queued} 个上传任务到 {stage_name}，可继续操作页面。")
-                            st.rerun()
-                        elif success:
+                        if success:
                             st.success(f"已上传 {success} 个文件到 {stage_name}")
                             st.rerun()
 
@@ -671,7 +572,23 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     else:
                         st.write("暂无预设清单。")
 
+        st.info("提示：上传的文件会保存到您的专属目录，后续会自动解析并进行齐套性识别。")
+        if apqp_parsed_root:
+            st.caption(f"解析后的文本文件将保存至 `{apqp_parsed_root}`。")
 
+        classification_state_key = f"apqp_classification_summary_{session_id}"
+        turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
+        parse_job_state_key = f"apqp_one_click_job_id_{session_id}"
+        classify_job_state_key = f"apqp_one_click_classify_job_id_{session_id}"
+        elements_job_state_key = f"apqp_one_click_elements_job_id_{session_id}"
+        elements_fragment_state_key = f"apqp_one_click_elements_job_fragment_{session_id}"
+        elements_status_cache_key = f"{elements_fragment_state_key}_status"
+        elements_debug_cache_key = f"{elements_fragment_state_key}_details"
+        elements_result_state_key = f"apqp_one_click_elements_result_{session_id}"
+        elements_loaded_path_key = f"apqp_one_click_elements_loaded_{session_id}"
+        elements_source_state_key = f"apqp_one_click_elements_sources_{session_id}"
+        elements_result_cache_key = f"apqp_one_click_elements_result_cache_{session_id}"
+        elements_autorun_key = f"apqp_one_click_elements_autorun_{session_id}"
         pending_state_key = f"apqp_one_click_pending_{session_id}"
         classified_job_key = f"apqp_one_click_classified_job_{session_id}"
 
@@ -753,17 +670,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         st.error(f"继续失败：{resp}")
 
         if job_active and not job_paused:
-            pass
+            st.info("后台解析任务正在运行，稍后将自动更新进度。")
         elif job_paused:
             st.info("解析已暂停，可点击继续解析恢复。")
-        classification_summary = st.session_state.get(classification_state_key)
-        stage_options = []
-        if classification_summary:
-            stage_options = classification_summary.get("stage_order") or list(STAGE_ORDER)
-            if not stage_options:
-                stage_options = list(PHASE_TO_DELIVERABLES.keys())
-        parse_summary = (parse_status or {}).get("summary") if isinstance(parse_status, dict) else None
-
         if classify_button:
             with classify_log_container:
                 if not backend_ready or backend_client is None:
@@ -796,14 +705,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         st.rerun()
 
         pending_info = st.session_state.get(pending_state_key)
-
-        # placeholders to control ordering: overall bar shown above, but computed after elements bar sets ratio
-        overall_bar_container = classify_log_container.container()
-
-        # Reset elements progress denominator on each render of the bar
-        st.session_state[elements_progress_denominator_key] = 0
-        st.session_state[elements_progress_ratio_key] = 0.0
-
         with classify_log_container:
             def _status_progress_ratio(status: Optional[Dict[str, Any]]) -> float:
                 if not status:
@@ -815,12 +716,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
             def _render_job_bar(label: str, status: Optional[Dict[str, Any]]) -> None:
                 st.caption(label)
-                progress_val = 0.0
-                if status:
-                    progress_val = float(status.get("progress") or 0.0)
-                    if progress_val > 1.0:
-                        progress_val = progress_val / 100.0
-                    progress_val = max(0.0, min(progress_val, 1.0))
+                progress_val = _status_progress_ratio(status)
                 progress_pct = int(round(progress_val * 100))
                 bar_col, pct_col = st.columns([9, 1])
                 with bar_col:
@@ -831,153 +727,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             _render_job_bar("文件预处理进度", parse_status)
             _render_job_bar("齐套性检查进度", classify_status)
 
-            def _count_parsed_files(root: str) -> int:
-                try:
-                    total = 0
-                    for dirpath, _, filenames in os.walk(root):
-                        total += len([name for name in filenames if not name.startswith(".")])
-                    return total
-                except Exception:
-                    return 0
-
-            def _log_elements_api(action: str, source: str, detail: str) -> None:
-                """Log backend replies for elements API calls."""
-                log_dir = os.path.join(generated_root, "debug_logs")
-                os.makedirs(log_dir, exist_ok=True)
-                log_path = os.path.join(log_dir, "apqp_elements_api.log")
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                try:
-                    with open(log_path, "a", encoding="utf-8") as fh:
-                        fh.write(f"{ts} | session={session_id} | action={action} | source={source} | {detail}\n")
-                except Exception:
-                    # Silent failure.
-                    pass
-
-            def _render_elements_progress_bar() -> None:
-                st.caption("要素检查进度")
-
-                def _log_progress_change(progress: int, statuses: List[str]) -> None:
-                    """Append debug info to a temp log when the progress percentage changes."""
-                    log_dir = os.path.join(generated_root, "debug_logs")
-                    os.makedirs(log_dir, exist_ok=True)
-                    log_path = os.path.join(log_dir, "apqp_elements_progress.log")
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    try:
-                        with open(log_path, "a", encoding="utf-8") as fh:
-                            fh.write(
-                                f"{ts} | session={session_id} | progress={progress}% | statuses={statuses}\n"
-                            )
-                    except Exception:
-                        # Silent failure: logging must not break UI.
-                        pass
-
-                def _log_progress_diag(
-                    progress: int, statuses: List[str], jobs_count: int, expected_total: int, pre_done: int
-                ) -> None:
-                    """Log diagnostic info for elements progress calculation."""
-                    log_dir = os.path.join(generated_root, "debug_logs")
-                    os.makedirs(log_dir, exist_ok=True)
-                    log_path = os.path.join(log_dir, "apqp_elements_progress_diag.log")
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    try:
-                        with open(log_path, "a", encoding="utf-8") as fh:
-                            fh.write(
-                                f"{ts} | session={session_id} | pct={progress}% | jobs={jobs_count} | expected_total={expected_total} | skip_done={pre_done} | statuses={statuses}\n"
-                            )
-                    except Exception:
-                        pass
-
-                # Aggregate per-file statuses already rendered on the page
-                denom = st.session_state.get(elements_progress_denominator_key, 0)
-                scores: List[float] = []
-                pre_done = 0
-                for stage_name in stage_options or []:
-                    stage_slug = stage_slugs.get(stage_name, stage_name)
-                    stage_summary = (classification_summary.get("stages") or {}).get(stage_name, {})
-                    def _stage_encrypted(stage: str) -> set[str]:
-                        if not isinstance(parse_summary, dict):
-                            return set()
-                        return set(
-                            (parse_summary.get("stages") or {})
-                            .get(stage, {})
-                            .get("encrypted_files", [])
-                        )
-                    file_groups = _gather_stage_files(stage_summary, _stage_encrypted(stage_name))
-                    for group in file_groups:
-                        denom += 1
-                        if group.get("skip_reason"):
-                            pre_done += 1
-                            scores.append(1.0)
-                            continue
-                        label = group["label"]
-                        token = group["token"]
-                        stage_file_key = f"{stage_slug}_{token}"
-                        status_cache_key = f"{elements_status_cache_key}_{stage_file_key}"
-                        job_status = st.session_state.get(status_cache_key)
-                        status_val = str(job_status.get("status", "")).lower() if isinstance(job_status, dict) else ""
-                        progress_val = 0.0
-                        if isinstance(job_status, dict):
-                            raw = job_status.get("progress")
-                            if raw is not None:
-                                try:
-                                    raw_f = float(raw)
-                                    progress_val = raw_f / 100.0 if raw_f > 1.0 else raw_f
-                                except Exception:
-                                    progress_val = 0.0
-                        progress_val = max(0.0, min(progress_val, 1.0))
-
-                        if status_val in {"succeeded", "failed"}:
-                            scores.append(1.0)
-                        elif status_val in {"queued", "running", "paused"}:
-                            scores.append(progress_val if progress_val > 0 else 0.5)
-                        else:
-                            scores.append(progress_val)
-
-                if denom == 0:
-                    progress_ratio = 0.0
-                else:
-                    numerator = sum(scores)
-                    progress_ratio = numerator / denom
-                progress_ratio = max(0.0, min(progress_ratio, 1.0))
-                progress_pct = int(round(progress_ratio * 100))
-                st.session_state[elements_progress_ratio_key] = progress_ratio
-
-                last_pct = st.session_state.get(elements_progress_last_pct_key)
-                initial_logged = st.session_state.get(elements_progress_logged_initial_key)
-                if last_pct != progress_pct or not initial_logged:
-                    st.session_state[elements_progress_last_pct_key] = progress_pct
-                    _log_progress_change(progress_pct, [f"{s:.2f}" for s in scores])
-                    _log_progress_diag(progress_pct, [f"{s:.2f}" for s in scores], len(scores), denom, pre_done)
-                    st.session_state[elements_progress_logged_initial_key] = True
-
-                bar_col, pct_col = st.columns([9, 1])
-                with bar_col:
-                    st.progress(progress_ratio)
-                with pct_col:
-                    st.markdown(f"**{progress_pct}%**")
-
-            # Render elements progress bar directly under the other two bars
-            _render_elements_progress_bar()
-
-            # Now that elements ratio is set, render overall bar at the top placeholder
-            with overall_bar_container:
-                parse_ratio = _status_progress_ratio(parse_status)
-                classify_ratio = _status_progress_ratio(classify_status)
-                elements_ratio = float(st.session_state.get(elements_progress_ratio_key, 0.0))
-                overall_ratio = (parse_ratio + classify_ratio + elements_ratio) / 3.0
-                overall_pct = int(round(overall_ratio * 100))
-                st.caption("整体进度")
-                bar_col, pct_col = st.columns([9, 1])
-                with bar_col:
-                    st.progress(overall_ratio)
-                with pct_col:
-                    st.markdown(f"**{overall_pct}%**")
-
             display_status = active_status or classify_status or parse_status
             if display_status:
                 current_status = str(display_status.get("status"))
                 stage_label = display_status.get("stage") or "运行中"
-                # Suppress noisy stage/message banner
+                message = display_status.get("message") or "正在处理..."
+                st.info(f"{stage_label} · {message}")
                 logs = display_status.get("logs") or []
                 if logs:
                     last_log = logs[-1]
@@ -1026,7 +781,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         )
                         if isinstance(classify_resp, dict) and classify_resp.get("job_id"):
                             st.session_state[classify_job_state_key] = classify_resp.get("job_id")
-                            # Suppress extra info toast
                             st.rerun()
                         else:
                             detail = ""
@@ -1056,6 +810,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             overall_progress_placeholder = st.container()
             overall_progress_total = 0
             overall_progress_sum = 0.0
+
             elements_turbo = bool(classification_summary.get("turbo_mode"))
             elements_initial_results_dir = os.path.join(
                 generated_root, session_id, "APQP_one_click_check", "initial_results_element"
@@ -1064,7 +819,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             stage_options = classification_summary.get("stage_order") or list(STAGE_ORDER)
             if not stage_options:
                 stage_options = list(PHASE_TO_DELIVERABLES.keys())
-            parse_summary = (parse_status or {}).get("summary") if isinstance(parse_status, dict) else None
 
             if stage_options:
                 with st.expander("查看要素评估结果", expanded=False):
@@ -1082,6 +836,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     )
                     parse_summary = (parse_status or {}).get("summary") if isinstance(parse_status, dict) else None
 
+                    ui_counts = {"total": 0, "done": 0, "running": 0, "pending": 0}
+
                     def _stage_encrypted(stage: str) -> set[str]:
                         if not isinstance(parse_summary, dict):
                             return set()
@@ -1090,8 +846,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             .get(stage, {})
                             .get("encrypted_files", [])
                         )
-
-                    ui_counts = {"total": 0, "done": 0, "running": 0, "pending": 0}
 
                     for stage_name in stage_options:
                         stage_slug = stage_slugs.get(stage_name, stage_name)
@@ -1142,11 +896,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                 stored_elements_job = st.session_state.get(job_state_key)
                                 if stored_elements_job:
                                     resp = backend_client.get_file_elements_job(stored_elements_job)
-                                    _log_elements_api(
-                                        "get",
-                                        f"file_panel:{stage_slug}:{label}",
-                                        f"job_id={stored_elements_job}; resp={repr(resp)}",
-                                    )
                                     if isinstance(resp, dict) and resp.get("job_id"):
                                         elements_job_status = resp
                                     elif isinstance(resp, dict) and resp.get("detail") == "未找到任务":
@@ -1156,11 +905,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
                                 if elements_job_status is None:
                                     resp = backend_client.list_file_elements_jobs(session_id)
-                                    _log_elements_api(
-                                        "list",
-                                        f"file_panel:{stage_slug}:{label}",
-                                        f"resp={repr(resp)}",
-                                    )
                                     if isinstance(resp, list) and resp:
                                         for status in resp:
                                             if not isinstance(status, dict):
@@ -1193,10 +937,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                         "profile": _profile_to_payload(profile),
                                         "source_paths": source_paths,
                                         "turbo_mode": elements_turbo,
-                                        "metadata": {
-                                            "stage": profile.stage if profile else stage_name,
-                                            "source_file": label,
-                                        },
                                         "initial_results_dir": elements_initial_results_dir,
                                         "result_root_dir": os.path.join(
                                             generated_root, session_id, "APQP_one_click_check"
@@ -1351,6 +1091,11 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     )
                 else:
                     st.info("后台服务未连接，无法获取进度。")
+
+        if job_active:
+            st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")
+            time.sleep(3)
+            st.rerun()
 
     with col_info:
         _render_apqp_file_lists_fragment(
