@@ -690,7 +690,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             parse_error = classify_error = "后台服务未连接"
 
         active_status = classify_status if (classify_status and classify_status.get("status") in {"queued", "running", "paused"}) else parse_status
-        status_str = str(active_status.get("status")) if active_status else ""
+        status_str = str(active_status.get("status") or "").lower() if active_status else ""
         job_paused = status_str == "paused"
         job_active = status_str in {"queued", "running", "paused"}
 
@@ -976,7 +976,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
             display_status = active_status or classify_status or parse_status
             if display_status:
-                current_status = str(display_status.get("status"))
+                current_status = str(display_status.get("status") or "").lower()
+                succeeded_states = {"succeeded", "success"}
                 stage_label = display_status.get("stage") or "运行中"
                 # Suppress noisy stage/message banner
                 logs = display_status.get("logs") or []
@@ -998,10 +999,10 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     err = display_status.get("error") or display_status.get("message") or "任务失败"
                     st.error(err)
                     st.session_state.pop(pending_state_key, None)
-                elif current_status == "succeeded":
+                elif current_status in succeeded_states:
                     if (
                         classify_status
-                        and classify_status.get("status") == "succeeded"
+                        and str(classify_status.get("status") or "").lower() in succeeded_states
                         and st.session_state.get(classified_job_key) != classify_status.get("job_id")
                     ):
                         checkpoint = (classify_status.get("metadata") or {}).get("checkpoint") or {}
