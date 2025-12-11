@@ -790,6 +790,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             "turbo_mode": selected_turbo,
                         }
                         st.session_state.pop(classification_state_key, None)
+                        st.session_state.pop(classify_job_state_key, None)
                         st.session_state.pop(classified_job_key, None)
                         st.session_state[parse_job_state_key] = job_id
                         st.success("已提交后台解析任务，稍后将自动更新进度并分类。")
