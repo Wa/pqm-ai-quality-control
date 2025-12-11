@@ -856,10 +856,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             token = group["token"]
                             stage_file_key = f"{stage_slug}_{token}"
                             overall_progress_total += 1
+                            progress_bucket = 0.0
                             st.markdown(f"##### 文件：{label}")
                             if group.get("skip_reason"):
-                                overall_progress_sum += 1.0
+                                progress_bucket = 1.0
                                 st.warning(group.get("skip_reason"))
+                                overall_progress_sum += progress_bucket
                                 continue
 
                             source_paths = group.get("sources") or []
@@ -967,12 +969,16 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                     st.progress(progress_ratio)
                                 with pct_col:
                                     st.markdown(f"**{progress_pct}%**")
-                                if status_value in {"succeeded", "failed"}:
-                                    overall_progress_sum += 1.0
-                                elif status_value in {"queued", "running"}:
-                                    overall_progress_sum += progress_ratio
                             else:
                                 progress_ratio = 0.0
+
+                            terminal_statuses = {"succeeded", "failed", "error", "cancelled", "canceled"}
+                            started_statuses = {"queued", "running"}
+                            if status_value in terminal_statuses:
+                                progress_bucket = 1.0
+                            elif status_value in started_statuses or elements_job_status:
+                                progress_bucket = 0.5
+                            overall_progress_sum += progress_bucket
 
                             table_key = _compose_table_key(
                                 stage_name, f"{profile_label or (profile.name if profile else '')}::{label}"
