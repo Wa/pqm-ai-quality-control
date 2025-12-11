@@ -1847,29 +1847,23 @@ async def list_files(session_id: str, file_type: str = None):
         raise HTTPException(status_code=500, detail=f"List files failed: {str(e)}")
 
 
-def _persist_apqp_upload(upload_id: str, upload_file: UploadFile, target_path: str) -> None:
-    """Write an uploaded APQP file to disk while tracking progress."""
+def _persist_apqp_upload(upload_id: str, temp_path: str, target_path: str, total_size: int) -> None:
+    """Write an uploaded APQP file (already spooled to temp) to disk while tracking progress."""
 
     try:
-        _update_apqp_upload(upload_id, status="processing", progress=0.0)
+        _update_apqp_upload(
+            upload_id,
+            status="processing",
+            progress=0.0,
+            total_size=total_size,
+        )
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-
-        try:
-            upload_file.file.seek(0, os.SEEK_END)
-            total_size = upload_file.file.tell()
-        except Exception:
-            total_size = 0
-        finally:
-            try:
-                upload_file.file.seek(0)
-            except Exception:
-                pass
 
         copied = 0
         chunk_size = 1024 * 1024
-        with open(target_path, "wb") as buffer:
+        with open(temp_path, "rb") as source, open(target_path, "wb") as buffer:
             while True:
-                chunk = upload_file.file.read(chunk_size)
+                chunk = source.read(chunk_size)
                 if not chunk:
                     break
                 buffer.write(chunk)
@@ -1894,7 +1888,7 @@ def _persist_apqp_upload(upload_id: str, upload_file: UploadFile, target_path: s
         _update_apqp_upload(upload_id, status="error", error=str(error))
     finally:
         try:
-            upload_file.file.close()
+            os.remove(temp_path)
         except Exception:
             pass
 
@@ -1916,6 +1910,20 @@ async def apqp_upload_file(
     target_path = os.path.join(target_dir, file.filename)
 
     upload_id = str(uuid4())
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_path = temp_file.name
+            total_size = temp_file.tell()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"上传文件失败：{exc}")
+    finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+
     _record_apqp_upload(
         upload_id,
         {
@@ -1925,10 +1933,17 @@ async def apqp_upload_file(
             "session_id": session_id,
             "name": file.filename,
             "path": target_path,
+            "total_size": total_size,
         },
     )
 
-    background_tasks.add_task(_persist_apqp_upload, upload_id, file, target_path)
+    background_tasks.add_task(
+        _persist_apqp_upload,
+        upload_id,
+        temp_path,
+        target_path,
+        total_size,
+    )
 
     return {
         "status": "accepted",
