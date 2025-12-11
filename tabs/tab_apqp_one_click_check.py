@@ -707,18 +707,29 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         pending_info = st.session_state.get(pending_state_key)
         with classify_log_container:
             display_status = active_status or classify_status or parse_status
-            if display_status:
-                current_status = str(display_status.get("status"))
-                progress_val = float(display_status.get("progress") or 0.0)
-                progress_pct = int(progress_val * 100)
+
+            def _render_job_progress(label: str, status: Dict[str, Any]) -> None:
+                progress_val = float(status.get("progress") or 0.0)
+                progress_ratio = progress_val / 100.0 if progress_val > 1.0 else progress_val
+                progress_ratio = max(0.0, min(progress_ratio, 1.0))
+                progress_pct = int(round(progress_ratio * 100))
+                st.caption(label)
                 bar_col, pct_col = st.columns([9, 1])
                 with bar_col:
-                    st.progress(progress_val)
+                    st.progress(progress_ratio)
                 with pct_col:
                     st.markdown(f"**{progress_pct}%**")
-                stage_label = display_status.get("stage") or "运行中"
-                message = display_status.get("message") or "正在处理..."
-                st.info(f"{stage_label} · {message}")
+                stage_label = status.get("stage") or "运行中"
+                message = status.get("message") or "正在处理..."
+                st.caption(f"{stage_label} · {message}")
+
+            if parse_status:
+                _render_job_progress("📄 解析进度", parse_status)
+            if classify_status:
+                _render_job_progress("✅ 齐套性识别进度", classify_status)
+
+            if display_status:
+                current_status = str(display_status.get("status"))
                 logs = display_status.get("logs") or []
                 if logs:
                     last_log = logs[-1]
