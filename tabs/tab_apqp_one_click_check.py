@@ -540,6 +540,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
     elements_progress_logged_initial_key = f"apqp_one_click_elements_progress_logged_initial_{session_id}"
     elements_progress_denominator_key = f"apqp_one_click_elements_progress_den_{session_id}"
     elements_progress_ratio_key = f"apqp_one_click_elements_progress_ratio_{session_id}"
+    upload_tracker_key = f"apqp_one_click_uploads_{session_id}"
     if not st.session_state.get(log_reset_key):
         os.makedirs(debug_log_dir, exist_ok=True)
         for fname in [
@@ -562,8 +563,35 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.session_state.pop(key, None)
         st.session_state[log_reset_key] = True
 
+    upload_tracker: Dict[str, Dict[str, Any]] = st.session_state.setdefault(upload_tracker_key, {})
+
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
+
+    finished_uploads: List[str] = []
+    upload_messages: List[Tuple[str, str]] = []
+    if backend_ready and backend_client and upload_tracker:
+        for upload_id, info in list(upload_tracker.items()):
+            status_resp = backend_client.get_apqp_upload_status(upload_id)
+            if isinstance(status_resp, dict) and status_resp.get("status"):
+                upload_tracker[upload_id].update(status_resp)
+                state = status_resp.get("status")
+                if state in {"completed", "error"}:
+                    finished_uploads.append(upload_id)
+                    name = status_resp.get("name") or info.get("name") or upload_id
+                    if state == "completed":
+                        upload_messages.append(("success", f"{name} 上传完成"))
+                    else:
+                        detail = status_resp.get("error") or status_resp.get("detail")
+                        upload_messages.append(("error", f"{name} 上传失败：{detail}"))
+            else:
+                upload_messages.append(("error", f"上传 {info.get('name', upload_id)} 状态获取失败"))
+                finished_uploads.append(upload_id)
+
+    for upload_id in finished_uploads:
+        upload_tracker.pop(upload_id, None)
+    if finished_uploads:
+        st.session_state[upload_tracker_key] = upload_tracker
 
     col_main, col_info = st.columns([2, 1])
 
@@ -576,6 +604,22 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             "• 第2步：右侧可以查看、确认或删除已上传文件。  \n"
             "• 第3步：文件分类与齐套性自动分析功能正在开发中，敬请期待。"
         )
+        if upload_messages:
+            for level, text in upload_messages:
+                if level == "success":
+                    st.success(text)
+                else:
+                    st.error(text)
+        if upload_tracker:
+            st.markdown("#### 正在上传")
+            st.caption("文件会在后台写入完成，不影响其他操作。关闭页面后后台仍会继续保存已传输的数据。")
+            for upload in upload_tracker.values():
+                stage_label = upload.get("stage") or ""
+                status_label = upload.get("status") or "queued"
+                progress_value = float(upload.get("progress") or 0.0)
+                name = upload.get("name") or "未命名文件"
+                progress_text = f"{name} · {stage_label} · {status_label}"
+                st.progress(progress_value, text=progress_text)
         upload_columns = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"apqp_one_click_uploader_{stage_name}_{session_id}"
@@ -591,18 +635,32 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         st.error("后台服务不可用，无法上传文件。")
                     else:
                         success = 0
+                        queued = 0
                         for file in uploaded_files:
                             resp = backend_client.upload_apqp_file(
                                 session_id, stage_slugs.get(stage_name, stage_name), file
                             )
-                            if isinstance(resp, dict) and resp.get("status") == "success":
+                            if isinstance(resp, dict) and resp.get("upload_id"):
+                                upload_tracker[resp["upload_id"]] = {
+                                    "status": resp.get("status", "queued"),
+                                    "progress": resp.get("progress", 0.0),
+                                    "name": resp.get("name") or file.name,
+                                    "stage": stage_name,
+                                    "path": resp.get("path"),
+                                }
+                                queued += 1
+                            elif isinstance(resp, dict) and resp.get("status") == "success":
                                 success += 1
                             else:
                                 detail = ""
                                 if isinstance(resp, dict):
                                     detail = str(resp.get("detail") or resp.get("message") or "")
                                 st.warning(f"上传 {file.name} 失败：{detail or resp}")
-                        if success:
+                        if queued:
+                            st.session_state[upload_tracker_key] = upload_tracker
+                            st.success(f"已提交 {queued} 个上传任务到 {stage_name}，可继续操作页面。")
+                            st.rerun()
+                        elif success:
                             st.success(f"已上传 {success} 个文件到 {stage_name}")
                             st.rerun()
 

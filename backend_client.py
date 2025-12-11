@@ -52,7 +52,23 @@ class BackendClient:
         try:
             files = {"file": (file_obj.name, file_obj, getattr(file_obj, "type", None) or "application/octet-stream")}
             data = {"session_id": session_id, "stage": stage}
-            response = requests.post(f"{self.base_url}/apqp-one-click/upload", files=files, data=data, timeout=60)
+            response = requests.post(
+                f"{self.base_url}/apqp-one-click/upload",
+                files=files,
+                data=data,
+                timeout=60,
+            )
+            return response.json()
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_apqp_upload_status(self, upload_id: str) -> Dict:
+        """Fetch the latest status for a background APQP upload."""
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/apqp-one-click/upload/status/{upload_id}", timeout=10
+            )
             return response.json()
         except Exception as e:
             return {"status": "error", "message": str(e)}

@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 import tempfile
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from ollama import Client as OllamaClient
 import pandas as pd
@@ -85,6 +85,26 @@ JOB_DEFINITIONS = {
         "label": "APQP一键分类",
     },
 }
+
+# Track long-running APQP uploads so the frontend can poll progress.
+_APQP_UPLOAD_STATUS: Dict[str, Dict[str, Any]] = {}
+_APQP_UPLOAD_LOCK = Lock()
+
+
+def _record_apqp_upload(upload_id: str, payload: Dict[str, Any]) -> None:
+    with _APQP_UPLOAD_LOCK:
+        _APQP_UPLOAD_STATUS[upload_id] = payload
+
+
+def _update_apqp_upload(upload_id: str, **fields: Any) -> None:
+    with _APQP_UPLOAD_LOCK:
+        if upload_id in _APQP_UPLOAD_STATUS:
+            _APQP_UPLOAD_STATUS[upload_id].update(fields)
+
+
+def _get_apqp_upload(upload_id: str) -> Optional[Dict[str, Any]]:
+    with _APQP_UPLOAD_LOCK:
+        return dict(_APQP_UPLOAD_STATUS.get(upload_id, {}))
 
 
 def _job_label(job_type: str) -> str:
@@ -1827,13 +1847,60 @@ async def list_files(session_id: str, file_type: str = None):
         raise HTTPException(status_code=500, detail=f"List files failed: {str(e)}")
 
 
+def _persist_apqp_upload(upload_id: str, temp_path: str, target_path: str, total_size: int) -> None:
+    """Write an uploaded APQP file (already spooled to temp) to disk while tracking progress."""
+
+    try:
+        _update_apqp_upload(
+            upload_id,
+            status="processing",
+            progress=0.0,
+            total_size=total_size,
+        )
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        copied = 0
+        chunk_size = 1024 * 1024
+        with open(temp_path, "rb") as source, open(target_path, "wb") as buffer:
+            while True:
+                chunk = source.read(chunk_size)
+                if not chunk:
+                    break
+                buffer.write(chunk)
+                copied += len(chunk)
+                if total_size:
+                    _update_apqp_upload(
+                        upload_id,
+                        progress=min(1.0, copied / float(total_size)),
+                        bytes_written=copied,
+                        total_size=total_size,
+                    )
+
+        _update_apqp_upload(
+            upload_id,
+            status="completed",
+            progress=1.0,
+            bytes_written=copied,
+            total_size=total_size or copied,
+            path=target_path,
+        )
+    except Exception as error:
+        _update_apqp_upload(upload_id, status="error", error=str(error))
+    finally:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+
 @app.post("/apqp-one-click/upload")
 async def apqp_upload_file(
+    background_tasks: BackgroundTasks,
     session_id: str = Form(...),
     stage: str = Form(...),
     file: UploadFile = File(...),
 ):
-    """Upload an APQP file to the specified stage directory."""
+    """Upload an APQP file to the specified stage directory asynchronously."""
 
     layout = _apqp_stage_layout(session_id)
     stages = _normalize_apqp_stages(layout, [stage])
@@ -1842,18 +1909,59 @@ async def apqp_upload_file(
     os.makedirs(target_dir, exist_ok=True)
     target_path = os.path.join(target_dir, file.filename)
 
+    upload_id = str(uuid4())
+
     try:
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"上传失败: {error}")
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_path = temp_file.name
+            total_size = temp_file.tell()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"上传文件失败：{exc}")
+    finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+
+    _record_apqp_upload(
+        upload_id,
+        {
+            "status": "queued",
+            "progress": 0.0,
+            "stage": stage_name,
+            "session_id": session_id,
+            "name": file.filename,
+            "path": target_path,
+            "total_size": total_size,
+        },
+    )
+
+    background_tasks.add_task(
+        _persist_apqp_upload,
+        upload_id,
+        temp_path,
+        target_path,
+        total_size,
+    )
 
     return {
-        "status": "success",
+        "status": "accepted",
         "stage": stage_name,
         "path": target_path,
         "name": file.filename,
+        "upload_id": upload_id,
     }
+
+
+@app.get("/apqp-one-click/upload/status/{upload_id}")
+async def apqp_upload_status(upload_id: str):
+    """Return the current status of an APQP file upload."""
+
+    status = _get_apqp_upload(upload_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="未找到上传任务")
+    return status
 
 
 @app.get("/apqp-one-click/files/{session_id}")
