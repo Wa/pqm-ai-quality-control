@@ -84,6 +84,13 @@ JOB_DEFINITIONS = {
     },
 }
 
+# Maximum number of concurrent jobs per session for each job type.
+# Defaults to 1 when a job type is not listed.
+MAX_CONCURRENT_JOBS = {
+    # Allow multiple file element checks to run in parallel during the one-click flow.
+    "file_elements": 5,
+}
+
 
 def _job_label(job_type: str) -> str:
     return JOB_DEFINITIONS.get(job_type, {}).get("label", job_type)
@@ -459,13 +466,19 @@ def _start_job(
 
     _prune_jobs()
     with jobs_lock:
-        for record in jobs.values():
-            if (
-                record.session_id == session_id
-                and record.job_type == job_type
-                and record.status in {"queued", "running"}
-            ):
-                raise HTTPException(status_code=409, detail=f"已有{_job_label(job_type)}任务正在运行")
+        max_concurrent = MAX_CONCURRENT_JOBS.get(job_type, 1)
+        active_jobs = [
+            record
+            for record in jobs.values()
+            if record.session_id == session_id
+            and record.job_type == job_type
+            and record.status in {"queued", "running"}
+        ]
+        if len(active_jobs) >= max_concurrent:
+            raise HTTPException(
+                status_code=409,
+                detail=f"已有{len(active_jobs)}个{_job_label(job_type)}任务正在运行（最多允许 {max_concurrent} 个）",
+            )
         job_id = uuid4().hex
         record = JobRecord(job_id=job_id, session_id=session_id, job_type=job_type)
         record.stage = "queued"
