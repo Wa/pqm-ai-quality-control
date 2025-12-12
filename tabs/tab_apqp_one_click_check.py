@@ -728,6 +728,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             if classify_status:
                 _render_job_progress("✅ 齐套性识别进度", classify_status)
 
+            # Overall elements progress bar placeholder lives near the job progress bars
+            overall_progress_placeholder = st.container()
+
             if display_status:
                 current_status = str(display_status.get("status"))
                 logs = display_status.get("logs") or []
@@ -806,7 +809,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             st.divider()
             st.subheader("🧩 交付物要素自动评估")
 
-            overall_progress_placeholder = st.container()
             overall_progress_total = 0
             overall_progress_sum = 0.0
 
@@ -1076,6 +1078,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 st.info("暂无阶段可选，无法发起要素评估。")
 
             with overall_progress_placeholder:
+                st.caption("齐套性检查进度")
                 if overall_progress_total > 0:
                     overall_ratio = overall_progress_sum / overall_progress_total
                     overall_ratio = max(0.0, min(overall_ratio, 1.0))
