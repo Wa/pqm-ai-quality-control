@@ -572,10 +572,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     else:
                         st.write("暂无预设清单。")
 
-        st.info("提示：上传的文件会保存到您的专属目录，后续会自动解析并进行齐套性识别。")
-        if apqp_parsed_root:
-            st.caption(f"解析后的文本文件将保存至 `{apqp_parsed_root}`。")
-
         classification_state_key = f"apqp_classification_summary_{session_id}"
         turbo_state_key = f"apqp_one_click_turbo_mode_{session_id}"
         parse_job_state_key = f"apqp_one_click_job_id_{session_id}"
@@ -669,9 +665,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     else:
                         st.error(f"继续失败：{resp}")
 
-        if job_active and not job_paused:
-            st.info("后台解析任务正在运行，稍后将自动更新进度。")
-        elif job_paused:
+        if job_paused:
             st.info("解析已暂停，可点击继续解析恢复。")
         if classify_button:
             with classify_log_container:
@@ -706,9 +700,13 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
 
         pending_info = st.session_state.get(pending_state_key)
         with classify_log_container:
+            overall_triplet_placeholder = st.container()
+            parse_ratio: float = 0.0
+            classify_ratio: float = 0.0
+            elements_ratio: float = 0.0
             display_status = active_status or classify_status or parse_status
 
-            def _render_job_progress(label: str, status: Dict[str, Any]) -> None:
+            def _render_job_progress(label: str, status: Dict[str, Any]) -> float:
                 progress_val = float(status.get("progress") or 0.0)
                 progress_ratio = progress_val / 100.0 if progress_val > 1.0 else progress_val
                 progress_ratio = max(0.0, min(progress_ratio, 1.0))
@@ -719,14 +717,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     st.progress(progress_ratio)
                 with pct_col:
                     st.markdown(f"**{progress_pct}%**")
-                stage_label = status.get("stage") or "运行中"
-                message = status.get("message") or "正在处理..."
-                st.caption(f"{stage_label} · {message}")
+                return progress_ratio
 
             if parse_status:
-                _render_job_progress("📄 解析进度", parse_status)
+                parse_ratio = _render_job_progress("文件预处理进度", parse_status)
             if classify_status:
-                _render_job_progress("✅ 齐套性识别进度", classify_status)
+                classify_ratio = _render_job_progress("齐套性检查进度", classify_status)
 
             # Overall elements progress bar placeholder lives near the job progress bars
             overall_progress_placeholder = st.container()
@@ -735,10 +731,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 current_status = str(display_status.get("status"))
                 logs = display_status.get("logs") or []
                 if logs:
-                    last_log = logs[-1]
-                    st.caption(
-                        f"{last_log.get('ts', '')} [{last_log.get('level', '')}] {last_log.get('message', '')}"
-                    )
                     with st.expander("点击查看后台日志", expanded=False):
                         for entry in logs[-100:]:
                             if not isinstance(entry, dict):
@@ -763,7 +755,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         if summary:
                             st.session_state[classification_state_key] = summary
                             st.session_state[classified_job_key] = classify_status.get("job_id")
-                            st.success("分类完成，结果如下。")
                         else:
                             st.success("分类完成，可在结果文件夹查看详情。")
                         st.session_state.pop(pending_state_key, None)
@@ -782,7 +773,6 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             )
                         if isinstance(classify_resp, dict) and classify_resp.get("job_id"):
                             st.session_state[classify_job_state_key] = classify_resp.get("job_id")
-                            st.info("已启动分类任务，稍后将更新进度…")
                             st.rerun()
                         else:
                             detail = ""
@@ -802,15 +792,19 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         classification_summary = st.session_state.get(classification_state_key)
         if classification_summary:
             st.divider()
-            st.subheader("🤖 LLM 文件归类与齐套性判断")
+            st.subheader("齐套性检查结果")
             with st.expander("查看齐套性判断结果", expanded=False):
                 _render_classification_results(classification_summary)
 
             st.divider()
-            st.subheader("🧩 交付物要素自动评估")
+            st.subheader("要素检查结果")
+            elements_status_summary_placeholder = st.empty()
 
             overall_progress_total = 0
             overall_progress_sum = 0.0
+            not_started_count = 0
+            in_progress_count = 0
+            completed_count = 0
 
             elements_turbo = bool(classification_summary.get("turbo_mode"))
             elements_initial_results_dir = os.path.join(
@@ -873,6 +867,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             st.markdown(f"##### 文件：{label}")
                             if group.get("skip_reason"):
                                 progress_bucket = 1.0
+                                completed_count += 1
                                 st.warning(group.get("skip_reason"))
                                 overall_progress_sum += progress_bucket
                                 continue
@@ -989,8 +984,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             started_statuses = {"queued", "running"}
                             if status_value in terminal_statuses:
                                 progress_bucket = 1.0
+                                completed_count += 1
                             elif status_value in started_statuses or elements_job_status:
                                 progress_bucket = 0.5
+                                in_progress_count += 1
+                            else:
+                                not_started_count += 1
                             overall_progress_sum += progress_bucket
 
                             table_key = _compose_table_key(
@@ -1078,10 +1077,11 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 st.info("暂无阶段可选，无法发起要素评估。")
 
             with overall_progress_placeholder:
-                st.caption("齐套性检查进度")
+                st.caption("要素检查进度")
                 if overall_progress_total > 0:
                     overall_ratio = overall_progress_sum / overall_progress_total
                     overall_ratio = max(0.0, min(overall_ratio, 1.0))
+                    elements_ratio = overall_ratio
                     bar_col, pct_col = st.columns([9, 1])
                     with bar_col:
                         st.progress(overall_ratio)
@@ -1089,9 +1089,26 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                         st.markdown(f"**{int(round(overall_ratio * 100))}%**")
                 else:
                     st.caption("暂无要素评估任务进度。")
+                    elements_ratio = 0.0
+
+            elements_status_summary_placeholder.markdown(
+                f"{overall_progress_total}个交付物，未开始：{not_started_count}个，进行中：{in_progress_count}个，已完成：{completed_count}个"
+            )
+
+        # Render overall mean progress bar above the three bars
+        if overall_triplet_placeholder:
+            # Always average over all three bars to avoid denominator drift
+            mean_ratio = (parse_ratio + classify_ratio + elements_ratio) / 3.0
+            mean_ratio = max(0.0, min(mean_ratio, 1.0))
+            with overall_triplet_placeholder:
+                st.caption("整体进度")
+                bar_col, pct_col = st.columns([9, 1])
+                with bar_col:
+                    st.progress(mean_ratio)
+                with pct_col:
+                    st.markdown(f"**{int(round(mean_ratio * 100))}%**")
 
         if job_active:
-            st.caption("页面将在 3 秒后自动刷新以更新后台任务进度…")
             time.sleep(3)
             st.rerun()
 
