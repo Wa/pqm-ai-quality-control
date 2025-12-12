@@ -737,8 +737,12 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
         upload_columns = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"apqp_one_click_uploader_{stage_name}_{session_id}"
+            uploader_reset_key = f"{uploader_key}_reset"
             column = upload_columns[index % len(upload_columns)]
             with column:
+                if st.session_state.get(uploader_reset_key):
+                    st.session_state.pop(uploader_key, None)
+                    st.session_state[uploader_reset_key] = False
                 uploaded_files = st.file_uploader(
                     f"上传{stage_name}文件",
                     accept_multiple_files=True,
@@ -755,7 +759,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                             uploaded_files=uploaded_files,
                             backend_client=backend_client,
                         )
-                        st.session_state[uploader_key] = None
+                        st.session_state[uploader_reset_key] = True
                         st.rerun()
 
                 requirements = STAGE_REQUIREMENTS.get(stage_name, ())
