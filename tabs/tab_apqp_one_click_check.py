@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import pandas as pd
 import streamlit as st
 
 from backend_client import get_backend_client, is_backend_available
@@ -805,11 +806,46 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             not_started_count = 0
             in_progress_count = 0
             completed_count = 0
+            aggregate_rows: List[Dict[str, object]] = []
+            aggregate_exports: Dict[str, str] = {}
 
             elements_turbo = bool(classification_summary.get("turbo_mode"))
             elements_initial_results_dir = os.path.join(
                 generated_root, session_id, "APQP_one_click_check", "initial_results_element"
             )
+            final_individual_results_dir = os.path.join(
+                generated_root, session_id, "APQP_one_click_check", "final_individual_results_completeness"
+            )
+            final_results_dir = os.path.join(generated_root, session_id, "APQP_one_click_check", "final_results")
+            os.makedirs(final_individual_results_dir, exist_ok=True)
+            os.makedirs(final_results_dir, exist_ok=True)
+            aggregate_timestamp_label = classification_summary.get("timestamp_label") or datetime.utcnow().strftime(
+                "%Y%m%d_%H%M%S"
+            )
+            aggregate_timestamp = re.sub(r"[^0-9_]", "", str(aggregate_timestamp_label)) or datetime.utcnow().strftime(
+                "%Y%m%d_%H%M%S"
+            )
+
+            def _result_to_rows(result: EvaluationResult) -> List[Dict[str, object]]:
+                rows: List[Dict[str, object]] = []
+                for item in result.evaluations:
+                    rows.append(
+                        {
+                            "阶段": result.profile.stage,
+                            "交付物": result.profile.name,
+                            "文件名": result.source_file or "",
+                            "生成时间": result.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "要素": item.requirement.name,
+                            "严重度": SEVERITY_LABELS.get(item.severity, item.severity),
+                            "状态": "已满足" if item.status == "pass" else "待补充",
+                            "当前判断": item.message,
+                            "整改指导": item.requirement.guidance,
+                            "要素描述": item.requirement.description,
+                            "检测关键字": item.keyword or "",
+                            "上下文摘录": item.snippet or "",
+                        }
+                    )
+                return rows
             os.makedirs(elements_initial_results_dir, exist_ok=True)
             stage_options = classification_summary.get("stage_order") or list(STAGE_ORDER)
             if not stage_options:
@@ -932,9 +968,7 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                         "source_paths": source_paths,
                                         "turbo_mode": elements_turbo,
                                         "initial_results_dir": elements_initial_results_dir,
-                                        "result_root_dir": os.path.join(
-                                            generated_root, session_id, "APQP_one_click_check"
-                                        ),
+                                        "result_root_dir": final_individual_results_dir,
                                     }
                                     response = backend_client.start_file_elements_job(payload)
                                     if isinstance(response, dict) and response.get("job_id"):
@@ -1073,6 +1107,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                                     )
                             else:
                                 st.caption("完成评估后将在此展示要素覆盖情况与整改建议。")
+
+                            if active_result:
+                                aggregate_rows.extend(_result_to_rows(active_result))
             else:
                 st.info("暂无阶段可选，无法发起要素评估。")
 
@@ -1090,6 +1127,35 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                 else:
                     st.caption("暂无要素评估任务进度。")
                     elements_ratio = 0.0
+
+            if aggregate_rows:
+                df = pd.DataFrame(aggregate_rows)
+                aggregate_csv_path = os.path.join(final_results_dir, f"要素检查结果_{aggregate_timestamp}.csv")
+                aggregate_xlsx_path = os.path.join(final_results_dir, f"要素检查结果_{aggregate_timestamp}.xlsx")
+                df.to_csv(aggregate_csv_path, index=False, encoding="utf-8-sig")
+                df.to_excel(aggregate_xlsx_path, index=False, sheet_name="要素检查结果")
+                aggregate_exports = {"csv": aggregate_csv_path, "xlsx": aggregate_xlsx_path}
+
+            if aggregate_exports:
+                summary_cols = st.columns(2)
+                with summary_cols[0]:
+                    st.download_button(
+                        "📥 导出汇总CSV",
+                        data=_load_file_bytes(aggregate_exports.get("csv") or "") or b"",
+                        file_name=os.path.basename(aggregate_exports.get("csv") or "要素检查结果.csv"),
+                        mime="text/csv",
+                        disabled=not aggregate_exports.get("csv"),
+                        key=f"apqp_elements_summary_csv_{session_id}",
+                    )
+                with summary_cols[1]:
+                    st.download_button(
+                        "📥 导出汇总Excel",
+                        data=_load_file_bytes(aggregate_exports.get("xlsx") or "") or b"",
+                        file_name=os.path.basename(aggregate_exports.get("xlsx") or "要素检查结果.xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=not aggregate_exports.get("xlsx"),
+                        key=f"apqp_elements_summary_xlsx_{session_id}",
+                    )
 
             elements_status_summary_placeholder.markdown(
                 f"{overall_progress_total}个交付物，未开始：{not_started_count}个，进行中：{in_progress_count}个，已完成：{completed_count}个"
