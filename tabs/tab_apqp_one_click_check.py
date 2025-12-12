@@ -1,15 +1,18 @@
 """Streamlit UI for the APQP one-click deliverable check (upload management phase)."""
 from __future__ import annotations
 
+import io
 import os
 import re
 import shutil
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from backend_client import get_backend_client, is_backend_available
 from config import CONFIG
@@ -60,6 +63,196 @@ def _truncate_filename(filename: str, max_length: int = 40) -> str:
     if available <= 0:
         return filename[: max_length - 3] + "..."
     return name[:available] + "..." + ext
+
+
+def _format_upload_status(status: str) -> str:
+    mapping = {
+        "queued": "⏳ 排队中",
+        "uploading": "🚀 上传中",
+        "success": "✅ 已完成",
+        "error": "⚠️ 失败",
+    }
+    return mapping.get(status, status or "未知状态")
+
+
+_UPLOAD_LOCK = threading.Lock()
+
+
+def _get_upload_tracker_key(session_id: str) -> str:
+    return f"apqp_one_click_uploads_{session_id}"
+
+
+def _ensure_upload_tracker(session_id: str) -> Dict[str, Dict[str, Any]]:
+    key = _get_upload_tracker_key(session_id)
+    if key not in st.session_state:
+        st.session_state[key] = {}
+    return st.session_state[key]
+
+
+def _update_upload_status(
+    *,
+    session_id: str,
+    task_id: str,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    started_at: Optional[float] = None,
+    finished_at: Optional[float] = None,
+) -> None:
+    tracker_key = _get_upload_tracker_key(session_id)
+    with _UPLOAD_LOCK:
+        tracker = st.session_state.get(tracker_key, {})
+        task = tracker.get(task_id, {})
+        if status is not None:
+            task["status"] = status
+        if message is not None:
+            task["message"] = message
+        if started_at is not None:
+            task["started_at"] = started_at
+        if finished_at is not None:
+            task["finished_at"] = finished_at
+        task["updated_at"] = time.time()
+        tracker[task_id] = task
+        st.session_state[tracker_key] = tracker
+
+
+def _prune_upload_history(session_id: str, *, ttl_seconds: int = 900, max_entries: int = 30) -> None:
+    tracker_key = _get_upload_tracker_key(session_id)
+    tracker = st.session_state.get(tracker_key, {})
+    now = time.time()
+
+    removable: List[str] = []
+    if len(tracker) > max_entries:
+        sorted_tasks = sorted(tracker.items(), key=lambda item: item[1].get("started_at", 0))
+        removable.extend([task_id for task_id, _ in sorted_tasks[: len(tracker) - max_entries]])
+
+    for task_id, info in tracker.items():
+        if info.get("status") in {"success", "error"} and now - info.get("updated_at", now) > ttl_seconds:
+            removable.append(task_id)
+
+    if removable:
+        with _UPLOAD_LOCK:
+            tracker = st.session_state.get(tracker_key, {})
+            for task_id in removable:
+                tracker.pop(task_id, None)
+            st.session_state[tracker_key] = tracker
+
+
+def _upload_worker(
+    *,
+    session_id: str,
+    stage_slug: str,
+    file_name: str,
+    file_bytes: bytes,
+    backend_client,
+    task_id: str,
+):
+    file_buffer = io.BytesIO(file_bytes)
+    file_buffer.name = file_name
+    _update_upload_status(
+        session_id=session_id,
+        task_id=task_id,
+        status="uploading",
+        started_at=time.time(),
+        message="文件上传中……",
+    )
+
+    try:
+        resp = backend_client.upload_apqp_file(session_id, stage_slug, file_buffer)
+        if isinstance(resp, dict) and resp.get("status") == "success":
+            _update_upload_status(
+                session_id=session_id,
+                task_id=task_id,
+                status="success",
+                message="文件已上传。",
+                finished_at=time.time(),
+            )
+        else:
+            detail = ""
+            if isinstance(resp, dict):
+                detail = str(resp.get("detail") or resp.get("message") or "")
+            _update_upload_status(
+                session_id=session_id,
+                task_id=task_id,
+                status="error",
+                message=detail or str(resp),
+                finished_at=time.time(),
+            )
+    except Exception as exc:  # noqa: BLE001
+        _update_upload_status(
+            session_id=session_id,
+            task_id=task_id,
+            status="error",
+            message=str(exc),
+            finished_at=time.time(),
+        )
+
+
+def _enqueue_uploads(
+    *,
+    session_id: str,
+    stage_name: str,
+    stage_slug: str,
+    uploaded_files: Sequence[Any],
+    backend_client,
+) -> None:
+    tracker = _ensure_upload_tracker(session_id)
+    for file in uploaded_files:
+        file_bytes = file.getvalue()
+        task_id = f"{int(time.time() * 1000)}_{file.name}"
+        tracker[task_id] = {
+            "stage": stage_name,
+            "stage_slug": stage_slug,
+            "file_name": file.name,
+            "size": getattr(file, "size", len(file_bytes)),
+            "status": "queued",
+            "message": "等待上传……",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        }
+        upload_thread = threading.Thread(
+            target=_upload_worker,
+            kwargs={
+                "session_id": session_id,
+                "stage_slug": stage_slug,
+                "file_name": file.name,
+                "file_bytes": file_bytes,
+                "backend_client": backend_client,
+                "task_id": task_id,
+            },
+            daemon=True,
+        )
+        add_script_run_ctx(upload_thread)
+        upload_thread.start()
+
+    st.session_state[_get_upload_tracker_key(session_id)] = tracker
+    st.toast(f"已开始上传 {len(uploaded_files)} 个文件到 {stage_name}，可继续其他操作。", icon="🚀")
+
+
+def _render_upload_tracker(session_id: str) -> None:
+    tracker = st.session_state.get(_get_upload_tracker_key(session_id), {})
+    if not tracker:
+        return
+
+    st.markdown("#### 上传进度")
+    entries = sorted(tracker.values(), key=lambda item: item.get("started_at", 0), reverse=True)
+    has_active = False
+    for entry in entries:
+        cols = st.columns([5, 2, 2])
+        cols[0].write(f"📄 {entry.get('file_name')}")
+        cols[1].caption(
+            f"{entry.get('stage')} · {_format_file_size(int(entry.get('size') or 0))}"
+        )
+        status = str(entry.get("status"))
+        message = entry.get("message") or ""
+        if status in {"queued", "uploading"}:
+            has_active = True
+        cols[2].write(f"{_format_upload_status(status)}")
+        if message:
+            st.caption(message)
+
+    if has_active:
+        st.caption("上传在后台进行，您可以继续操作或关闭页面。需要时点击下方按钮刷新状态。")
+        st.button("刷新上传状态", key=f"apqp_refresh_uploads_{session_id}")
 
 
 def _recover_apqp_job_status(backend_client, session_id: str, job_state_key: str, job_type: str):
@@ -525,6 +718,9 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
     backend_ready = is_backend_available()
     backend_client = get_backend_client() if backend_ready else None
 
+    _ensure_upload_tracker(session_id)
+    _prune_upload_history(session_id)
+
     col_main, col_info = st.columns([2, 1])
 
     with col_main:
@@ -536,6 +732,8 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
             "• 第2步：右侧可以查看、确认或删除已上传文件。  \n"
             "• 第3步：文件分类与齐套性自动分析功能正在开发中，敬请期待。"
         )
+        _render_upload_tracker(session_id)
+
         upload_columns = st.columns(2)
         for index, stage_name in enumerate(STAGE_ORDER):
             uploader_key = f"apqp_one_click_uploader_{stage_name}_{session_id}"
@@ -550,21 +748,15 @@ def render_apqp_one_click_check_tab(session_id: Optional[str]) -> None:
                     if not backend_ready or backend_client is None:
                         st.error("后台服务不可用，无法上传文件。")
                     else:
-                        success = 0
-                        for file in uploaded_files:
-                            resp = backend_client.upload_apqp_file(
-                                session_id, stage_slugs.get(stage_name, stage_name), file
-                            )
-                            if isinstance(resp, dict) and resp.get("status") == "success":
-                                success += 1
-                            else:
-                                detail = ""
-                                if isinstance(resp, dict):
-                                    detail = str(resp.get("detail") or resp.get("message") or "")
-                                st.warning(f"上传 {file.name} 失败：{detail or resp}")
-                        if success:
-                            st.success(f"已上传 {success} 个文件到 {stage_name}")
-                            st.rerun()
+                        _enqueue_uploads(
+                            session_id=session_id,
+                            stage_name=stage_name,
+                            stage_slug=stage_slugs.get(stage_name, stage_name),
+                            uploaded_files=uploaded_files,
+                            backend_client=backend_client,
+                        )
+                        st.session_state[uploader_key] = None
+                        st.rerun()
 
                 requirements = STAGE_REQUIREMENTS.get(stage_name, ())
                 with st.expander(f"{stage_name}应交付物清单", expanded=False):
